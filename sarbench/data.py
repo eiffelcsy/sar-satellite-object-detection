@@ -40,8 +40,7 @@ def _holdout(rows, split, val_fraction, seed):
     random.Random(seed).shuffle(order)
     n_val = int(len(rows) * val_fraction)
     val = set(order[:n_val])
-    keep = (i not in val) if split == 'train' else (i in val)
-    return [row for i, row in enumerate(rows) if keep]
+    return [row for i, row in enumerate(rows) if (i not in val) == (split == 'train')]
 
 
 def split_available(root, split):
