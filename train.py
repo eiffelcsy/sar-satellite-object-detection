@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 
 from sarbench.adapters import add_adapters
 from sarbench.backbones import build_backbone
+from sarbench.channels import PseudoRGB
 from sarbench.config import DEFAULTS, load_config
 from sarbench.data import SARMultiTask, collate, split_available, to_original_xywh
 from sarbench.metrics import classification_metrics, detection_metrics
@@ -53,8 +54,12 @@ def parse_args(argv=None):
     p.add_argument('--out', type=Path, default=Path(cfg['out']))
     p.add_argument('--preprocess', action='store_true', default=cfg['preprocess'],
                    help='SAR-BM3D despeckling + dB log transform + percentile clipping before the network')
+    p.add_argument('--pseudo-rgb', action='store_true', default=cfg['pseudo_rgb'],
+                   help='DINOv3 input: 1-channel SAR -> 3 channels (amplitude, despeckled base, edge map)')
+    p.add_argument('--edge', choices=['sobel', 'highpass'], default=cfg['edge'],
+                   help='with --pseudo-rgb: the channel-3 high-frequency map (default: sobel)')
     p.add_argument('--no-despeckle', action='store_true', default=cfg['no_despeckle'],
-                   help='with --preprocess: skip SAR-BM3D despeckling')
+                   help='with --preprocess/--pseudo-rgb: skip SAR-BM3D despeckling')
     p.add_argument('--no-log-transform', action='store_true', default=cfg['no_log_transform'],
                    help='with --preprocess: skip the dB transform')
     p.add_argument('--clip-percentile', type=float, default=cfg['clip_percentile'],
@@ -76,6 +81,7 @@ def parse_args(argv=None):
     # Backbone/PEFT parameters come from the config; drop them if the CLI swapped in another backbone/method.
     args.backbone_kwargs = dict(cfg['backbone_kwargs']) if args.backbone == cfg['backbone'] else {}
     args.peft_kwargs = dict(cfg['peft_kwargs']) if args.adapt == cfg['adapt'] else {}
+    args.peft_targets = list(cfg['peft_targets']) if (args.adapt == cfg['adapt'] and cfg['peft_targets']) else None
     if args.init == 'scratch' and args.adapt != 'full':
         p.error('--init scratch is only valid with --adapt full')
     if args.backbone_lr is None:
@@ -110,7 +116,14 @@ def start_wandb(args, run_dir):
 
 
 def build_preprocess(args):
-    """The SAR pre-processing pipeline, or None when --preprocess is off."""
+    """The image pre-processing, or None when both --preprocess and --pseudo-rgb are off.
+
+    `--pseudo-rgb` builds the three DINOv3 channels; `--preprocess` is the SAR-BM3D + dB pipeline.
+    """
+    if args.pseudo_rgb:
+        return PseudoRGB(despeckle=not args.no_despeckle, edge=args.edge,
+                         clip_percentile=args.clip_percentile, sigma=args.bm3d_sigma,
+                         profile=args.bm3d_profile, threads=args.bm3d_threads)
     if not args.preprocess:
         return None
     return SARPreprocess(despeckle=not args.no_despeckle, log=not args.no_log_transform,
@@ -195,8 +208,8 @@ def main():
     run = start_wandb(args, run_dir)
 
     # Data
-    if args.preprocess and args.preprocess_cache is None:
-        log('--preprocess without --preprocess-cache: SAR-BM3D runs every epoch (slow); '
+    if (args.preprocess or args.pseudo_rgb) and args.preprocess_cache is None:
+        log('--preprocess/--pseudo-rgb without --preprocess-cache: SAR-BM3D runs every epoch (slow); '
             'pass --preprocess-cache DIR to compute it once', log_file)
     train_loader, val_loader = make_loader(args, 'train'), make_loader(args, 'val')
     test_loader = make_loader(args, 'test') if split_available(args.data, 'test') else None
@@ -205,7 +218,10 @@ def main():
 
     # Model: adapters are created on the CPU, so they are added before .cuda()
     backbone = build_backbone(args.backbone, pretrained=args.init == 'pretrained', **args.backbone_kwargs)
-    add_adapters(backbone, args.adapt, **args.peft_kwargs)  # 'full' is a no-op; adapters also freeze the backbone
+    if args.pseudo_rgb and backbone.in_chans != 3:
+        raise SystemExit(f'--pseudo-rgb builds 3 channels but backbone {args.backbone!r} expects '
+                         f'{backbone.in_chans}; use a 3-channel backbone (e.g. dinov3).')
+    add_adapters(backbone, args.adapt, targets=args.peft_targets, **args.peft_kwargs)  # 'full' is a no-op
     model = MultiTaskModel(backbone, task_routing=args.adapt == 'moelora').cuda()
     parameters = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

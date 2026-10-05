@@ -22,17 +22,34 @@ loss = cross-entropy + the four Faster R-CNN losses
   `facebook/dinov3-vitb16-pretrain-lvd1689m` (~86 M). The configuration is set in `configs/dinov3_*.yaml`;
   `model_name` can be swapped for `facebook/dinov3-vits16-pretrain-lvd1689m` (lighter) or
   `facebook/dinov3-vitl16-pretrain-sat493m` (satellite, ~303 M, over the parameter budget). DINOv3 weights
-  are gated: accept the licence and `huggingface-cli login`. The single gray channel is repeated to RGB, and
-  the LoRA/MoE-LoRA adapters wrap the separate `q_proj` / `k_proj` / `v_proj` / `o_proj` attention layers.
+  are gated: accept the licence and `huggingface-cli login`.
+  Adapting DINOv3 uses its separate `q_proj` / `k_proj` / `v_proj` (the "qkv_proj") and `o_proj` ("out_proj")
+  attention layers plus the `up_proj` / `down_proj` MLP layers (fc1/fc2), selected by the config's
+  `peft.targets: [attn, mlp]`. `configs/dinov3_lora.yaml` uses r = 32, alpha = 32.
+
+**Pseudo-RGB input (`preprocess.pseudo_rgb`, DINOv3 configs).** Instead of repeating the gray channel to the
+three channels DINOv3 expects, `sarbench/channels.py` assembles three complementary [0, 1] representations:
+
+1. normalized amplitude — the intensity image with its dynamic range stretched (`sigma_clip`);
+2. despeckled base — SAR-BM3D, or a Gaussian blur when `despeckle: false`;
+3. edge map — the Sobel gradient magnitude of the base (or a Gaussian high-pass with `edge: highpass`).
+
+The assembly is an ordinary pre-processing callable, so `--preprocess-cache` caches the SAR-BM3D pass across
+epochs; `configs/dinov3_*.yaml` set `cache: preprocess_cache`. Adding `pseudo_rgb` with a non-3-channel
+backbone (e.g. the ViT) is rejected at startup. With `pseudo_rgb: false` DINOv3 falls back to repeating the
+single gray channel to RGB.
 
 **Adaptation** (set in the config's `peft.method`):
 
 - `full`: every backbone weight trains.
-- `lora`: the backbone is frozen; the attention projections of every block get
-  `y = W x + (alpha / r) B A x`, with r = 16 and alpha = 32 (0.88 M trainable backbone parameters for the ViT).
+- `lora`: the backbone is frozen; the selected projections get `y = W x + (alpha / r) B A x`, with r = 16 and
+  alpha = 32 for ViT/TerraMind (0.88 M trainable backbone parameters for the ViT).
 - `moelora`: as `lora`, but the rank-16 update is split into 4 experts of rank 4 (alpha = 8, so alpha / r = 2
   as in `lora`), mixed per token by a softmax router. Each task has its own router (1.03 M trainable backbone
   parameters for the ViT).
+- `peft.targets` (optional): which module groups a backbone exposes for adaptation. ViT/TerraMind have only
+  `attn` (their `qkv`/`proj`); DINOv3 supports `attn` (q/k/v/o_proj) and `mlp` (up/down_proj, fc1/fc2).
+  `configs/dinov3_lora.yaml` sets `[attn, mlp]`; without it, only attention is adapted.
 
 Both registries are plain dicts (`sarbench/backbones.py`, `sarbench/adapters.py`): add a new backbone with
 `@register_backbone('name')` (exposing `embed_dim`, `blocks`, `adapter_targets()` and a token forward) or a
@@ -58,7 +75,8 @@ Every run also trains the 20.1 M parameters of the heads (neck, RPN, RoI heads, 
   Objects are small (median box 15.9 px at 512 px), so the smallest anchors are 8 px, on the stride-4 level.
   Predicted boxes are mapped back to original pixels before COCO scoring.
 - **Normalization.** Images are read as one gray channel. Both backbones get the same mean and std
-  (0.2526, 0.2133), computed over the 9,392 train images at 512 px.
+  (0.2526, 0.2133), computed over the 9,392 train images at 512 px. DINOv3 with pseudo-RGB instead receives
+  its three [0, 1] channels directly, without this gray-level normalization.
 - **Precision rule.** Backbone, neck and classification head run in bf16; the RPN and RoI heads run in fp32.
   torchvision's box coder casts anchors to the dtype of the regression output, and bf16 numbers between 256
   and 512 are 2 px apart: too coarse for objects of 6-15 px. Importing terratorch (`sarbench/backbones.py` does, for

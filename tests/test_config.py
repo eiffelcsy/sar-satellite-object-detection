@@ -24,10 +24,13 @@ def test_scratch_config():
     assert cfg['backbone'] == 'terramind' and cfg['init'] == 'scratch' and cfg['adapt'] == 'full'
 
 
-def test_dinov3_config_selects_the_checkpoint():
+def test_dinov3_config_selects_the_checkpoint_and_lora_location():
     cfg = load_config(CONFIGS / 'dinov3_lora.yaml')
     assert cfg['backbone'] == 'dinov3'
     assert cfg['backbone_kwargs']['model_name'].startswith('facebook/dinov3')
+    assert cfg['peft_targets'] == ['attn', 'mlp']  # q/k/v + o_proj and the MLP fc1/fc2
+    assert cfg['peft_kwargs'] == {'rank': 32, 'alpha': 32}
+    assert cfg['pseudo_rgb'] is True and cfg['edge'] == 'sobel'  # 1-channel SAR -> 3-channel DINOv3 input
 
 
 def test_every_config_loads():

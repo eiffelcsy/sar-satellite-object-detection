@@ -60,11 +60,12 @@ class MoELoRA(nn.Module):
         return self.base(x) + self.scale * self.up(self.down(x) * gates)
 
 
-def add_adapters(backbone, kind, **params):
-    """Freeze the backbone, then wrap every attention projection returned by `backbone.adapter_targets()`.
+def add_adapters(backbone, kind, targets=None, **params):
+    """Freeze the backbone, then wrap the projections selected by `backbone.adapter_targets(targets)`.
 
-    kind: 'full' (no adapter, the backbone keeps training), 'lora' or 'moelora'. `params` are forwarded to the
-    adapter constructor (rank, alpha, ...).
+    kind: 'full' (no adapter, the backbone keeps training), 'lora' or 'moelora'. `targets` is the list of
+    backbone-specific module groups to adapt (e.g. ['attn', 'mlp']; a new backbone documents its groups in
+    `adapter_targets`). `params` are forwarded to the adapter constructor (rank, alpha, ...).
     """
     if kind == 'full':
         return
@@ -72,7 +73,8 @@ def add_adapters(backbone, kind, **params):
         raise ValueError(f"unknown adapter '{kind}'; available: full, {sorted(ADAPTERS)}")
     adapter = ADAPTERS[kind]
     backbone.requires_grad_(False)
-    for parent, name in backbone.adapter_targets():
+    pairs = backbone.adapter_targets(targets) if targets is not None else backbone.adapter_targets()
+    for parent, name in pairs:
         setattr(parent, name, adapter(getattr(parent, name), **params))
 
 

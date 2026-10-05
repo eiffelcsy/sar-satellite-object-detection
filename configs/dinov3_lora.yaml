@@ -1,5 +1,13 @@
 # DINOv3 ViT-B/16 (Meta) + LoRA.
 #
+# LoRA location (peft.targets): attention q/k/v (the "qkv_proj") and o_proj ("out_proj") of every block, plus
+# the MLP up_proj/down_proj (fc1/fc2; gate_proj is included too when the MLP is gated). r = 32, alpha = 32
+# gives the domain-shift capacity; r = 16, alpha = 32 also works.
+#
+# Pseudo-RGB input (preprocess.pseudo_rgb): the 1-channel SAR image is expanded to the 3 channels DINOv3
+# expects -- amplitude, despeckled base (SAR-BM3D), Sobel edge map -- instead of repeating the gray channel.
+# `cache` caches the SAR-BM3D pass across epochs (delete the directory to recompute).
+#
 # The DINOv3 weights are gated on Hugging Face: accept the licence on the model page
 # (https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m) and run `huggingface-cli login` once.
 #
@@ -18,5 +26,11 @@ backbone:
 peft:
   method: lora
   params:
-    rank: 16
+    rank: 32
     alpha: 32
+  targets: [attn, mlp]
+preprocess:
+  pseudo_rgb: true
+  edge: sobel        # sobel | highpass
+  despeckle: true    # SAR-BM3D for channel 2; false falls back to a Gaussian blur
+  cache: preprocess_cache

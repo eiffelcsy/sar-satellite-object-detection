@@ -12,3 +12,8 @@ peft:
     experts: 4
     rank: 4
     alpha: 8
+  targets: [attn, mlp]
+preprocess:
+  pseudo_rgb: true
+  edge: sobel
+  cache: preprocess_cache

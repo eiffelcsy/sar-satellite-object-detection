@@ -9,5 +9,9 @@ backbone:
     model_name: facebook/dinov3-vitb16-pretrain-lvd1689m
 peft:
   method: full
+preprocess:
+  pseudo_rgb: true
+  edge: sobel
+  cache: preprocess_cache
 train:
   backbone_lr: 0.00002

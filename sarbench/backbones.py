@@ -32,12 +32,15 @@ class ViT(nn.Module):
         self.vit = timm.create_model(timm_name, pretrained=pretrained, img_size=img_size,
                                      in_chans=in_chans, num_classes=0)
         self.embed_dim = self.vit.embed_dim
+        self.in_chans = in_chans
 
     @property
     def blocks(self):
         return self.vit.blocks
 
-    def adapter_targets(self):
+    def adapter_targets(self, groups=('attn',)):
+        if 'attn' not in groups:
+            return []
         return [(blk.attn, name) for blk in self.blocks for name in ('qkv', 'proj')]
 
     def forward(self, x):
@@ -54,12 +57,15 @@ class TerraMind(nn.Module):
         self.terramind = BACKBONE_REGISTRY.build('terratorch_terramind_v1_base', pretrained=pretrained,
                                                  modalities=['S1GRD'])
         self.embed_dim = 768
+        self.in_chans = 1  # a single gray channel, repeated to VV/VH inside forward
 
     @property
     def blocks(self):
         return self.terramind.encoder
 
-    def adapter_targets(self):
+    def adapter_targets(self, groups=('attn',)):
+        if 'attn' not in groups:
+            return []
         return [(blk.attn, name) for blk in self.blocks for name in ('qkv', 'proj')]
 
     def forward(self, x):
@@ -96,9 +102,17 @@ class DINOv3(nn.Module):
     def blocks(self):
         return self._layers
 
-    def adapter_targets(self):
-        return [(layer.attention, name) for layer in self.blocks
-                for name in ('q_proj', 'k_proj', 'v_proj', 'o_proj')]
+    def adapter_targets(self, groups=('attn',)):
+        """`groups` selects where adapters go: 'attn' = q_proj/k_proj/v_proj/o_proj ('qkv_proj'/'out_proj'),
+        'mlp' = up_proj/down_proj (fc1/fc2; gate_proj/up_proj/down_proj when the MLP is gated)."""
+        targets = []
+        for layer in self.blocks:
+            if 'attn' in groups:
+                targets += [(layer.attention, name) for name in ('q_proj', 'k_proj', 'v_proj', 'o_proj')]
+            if 'mlp' in groups:
+                targets += [(layer.mlp, name) for name in ('gate_proj', 'up_proj', 'down_proj')
+                            if hasattr(layer.mlp, name)]
+        return targets
 
     def forward(self, x):
         if x.shape[1] != self.in_chans:  # gray -> the pretrained RGB channel count

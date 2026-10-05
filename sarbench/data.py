@@ -53,9 +53,16 @@ def split_available(root, split):
         and (Path(root) / 'detection' / f'instances_{split}.json').exists()
 
 
+def _as_image_tensor(arr):
+    """A pre-processed (H, W) or (C, H, W) array -> a (1, H, W) or (C, H, W) float32 image tensor."""
+    tensor = torch.from_numpy(np.ascontiguousarray(arr).astype(np.float32, copy=False))
+    return tensor.unsqueeze(0) if tensor.ndim == 2 else tensor
+
+
 class SARMultiTask(Dataset):
-    """One item is (image [1, size, size], label 0..8, target), target = {'boxes': XYXY on the
-    resized image, 'labels': 1..9, 'image_id': COCO id, 'orig_size': (h, w)}."""
+    """One item is (image [C, size, size], label 0..8, target), target = {'boxes': XYXY on the
+    resized image, 'labels': 1..9, 'image_id': COCO id, 'orig_size': (h, w)}; C is 1, or 3 for the
+    DINOv3 pseudo-RGB pre-processing."""
 
     def __init__(self, root, split, train=False, size=512, limit=None, val_fraction=0.1, seed=0,
                  preprocess=None, cache_dir=None):
@@ -108,18 +115,19 @@ class SARMultiTask(Dataset):
 
     def _preprocessed(self, image, file_name):
         """Despeckle/normalise the image, reusing an on-disk cache when `cache_dir` is set
-        (the first pass pays for the SAR-BM3D cost, later epochs are a fast .npy load)."""
+        (the first pass pays for the SAR-BM3D cost, later epochs are a fast .npy load). The pre-processing
+        callable may return one channel (H, W) or several (C, H, W), e.g. the DINOv3 pseudo-RGB assembly."""
         if self.cache_dir is not None:
             path = self.cache_dir / f'{Path(file_name).stem}__{self.preprocess.cache_key()}.npy'
             if path.exists():
-                return torch.from_numpy(np.load(path)).unsqueeze(0)
+                return _as_image_tensor(np.load(path))
         arr = self.preprocess(np.asarray(image, dtype=np.float32) / 255.0)
         if self.cache_dir is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
             np.save(tmp, arr)
             tmp.replace(path)
-        return torch.from_numpy(np.ascontiguousarray(arr)).unsqueeze(0)
+        return _as_image_tensor(np.ascontiguousarray(arr))
 
     def __getitem__(self, i):
         row = self.rows[i]

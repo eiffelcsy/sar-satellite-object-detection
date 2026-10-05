@@ -64,6 +64,31 @@ def test_lora_tokens_do_not_depend_on_task(name):
     assert torch.equal(task0, task1)
 
 
+def test_add_adapters_respects_the_configured_target_groups():
+    """The YAML's peft.targets selects which module groups a backbone exposes for adaptation."""
+    class Stub(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.qkv = nn.Linear(8, 8)
+            self.mlp = nn.Linear(8, 8)
+            self.embed_dim = 8
+
+        def adapter_targets(self, groups=None):
+            groups = groups or ('attn',)
+            targets = []
+            if 'attn' in groups:
+                targets.append((self, 'qkv'))
+            if 'mlp' in groups:
+                targets.append((self, 'mlp'))
+            return targets
+
+    backbone = Stub()
+    add_adapters(backbone, 'lora', targets=['attn', 'mlp'])
+    assert isinstance(backbone.qkv, LoRA) and isinstance(backbone.mlp, LoRA)
+    assert not backbone.qkv.base.weight.requires_grad  # the frozen base stays frozen
+    assert backbone.qkv.down.weight.requires_grad
+
+
 def test_moelora_is_a_gated_sum_of_lora_experts():
     """The stacked down/up layers compute y = W x + (alpha / r) * sum_e g_e(x) B_e A_e x."""
     # 3 experts of rank 2 (unequal, so mixing up the two axes fails); alpha / r = 2

@@ -12,11 +12,14 @@ Schema (only `backbone` and `peft` are required):
     peft:
       method: lora                 # full | lora | moelora
       params: {rank: 16, alpha: 32}  # forwarded to the adapter constructor
+      targets: [attn, mlp]         # optional; backbone module groups to adapt (default: the backbone's own)
     train: {epochs: 24, batch_size: 16, lr: 1.0e-4, backbone_lr: null, weight_decay: 0.05,
             eval_every: 4, workers: 8, seed: 0}
     data: {root: null, val_fraction: 0.1, limit: null}
-    preprocess: {enabled: false, despeckle: true, log: true, clip_percentile: 0.5, cache: null,
-                 bm3d_sigma: null, bm3d_profile: np, bm3d_threads: 1}
+    preprocess: {enabled: false, pseudo_rgb: false, edge: sobel, despeckle: true, log: true,
+                 clip_percentile: 0.5, cache: null, bm3d_sigma: null, bm3d_profile: np, bm3d_threads: 1}
+                 # pseudo_rgb: DINOv3 input (amplitude + despeckled base + Sobel/high-pass edges) -> 3 channels;
+                 # edge: sobel | highpass. Mutually exclusive with `enabled` (plain SARPreprocess).
     output: {dir: runs, wandb: false, wandb_project: sar-satellite-object-detection, wandb_run_name: null}
 """
 from pathlib import Path
@@ -28,6 +31,7 @@ DEFAULTS = {
     'adapt': 'full',
     'backbone_kwargs': {},
     'peft_kwargs': {},
+    'peft_targets': None,
     'name': None,
     'epochs': 24,
     'batch_size': 16,
@@ -42,6 +46,8 @@ DEFAULTS = {
     'limit': None,
     'out': 'runs',
     'preprocess': False,
+    'pseudo_rgb': False,
+    'edge': 'sobel',
     'no_despeckle': False,
     'no_log_transform': False,
     'clip_percentile': 0.5,
@@ -78,6 +84,7 @@ def load_config(path):
         peft = {'method': peft}
     config['adapt'] = peft.get('method', config['adapt'])
     config['peft_kwargs'] = dict(peft.get('params') or {})
+    config['peft_targets'] = list(peft['targets']) if peft.get('targets') else None
 
     if raw.get('name') is not None:
         config['name'] = raw['name']
@@ -95,6 +102,10 @@ def load_config(path):
     preprocess = raw.get('preprocess') or {}
     if 'enabled' in preprocess:
         config['preprocess'] = bool(preprocess['enabled'])
+    if 'pseudo_rgb' in preprocess:
+        config['pseudo_rgb'] = bool(preprocess['pseudo_rgb'])
+    if 'edge' in preprocess:
+        config['edge'] = preprocess['edge']
     if 'despeckle' in preprocess:
         config['no_despeckle'] = not preprocess['despeckle']
     if 'log' in preprocess:
