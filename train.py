@@ -15,6 +15,7 @@ from sarbench.backbones import build_backbone
 from sarbench.data import SARMultiTask, collate, split_available, to_original_xywh
 from sarbench.metrics import classification_metrics, detection_metrics
 from sarbench.model import MultiTaskModel
+from sarbench.preprocess import SARPreprocess
 
 
 def parse_args():
@@ -35,6 +36,19 @@ def parse_args():
                    help='course data only: fraction of train held out for validation')
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--out', type=Path, default=Path('runs'))
+    p.add_argument('--preprocess', action='store_true',
+                   help='SAR-BM3D despeckling + dB log transform + percentile clipping before the network')
+    p.add_argument('--no-despeckle', action='store_true', help='with --preprocess: skip SAR-BM3D despeckling')
+    p.add_argument('--no-log-transform', action='store_true', help='with --preprocess: skip the dB transform')
+    p.add_argument('--clip-percentile', type=float, default=0.5,
+                   help='with --preprocess: %% of brightest pixels clipped before scaling to [0, 1]')
+    p.add_argument('--preprocess-cache', type=Path,
+                   help='with --preprocess: cache pre-processed images here (first pass fills it)')
+    p.add_argument('--bm3d-sigma', type=float,
+                   help='log-speckle std for SAR-BM3D (default: estimated per image)')
+    p.add_argument('--bm3d-profile', default='np',
+                   help='bm3d package profile (np, refilter, vn, high, deb)')
+    p.add_argument('--bm3d-threads', type=int, default=1, help='bm3d package threads per worker')
     p.add_argument('--wandb', action='store_true', help='log loss/metric curves to Weights & Biases')
     p.add_argument('--wandb-project', default='sar-satellite-object-detection')
     p.add_argument('--wandb-run-name', help='defaults to <backbone>_<init>_<adapt>')
@@ -67,11 +81,21 @@ def start_wandb(args, run_dir):
                       dir=str(run_dir), config=config)
 
 
+def build_preprocess(args):
+    """The SAR pre-processing pipeline, or None when --preprocess is off."""
+    if not args.preprocess:
+        return None
+    return SARPreprocess(despeckle=not args.no_despeckle, log=not args.no_log_transform,
+                         clip_percentile=args.clip_percentile, sigma=args.bm3d_sigma,
+                         profile=args.bm3d_profile, threads=args.bm3d_threads)
+
+
 def make_loader(args, split):
     """Batches of `split`; only the training set is shuffled and augmented."""
     train = split == 'train'
     dataset = SARMultiTask(args.data, split, train=train, limit=args.limit,
-                           val_fraction=args.val_fraction, seed=args.seed)
+                           val_fraction=args.val_fraction, seed=args.seed,
+                           preprocess=build_preprocess(args), cache_dir=args.preprocess_cache)
     return DataLoader(dataset, args.batch_size, shuffle=train, num_workers=args.workers, collate_fn=collate,
                       persistent_workers=train and args.workers > 0)  # training workers live across epochs
 
@@ -143,6 +167,9 @@ def main():
     run = start_wandb(args, run_dir)
 
     # Data
+    if args.preprocess and args.preprocess_cache is None:
+        log('--preprocess without --preprocess-cache: SAR-BM3D runs every epoch (slow); '
+            'pass --preprocess-cache DIR to compute it once', log_file)
     train_loader, val_loader = make_loader(args, 'train'), make_loader(args, 'val')
     test_loader = make_loader(args, 'test') if split_available(args.data, 'test') else None
     if test_loader is None:

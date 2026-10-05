@@ -10,10 +10,12 @@ Two folder layouts are supported:
 """
 import csv
 import json
+import os
 import random
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
@@ -55,7 +57,8 @@ class SARMultiTask(Dataset):
     """One item is (image [1, size, size], label 0..8, target), target = {'boxes': XYXY on the
     resized image, 'labels': 1..9, 'image_id': COCO id, 'orig_size': (h, w)}."""
 
-    def __init__(self, root, split, train=False, size=512, limit=None, val_fraction=0.1, seed=0):
+    def __init__(self, root, split, train=False, size=512, limit=None, val_fraction=0.1, seed=0,
+                 preprocess=None, cache_dir=None):
         self.root = Path(root)
         self.image_dir = None
         train_dir = _course_train_dir(self.root) if split in ('train', 'val') else None
@@ -81,14 +84,19 @@ class SARMultiTask(Dataset):
         for ann in coco['annotations']:
             self.annotations[ann['image_id']].append(ann)
         flips = [v2.RandomHorizontalFlip(), v2.RandomVerticalFlip()] if train else []
-        self.transform = v2.Compose([
+        steps = [
             v2.ToImage(),
             v2.ConvertBoundingBoxFormat('XYXY'),  # COCO [x, y, w, h] -> [x1, y1, x2, y2]
             v2.Resize((size, size)),  # stretches non-square images; boxes are scaled with the pixels
             *flips,  # overhead imagery has no canonical "up"
             v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize([MEAN], [STD]),
-        ])
+        ]
+        # Pre-processing already returns a [0, 1] image, so the raw-pixel MEAN/STD no longer apply.
+        if preprocess is None:
+            steps.append(v2.Normalize([MEAN], [STD]))
+        self.transform = v2.Compose(steps)
+        self.preprocess = preprocess
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
 
     def __len__(self):
         return len(self.rows)
@@ -98,6 +106,21 @@ class SARMultiTask(Dataset):
             return self.root / file_name
         return self.image_dir / Path(file_name).name  # labels.csv may include the images/ prefix
 
+    def _preprocessed(self, image, file_name):
+        """Despeckle/normalise the image, reusing an on-disk cache when `cache_dir` is set
+        (the first pass pays for the SAR-BM3D cost, later epochs are a fast .npy load)."""
+        if self.cache_dir is not None:
+            path = self.cache_dir / f'{Path(file_name).stem}__{self.preprocess.cache_key()}.npy'
+            if path.exists():
+                return torch.from_numpy(np.load(path)).unsqueeze(0)
+        arr = self.preprocess(np.asarray(image, dtype=np.float32) / 255.0)
+        if self.cache_dir is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+            np.save(tmp, arr)
+            tmp.replace(path)
+        return torch.from_numpy(np.ascontiguousarray(arr)).unsqueeze(0)
+
     def __getitem__(self, i):
         row = self.rows[i]
         info = self.coco_images.get(row['file_name']) or self.coco_images[Path(row['file_name']).name]
@@ -106,6 +129,8 @@ class SARMultiTask(Dataset):
         boxes = tv_tensors.BoundingBoxes([a['bbox'] for a in anns], format='XYWH', canvas_size=orig_size,
                                          dtype=torch.float32)  # integer boxes would be truncated by Resize
         image = Image.open(self._image_path(row['file_name'])).convert('L')  # PIL: torchvision.io cannot read .bmp
+        if self.preprocess is not None:
+            image = self._preprocessed(image, row['file_name'])
         image, boxes = self.transform(image, boxes)
         target = {'boxes': boxes, 'labels': torch.tensor([a['category_id'] for a in anns]),
                   'image_id': info['id'], 'orig_size': orig_size}
