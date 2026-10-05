@@ -124,9 +124,11 @@ class SARMultiTask(Dataset):
         arr = self.preprocess(np.asarray(image, dtype=np.float32) / 255.0)
         if self.cache_dir is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+            # The temp name must end in .npy: np.save appends .npy to any other suffix, so the replace below
+            # would otherwise look for a file that was never written. The pid keeps concurrent workers apart.
+            tmp = path.with_name(f'{path.stem}.{os.getpid()}.tmp.npy')
             np.save(tmp, arr)
-            tmp.replace(path)
+            tmp.replace(path)  # atomic: a half-written cache file is never visible to another worker
         return _as_image_tensor(np.ascontiguousarray(arr))
 
     def __getitem__(self, i):
