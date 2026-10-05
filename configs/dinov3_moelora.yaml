@@ -1,0 +1,14 @@
+# DINOv3 ViT-B/16 (Meta) + MoE-LoRA. See configs/dinov3_lora.yaml for the gated-weights note.
+# Run: python train.py --config configs/dinov3_moelora.yaml
+name: dinov3_moelora
+backbone:
+  name: dinov3
+  pretrained: true
+  params:
+    model_name: facebook/dinov3-vitb16-pretrain-lvd1689m
+peft:
+  method: moelora
+  params:
+    experts: 4
+    rank: 4
+    alpha: 8

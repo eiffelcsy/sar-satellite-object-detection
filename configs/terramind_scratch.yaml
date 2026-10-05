@@ -1,0 +1,8 @@
+# TerraMind-1.0-base trained from random weights. Over the trainable budget: reference only.
+# Run: python train.py --config configs/terramind_scratch.yaml
+name: terramind_scratch
+backbone:
+  name: terramind
+  pretrained: false
+peft:
+  method: full

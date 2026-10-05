@@ -1,0 +1,10 @@
+# TerraMind-1.0-base (Sentinel-1 GRD), every backbone weight trains. Over the trainable budget: reference only.
+# Run: python train.py --config configs/terramind_full.yaml
+name: terramind_full
+backbone:
+  name: terramind
+  pretrained: true
+peft:
+  method: full
+train:
+  backbone_lr: 0.00002

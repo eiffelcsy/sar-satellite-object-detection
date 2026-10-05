@@ -1,0 +1,14 @@
+# ViT-B/16 (ImageNet-21k) + MoE-LoRA: 4 experts of rank 4 per attention projection, one router per task.
+# Run: python train.py --config configs/vit_moelora.yaml
+name: vit_moelora
+backbone:
+  name: vit
+  pretrained: true
+  params:
+    timm_name: vit_base_patch16_224.augreg_in21k
+peft:
+  method: moelora
+  params:
+    experts: 4
+    rank: 4
+    alpha: 8

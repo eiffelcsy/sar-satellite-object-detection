@@ -14,19 +14,30 @@ loss = cross-entropy + the four Faster R-CNN losses
 
 ![The reference model](reference_model.png)
 
-**Backbones** (`--backbone`), both ViT-B/16:
+**Backbones** (set in the config's `backbone.name`):
 
 - `vit`: timm's `vit_base_patch16_224.augreg_in21k` (ImageNet-21k).
 - `terramind`: TerraMind-1.0-base (IBM/ESA), an Earth-observation model, through its Sentinel-1 GRD input.
+- `dinov3`: DINOv3 ViT (Meta) through HuggingFace transformers; the default checkpoint is
+  `facebook/dinov3-vitb16-pretrain-lvd1689m` (~86 M). The configuration is set in `configs/dinov3_*.yaml`;
+  `model_name` can be swapped for `facebook/dinov3-vits16-pretrain-lvd1689m` (lighter) or
+  `facebook/dinov3-vitl16-pretrain-sat493m` (satellite, ~303 M, over the parameter budget). DINOv3 weights
+  are gated: accept the licence and `huggingface-cli login`. The single gray channel is repeated to RGB, and
+  the LoRA/MoE-LoRA adapters wrap the separate `q_proj` / `k_proj` / `v_proj` / `o_proj` attention layers.
 
-**Adaptation** (`--adapt`):
+**Adaptation** (set in the config's `peft.method`):
 
 - `full`: every backbone weight trains.
-- `lora`: the backbone is frozen; the `qkv` and `proj` layers of every attention block get
-  `y = W x + (alpha / r) B A x`, with r = 16 and alpha = 32 (0.88 M trainable backbone parameters).
+- `lora`: the backbone is frozen; the attention projections of every block get
+  `y = W x + (alpha / r) B A x`, with r = 16 and alpha = 32 (0.88 M trainable backbone parameters for the ViT).
 - `moelora`: as `lora`, but the rank-16 update is split into 4 experts of rank 4 (alpha = 8, so alpha / r = 2
   as in `lora`), mixed per token by a softmax router. Each task has its own router (1.03 M trainable backbone
-  parameters).
+  parameters for the ViT).
+
+Both registries are plain dicts (`sarbench/backbones.py`, `sarbench/adapters.py`): add a new backbone with
+`@register_backbone('name')` (exposing `embed_dim`, `blocks`, `adapter_targets()` and a token forward) or a
+new PEFT method with `@register_adapter('name')`, then select it from a YAML config. `adapter_targets()` makes
+the adapters independent of the attention layout (fused qkv vs. separate q/k/v/o).
 
 Every run also trains the 20.1 M parameters of the heads (neck, RPN, RoI heads, classifier), so
 `trainable_parameters` in `metrics.json` is the backbone count + 20.1 M.
@@ -68,7 +79,7 @@ the protocol.
 
 ## What a run writes
 
-`runs/<backbone>_<init>_<adapt>/`:
+`runs/<name>/`, where `<name>` is the config's `name` (default `<backbone>_<init>_<adapt>`):
 
 - `log.txt`: training progress and the val and test scores.
 - `metrics.json`: arguments, parameter counts, `train_hours` (wall time of the epoch loop, including the

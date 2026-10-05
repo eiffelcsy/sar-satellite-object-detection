@@ -1,0 +1,11 @@
+# TerraMind-1.0-base (Sentinel-1 GRD) + LoRA.
+# Run: python train.py --config configs/terramind_lora.yaml
+name: terramind_lora
+backbone:
+  name: terramind
+  pretrained: true
+peft:
+  method: lora
+  params:
+    rank: 16
+    alpha: 32

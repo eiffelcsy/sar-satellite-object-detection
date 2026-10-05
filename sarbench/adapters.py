@@ -1,7 +1,25 @@
-"""LoRA and MoE-LoRA adapters for the attention layers of a frozen backbone."""
+"""PEFT adapters (LoRA, MoE-LoRA) for the attention layers of a frozen backbone, behind a small registry.
+
+Each backbone lists the attention projections to wrap via `adapter_targets()` (see backbones.py), so the same
+adapter works for a fused-qkv ViT and a separate q/k/v/o ViT. The method and its hyper-parameters come from the
+YAML configs (`peft.method` / `peft.params`).
+"""
 from torch import nn
 
+ADAPTERS = {}
 
+
+def register_adapter(name):
+    """Register an adapter class under `name`, for add_adapters() and the YAML configs."""
+
+    def decorator(cls):
+        ADAPTERS[name] = cls
+        return cls
+
+    return decorator
+
+
+@register_adapter('lora')
 class LoRA(nn.Module):
     """y = W x + (alpha / r) * B A x, where W is the wrapped layer (frozen by add_adapters)."""
 
@@ -17,6 +35,7 @@ class LoRA(nn.Module):
         return self.base(x) + self.scale * self.up(self.down(x))
 
 
+@register_adapter('moelora')
 class MoELoRA(nn.Module):
     """y = W x + (alpha / r) * sum_e g_e(x) B_e A_e x, with gates g(x) = softmax(router[task](x)) per token.
 
@@ -41,13 +60,20 @@ class MoELoRA(nn.Module):
         return self.base(x) + self.scale * self.up(self.down(x) * gates)
 
 
-def add_adapters(backbone, kind):
-    """Freeze the backbone, then wrap attn.qkv and attn.proj of every block (kind: 'lora' or 'moelora')."""
-    adapter = {'lora': LoRA, 'moelora': MoELoRA}[kind]
+def add_adapters(backbone, kind, **params):
+    """Freeze the backbone, then wrap every attention projection returned by `backbone.adapter_targets()`.
+
+    kind: 'full' (no adapter, the backbone keeps training), 'lora' or 'moelora'. `params` are forwarded to the
+    adapter constructor (rank, alpha, ...).
+    """
+    if kind == 'full':
+        return
+    if kind not in ADAPTERS:
+        raise ValueError(f"unknown adapter '{kind}'; available: full, {sorted(ADAPTERS)}")
+    adapter = ADAPTERS[kind]
     backbone.requires_grad_(False)
-    for blk in backbone.blocks:
-        blk.attn.qkv = adapter(blk.attn.qkv)
-        blk.attn.proj = adapter(blk.attn.proj)
+    for parent, name in backbone.adapter_targets():
+        setattr(parent, name, adapter(getattr(parent, name), **params))
 
 
 def set_task(module, task):

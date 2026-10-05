@@ -1,0 +1,12 @@
+# TerraMind-1.0-base (Sentinel-1 GRD) + MoE-LoRA.
+# Run: python train.py --config configs/terramind_moelora.yaml
+name: terramind_moelora
+backbone:
+  name: terramind
+  pretrained: true
+peft:
+  method: moelora
+  params:
+    experts: 4
+    rank: 4
+    alpha: 8

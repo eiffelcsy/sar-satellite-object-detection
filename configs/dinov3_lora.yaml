@@ -1,0 +1,22 @@
+# DINOv3 ViT-B/16 (Meta) + LoRA.
+#
+# The DINOv3 weights are gated on Hugging Face: accept the licence on the model page
+# (https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m) and run `huggingface-cli login` once.
+#
+# `model_name` can be swapped for another checkpoint, e.g.
+#   facebook/dinov3-vits16-pretrain-lvd1689m   (ViT-S/16, ~21 M, lightest)
+#   facebook/dinov3-vitl16-pretrain-sat493m    (ViT-L/16 satellites, ~303 M, over the 130 M parameter budget)
+# ViT-B/16 is used here: ~86 M backbone parameters, comparable to the existing ViT/TerraMind baselines.
+#
+# Run: python train.py --config configs/dinov3_lora.yaml
+name: dinov3_lora
+backbone:
+  name: dinov3
+  pretrained: true
+  params:
+    model_name: facebook/dinov3-vitb16-pretrain-lvd1689m
+peft:
+  method: lora
+  params:
+    rank: 16
+    alpha: 32

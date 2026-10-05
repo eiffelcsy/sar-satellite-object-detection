@@ -1,5 +1,6 @@
 """Train one model jointly for classification and detection, then score it on val and test.
-Example: python train.py --backbone vit --init pretrained --adapt lora"""
+Examples: python train.py --config configs/vit_lora.yaml
+          python train.py --config configs/dinov3_lora.yaml"""
 import argparse
 import json
 import math
@@ -12,47 +13,69 @@ from torch.utils.data import DataLoader
 
 from sarbench.adapters import add_adapters
 from sarbench.backbones import build_backbone
+from sarbench.config import DEFAULTS, load_config
 from sarbench.data import SARMultiTask, collate, split_available, to_original_xywh
 from sarbench.metrics import classification_metrics, detection_metrics
 from sarbench.model import MultiTaskModel
 from sarbench.preprocess import SARPreprocess
 
 
-def parse_args():
+def parse_args(argv=None):
+    """CLI flags override the values from --config; without --config the defaults are the reference protocol."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--config', type=Path)
+    known, _ = pre.parse_known_args(argv)
+    cfg = load_config(known.config) if known.config else dict(DEFAULTS)
+
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--data', type=Path, default=Path(__file__).resolve().parents[1] / 'dataset' / 'SARFact-Course-20K')
-    p.add_argument('--backbone', required=True, choices=['vit', 'terramind'])
-    p.add_argument('--init', required=True, choices=['pretrained', 'scratch'])
-    p.add_argument('--adapt', required=True, choices=['full', 'lora', 'moelora'])
-    p.add_argument('--epochs', type=int, default=24)
-    p.add_argument('--batch-size', type=int, default=16)
-    p.add_argument('--lr', type=float, default=1e-4)
-    p.add_argument('--backbone-lr', type=float, help='for the trainable backbone parameters (default: --lr)')
-    p.add_argument('--weight-decay', type=float, default=0.05)
-    p.add_argument('--eval-every', type=int, default=4, help='validate every N epochs, and after the last one')
-    p.add_argument('--workers', type=int, default=8)
-    p.add_argument('--limit', type=int, help='use only the first N images of every split (quick checks)')
-    p.add_argument('--val-fraction', type=float, default=0.1,
+    p.add_argument('--config', type=Path, default=known.config,
+                   help='YAML run config (see configs/); explicit CLI flags override its values')
+    p.add_argument('--name', default=cfg['name'], help='run name (default: <backbone>_<init>_<adapt>)')
+    p.add_argument('--data', type=Path, default=Path(cfg['data']) if cfg['data']
+                   else Path(__file__).resolve().parents[1] / 'dataset' / 'SARFact-Course-20K')
+    p.add_argument('--backbone', default=cfg['backbone'], help='backbone name from the registry (e.g. vit, terramind, dinov3)')
+    p.add_argument('--init', choices=['pretrained', 'scratch'], default=cfg['init'])
+    p.add_argument('--adapt', choices=['full', 'lora', 'moelora'], default=cfg['adapt'])
+    p.add_argument('--epochs', type=int, default=cfg['epochs'])
+    p.add_argument('--batch-size', type=int, default=cfg['batch_size'])
+    p.add_argument('--lr', type=float, default=cfg['lr'])
+    p.add_argument('--backbone-lr', type=float, default=cfg['backbone_lr'],
+                   help='for the trainable backbone parameters (default: --lr)')
+    p.add_argument('--weight-decay', type=float, default=cfg['weight_decay'])
+    p.add_argument('--eval-every', type=int, default=cfg['eval_every'],
+                   help='validate every N epochs, and after the last one')
+    p.add_argument('--workers', type=int, default=cfg['workers'])
+    p.add_argument('--limit', type=int, default=cfg['limit'],
+                   help='use only the first N images of every split (quick checks)')
+    p.add_argument('--val-fraction', type=float, default=cfg['val_fraction'],
                    help='course data only: fraction of train held out for validation')
-    p.add_argument('--seed', type=int, default=0)
-    p.add_argument('--out', type=Path, default=Path('runs'))
-    p.add_argument('--preprocess', action='store_true',
+    p.add_argument('--seed', type=int, default=cfg['seed'])
+    p.add_argument('--out', type=Path, default=Path(cfg['out']))
+    p.add_argument('--preprocess', action='store_true', default=cfg['preprocess'],
                    help='SAR-BM3D despeckling + dB log transform + percentile clipping before the network')
-    p.add_argument('--no-despeckle', action='store_true', help='with --preprocess: skip SAR-BM3D despeckling')
-    p.add_argument('--no-log-transform', action='store_true', help='with --preprocess: skip the dB transform')
-    p.add_argument('--clip-percentile', type=float, default=0.5,
+    p.add_argument('--no-despeckle', action='store_true', default=cfg['no_despeckle'],
+                   help='with --preprocess: skip SAR-BM3D despeckling')
+    p.add_argument('--no-log-transform', action='store_true', default=cfg['no_log_transform'],
+                   help='with --preprocess: skip the dB transform')
+    p.add_argument('--clip-percentile', type=float, default=cfg['clip_percentile'],
                    help='with --preprocess: %% of brightest pixels clipped before scaling to [0, 1]')
     p.add_argument('--preprocess-cache', type=Path,
+                   default=Path(cfg['preprocess_cache']) if cfg['preprocess_cache'] else None,
                    help='with --preprocess: cache pre-processed images here (first pass fills it)')
-    p.add_argument('--bm3d-sigma', type=float,
+    p.add_argument('--bm3d-sigma', type=float, default=cfg['bm3d_sigma'],
                    help='log-speckle std for SAR-BM3D (default: estimated per image)')
-    p.add_argument('--bm3d-profile', default='np',
+    p.add_argument('--bm3d-profile', default=cfg['bm3d_profile'],
                    help='bm3d package profile (np, refilter, vn, high, deb)')
-    p.add_argument('--bm3d-threads', type=int, default=1, help='bm3d package threads per worker')
-    p.add_argument('--wandb', action='store_true', help='log loss/metric curves to Weights & Biases')
-    p.add_argument('--wandb-project', default='sar-satellite-object-detection')
-    p.add_argument('--wandb-run-name', help='defaults to <backbone>_<init>_<adapt>')
-    args = p.parse_args()
+    p.add_argument('--bm3d-threads', type=int, default=cfg['bm3d_threads'], help='bm3d package threads per worker')
+    p.add_argument('--wandb', action='store_true', default=cfg['wandb'],
+                   help='log loss/metric curves to Weights & Biases')
+    p.add_argument('--wandb-project', default=cfg['wandb_project'])
+    p.add_argument('--wandb-run-name', default=cfg['wandb_run_name'],
+                   help='defaults to <backbone>_<init>_<adapt>')
+    args = p.parse_args(argv)
+    # Backbone/PEFT parameters come from the config; drop them if the CLI swapped in another backbone/method.
+    args.backbone_kwargs = dict(cfg['backbone_kwargs']) if args.backbone == cfg['backbone'] else {}
+    args.peft_kwargs = dict(cfg['peft_kwargs']) if args.adapt == cfg['adapt'] else {}
     if args.init == 'scratch' and args.adapt != 'full':
         p.error('--init scratch is only valid with --adapt full')
     if args.backbone_lr is None:
@@ -66,6 +89,11 @@ def log(message, file):
     print(message, file=file, flush=True)
 
 
+def run_name(args):
+    """The config's run name, or <backbone>_<init>_<adapt> when it is absent."""
+    return args.name or f'{args.backbone}_{args.init}_{args.adapt}'
+
+
 def start_wandb(args, run_dir):
     """Return a live wandb run, or None when --wandb is off or wandb is not installed."""
     if not args.wandb:
@@ -77,7 +105,7 @@ def start_wandb(args, run_dir):
         return None
     config = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
     return wandb.init(project=args.wandb_project,
-                      name=args.wandb_run_name or f'{args.backbone}_{args.init}_{args.adapt}',
+                      name=args.wandb_run_name or run_name(args),
                       dir=str(run_dir), config=config)
 
 
@@ -160,7 +188,7 @@ def headline(metrics):
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
-    run_dir = args.out / f'{args.backbone}_{args.init}_{args.adapt}'
+    run_dir = args.out / run_name(args)
     run_dir.mkdir(parents=True, exist_ok=True)
     log_file = open(run_dir / 'log.txt', 'w')
     log(json.dumps(vars(args), default=str), log_file)
@@ -176,9 +204,8 @@ def main():
         log('no labelled test split found; skipping test evaluation', log_file)
 
     # Model: adapters are created on the CPU, so they are added before .cuda()
-    backbone = build_backbone(args.backbone, pretrained=args.init == 'pretrained')
-    if args.adapt != 'full':
-        add_adapters(backbone, args.adapt)  # also freezes the backbone
+    backbone = build_backbone(args.backbone, pretrained=args.init == 'pretrained', **args.backbone_kwargs)
+    add_adapters(backbone, args.adapt, **args.peft_kwargs)  # 'full' is a no-op; adapters also freeze the backbone
     model = MultiTaskModel(backbone, task_routing=args.adapt == 'moelora').cuda()
     parameters = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

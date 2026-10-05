@@ -1,0 +1,10 @@
+# ViT-B/16 trained from random weights. Over the 40 M trainable budget: reference only.
+# Run: python train.py --config configs/vit_scratch.yaml
+name: vit_scratch
+backbone:
+  name: vit
+  pretrained: false
+  params:
+    timm_name: vit_base_patch16_224.augreg_in21k
+peft:
+  method: full

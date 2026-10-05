@@ -1,0 +1,13 @@
+# ViT-B/16 (ImageNet-21k) + LoRA: the Delta-m reference configuration.
+# Run: python train.py --config configs/vit_lora.yaml
+name: vit_lora
+backbone:
+  name: vit
+  pretrained: true
+  params:
+    timm_name: vit_base_patch16_224.augreg_in21k
+peft:
+  method: lora
+  params:
+    rank: 16
+    alpha: 32

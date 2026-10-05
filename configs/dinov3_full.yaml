@@ -1,0 +1,13 @@
+# DINOv3 ViT-B/16 (Meta), every backbone weight trains. Over the 40 M trainable budget: reference only.
+# See configs/dinov3_lora.yaml for the gated-weights note.
+# Run: python train.py --config configs/dinov3_full.yaml
+name: dinov3_full
+backbone:
+  name: dinov3
+  pretrained: true
+  params:
+    model_name: facebook/dinov3-vitb16-pretrain-lvd1689m
+peft:
+  method: full
+train:
+  backbone_lr: 0.00002

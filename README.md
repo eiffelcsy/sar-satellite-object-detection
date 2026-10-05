@@ -78,14 +78,20 @@ pip install -r requirements.txt   # CUDA 12.8 builds of torch 2.9.0 / torchvisio
 ### 2.2 Train Baseline
 
 ```bash
-python train.py --backbone vit --init pretrained --adapt lora   # the Δm reference; one run, about 50 min
-bash run_all.sh                                                  # all eight runs, about 7 h
+python train.py --config configs/vit_lora.yaml   # the Δm reference; one run, about 50 min
+bash run_all.sh                                  # all eight reference runs, about 7 h
 ```
 
-- Options: `--backbone vit|terramind`, `--init pretrained|scratch`, `--adapt full|lora|moelora`
-  (`python train.py -h`).
-- `--adapt full` and `--init scratch` train 106 M parameters: over the 40 M budget, for reference only.
-- Pretrained weights download from Hugging Face on first use (ViT 0.4 GB, TerraMind 1.5 GB).
+The backbone and the PEFT method are chosen in a YAML config under `configs/` (schema in
+`sarbench/config.py`); the command line stays available for one-off overrides, e.g.
+`python train.py --config configs/vit_lora.yaml --epochs 2 --limit 64`.
+
+- Reference configs: `vit_{full,lora,moelora}`, `terramind_{full,lora,moelora}`, `vit_scratch`,
+  `terramind_scratch`. `python train.py --config configs/<name>.yaml` (`python train.py -h`).
+- DINOv3: `configs/dinov3_{lora,moelora,full}.yaml` use the DINOv3 ViT-B/16 backbone. Accept the (gated)
+  licence on the model page and `huggingface-cli login` once first.
+- `full` and `scratch` train 106 M parameters: over the 40 M budget, for reference only.
+- Pretrained weights download from Hugging Face on first use (ViT 0.4 GB, TerraMind 1.5 GB, DINOv3 ~0.35 GB).
 - Times for one RTX PRO 6000 Blackwell GPU. Memory: [docs/DETAILS.md](docs/DETAILS.md#time-and-memory).
 
 ### 2.3 Use Course Data
@@ -143,12 +149,14 @@ Accuracy and AP50: [docs/DETAILS.md](docs/DETAILS.md#results-in-full).
 
 ```
 train.py              entry: train + evaluate one configuration
-run_all.sh            the eight reference runs (calls train.py)
+configs/              one YAML per run (backbone + PEFT method + options)
+run_all.sh            the eight reference runs (calls train.py with configs)
 make_submission.py    write_submission(): predictions -> submission.zip
 sarbench/             the code behind train.py
+├── config.py         load a YAML run config into train.py arguments
 ├── data.py           images + boxes at 512 × 512, flips; boxes back to original pixels
-├── backbones.py      ViT (ImageNet-21k), TerraMind-1.0-base
-├── adapters.py       LoRA, MoE-LoRA on a frozen backbone
+├── backbones.py      backbone registry: ViT (ImageNet-21k), TerraMind-1.0-base, DINOv3
+├── adapters.py       PEFT registry: LoRA, MoE-LoRA on a frozen backbone
 ├── model.py          backbone + class head + ViTDet feature pyramid + Faster R-CNN
 └── metrics.py        accuracy, macro-F1, COCO box AP
 tests/                checks of sarbench/ (python -m pytest tests)
