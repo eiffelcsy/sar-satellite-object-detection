@@ -50,4 +50,4 @@ source .venv/bin/activate
 # pip3 install numpy
 
 # Submit your job to the cluster
-srun --gres=gpu:1 python train.py --backbone vit --init pretrained --adapt moelora --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
+srun --gres=gpu:1 python train.py --backbone vit --init pretrained --adapt moelora --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/ --wandb

@@ -35,6 +35,9 @@ def parse_args():
                    help='course data only: fraction of train held out for validation')
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--out', type=Path, default=Path('runs'))
+    p.add_argument('--wandb', action='store_true', help='log loss/metric curves to Weights & Biases')
+    p.add_argument('--wandb-project', default='sar-satellite-object-detection')
+    p.add_argument('--wandb-run-name', help='defaults to <backbone>_<init>_<adapt>')
     args = p.parse_args()
     if args.init == 'scratch' and args.adapt != 'full':
         p.error('--init scratch is only valid with --adapt full')
@@ -47,6 +50,21 @@ def log(message, file):
     """Print to the console and to the run's log.txt."""
     print(message, flush=True)
     print(message, file=file, flush=True)
+
+
+def start_wandb(args, run_dir):
+    """Return a live wandb run, or None when --wandb is off or wandb is not installed."""
+    if not args.wandb:
+        return None
+    try:
+        import wandb
+    except ImportError:
+        print('wandb not installed; skipping wandb logging (pip install wandb)', flush=True)
+        return None
+    config = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
+    return wandb.init(project=args.wandb_project,
+                      name=args.wandb_run_name or f'{args.backbone}_{args.init}_{args.adapt}',
+                      dir=str(run_dir), config=config)
 
 
 def make_loader(args, split):
@@ -65,7 +83,7 @@ def lr_factor(step, warmup, total):
     return 0.5 * (1 + math.cos(math.pi * (step - warmup) / max(total - warmup, 1)))  # --epochs 1: no decay phase
 
 
-def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file):
+def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=None):
     """One pass over the training set; the loss is cross-entropy plus the four Faster R-CNN losses."""
     model.train()
     start, seen = time.time(), 0
@@ -84,6 +102,11 @@ def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file):
             parts = ' '.join(f'{name} {value.item():.3f}' for name, value in losses.items())
             log(f'epoch {epoch} iter {step}/{len(loader)} loss {loss.item():.3f} ({parts}) '
                 f'lr {optimizer.param_groups[1]["lr"]:.2e} {seen / (time.time() - start):.1f} images/s', log_file)
+            if run is not None:
+                run.log({f'train/{name}': value.item() for name, value in losses.items()}
+                        | {'train/loss': loss.item(), 'train/lr': optimizer.param_groups[1]['lr'],
+                           'epoch': epoch},
+                        step=(epoch - 1) * len(loader) + step)
             start, seen = time.time(), 0
 
 
@@ -117,6 +140,7 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     log_file = open(run_dir / 'log.txt', 'w')
     log(json.dumps(vars(args), default=str), log_file)
+    run = start_wandb(args, run_dir)
 
     # Data
     train_loader, val_loader = make_loader(args, 'train'), make_loader(args, 'val')
@@ -132,6 +156,8 @@ def main():
     parameters = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log(f'parameters: {parameters:,} total, {trainable:,} trainable', log_file)
+    if run is not None:
+        run.summary.update({'parameters': parameters, 'trainable_parameters': trainable})
 
     # Optimizer and schedule: trainable backbone parameters at --backbone-lr, all new modules at --lr
     backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
@@ -144,11 +170,13 @@ def main():
     # Train, validating every --eval-every epochs; the reported model is the last-epoch model
     history, start = [], time.time()
     for epoch in range(1, args.epochs + 1):
-        train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file)
+        train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file, run)
         if epoch % args.eval_every == 0 or epoch == args.epochs:
             val, val_detections = evaluate(model, val_loader, val_loader.dataset.instances_json)
             history.append({'epoch': epoch, **val})
             log(f'epoch {epoch} val: {headline(val)}', log_file)
+            if run is not None:
+                run.log({f'val/{k}': v for k, v in val.items()}, step=epoch * len(train_loader))
     train_hours = (time.time() - start) / 3600
 
     # Evaluate on test, once (the course val/test labels are withheld, so test may be absent)
@@ -159,6 +187,10 @@ def main():
         test, test_detections = None, None
     peak_gb = torch.cuda.max_memory_allocated() / 2**30
     log(f'training {train_hours:.2f} h, peak GPU memory {peak_gb:.1f} GB', log_file)
+    if run is not None:
+        if test is not None:
+            run.log({f'test/{k}': v for k, v in test.items()})
+        run.summary.update({'train_hours': train_hours, 'peak_gpu_memory_gb': peak_gb})
 
     # Save
     summary = {'args': vars(args), 'parameters': parameters, 'trainable_parameters': trainable,
@@ -169,6 +201,8 @@ def main():
     if test_detections is not None:
         (run_dir / 'predictions_test.json').write_text(json.dumps(test_detections))
     torch.save(model.state_dict(), run_dir / 'model.pt')
+    if run is not None:
+        run.finish()
 
 
 if __name__ == '__main__':
