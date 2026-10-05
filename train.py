@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 
 from sarbench.adapters import add_adapters
 from sarbench.backbones import build_backbone
-from sarbench.data import SARMultiTask, collate, to_original_xywh
+from sarbench.data import SARMultiTask, collate, split_available, to_original_xywh
 from sarbench.metrics import classification_metrics, detection_metrics
 from sarbench.model import MultiTaskModel
 
@@ -31,6 +31,8 @@ def parse_args():
     p.add_argument('--eval-every', type=int, default=4, help='validate every N epochs, and after the last one')
     p.add_argument('--workers', type=int, default=8)
     p.add_argument('--limit', type=int, help='use only the first N images of every split (quick checks)')
+    p.add_argument('--val-fraction', type=float, default=0.1,
+                   help='course data only: fraction of train held out for validation')
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--out', type=Path, default=Path('runs'))
     args = p.parse_args()
@@ -50,7 +52,8 @@ def log(message, file):
 def make_loader(args, split):
     """Batches of `split`; only the training set is shuffled and augmented."""
     train = split == 'train'
-    dataset = SARMultiTask(args.data, split, train=train, limit=args.limit)
+    dataset = SARMultiTask(args.data, split, train=train, limit=args.limit,
+                           val_fraction=args.val_fraction, seed=args.seed)
     return DataLoader(dataset, args.batch_size, shuffle=train, num_workers=args.workers, collate_fn=collate,
                       persistent_workers=train and args.workers > 0)  # training workers live across epochs
 
@@ -116,7 +119,10 @@ def main():
     log(json.dumps(vars(args), default=str), log_file)
 
     # Data
-    train_loader, val_loader, test_loader = (make_loader(args, split) for split in ('train', 'val', 'test'))
+    train_loader, val_loader = make_loader(args, 'train'), make_loader(args, 'val')
+    test_loader = make_loader(args, 'test') if split_available(args.data, 'test') else None
+    if test_loader is None:
+        log('no labelled test split found; skipping test evaluation', log_file)
 
     # Model: adapters are created on the CPU, so they are added before .cuda()
     backbone = build_backbone(args.backbone, pretrained=args.init == 'pretrained')
@@ -140,15 +146,19 @@ def main():
     for epoch in range(1, args.epochs + 1):
         train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file)
         if epoch % args.eval_every == 0 or epoch == args.epochs:
-            val, val_detections = evaluate(model, val_loader, args.data / 'detection' / 'instances_val.json')
+            val, val_detections = evaluate(model, val_loader, val_loader.dataset.instances_json)
             history.append({'epoch': epoch, **val})
             log(f'epoch {epoch} val: {headline(val)}', log_file)
     train_hours = (time.time() - start) / 3600
 
-    # Evaluate on test, once
-    test, test_detections = evaluate(model, test_loader, args.data / 'detection' / 'instances_test.json')
+    # Evaluate on test, once (the course val/test labels are withheld, so test may be absent)
+    if test_loader is not None:
+        test, test_detections = evaluate(model, test_loader, test_loader.dataset.instances_json)
+        log(f'test: {headline(test)}', log_file)
+    else:
+        test, test_detections = None, None
     peak_gb = torch.cuda.max_memory_allocated() / 2**30
-    log(f'test: {headline(test)}\ntraining {train_hours:.2f} h, peak GPU memory {peak_gb:.1f} GB', log_file)
+    log(f'training {train_hours:.2f} h, peak GPU memory {peak_gb:.1f} GB', log_file)
 
     # Save
     summary = {'args': vars(args), 'parameters': parameters, 'trainable_parameters': trainable,
@@ -156,7 +166,8 @@ def main():
                'val_history': history, 'val': history[-1], 'test': test}
     (run_dir / 'metrics.json').write_text(json.dumps(summary, indent=2, default=str))
     (run_dir / 'predictions_val.json').write_text(json.dumps(val_detections))
-    (run_dir / 'predictions_test.json').write_text(json.dumps(test_detections))
+    if test_detections is not None:
+        (run_dir / 'predictions_test.json').write_text(json.dumps(test_detections))
     torch.save(model.state_dict(), run_dir / 'model.pt')
 
 
