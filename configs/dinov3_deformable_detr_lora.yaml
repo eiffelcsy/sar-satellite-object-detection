@@ -35,6 +35,6 @@ preprocess:
   cache: preprocess_cache
 loss:                # per-term weights on the summed loss (default 1.0); classification is already strong
   classification: 1.0
-  loss_bbox: 1.5     # Deformable-DETR L1 box loss
-  loss_giou: 1.5     # Deformable-DETR GIoU box loss
+  loss_bbox: 1.75     # Deformable-DETR L1 box loss
+  loss_giou: 1.75     # Deformable-DETR GIoU box loss
   # loss_aux: 1.0    # auxiliary decoder-layer classification loss
