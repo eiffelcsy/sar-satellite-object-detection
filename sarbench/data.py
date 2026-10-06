@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import tv_tensors
@@ -59,14 +60,76 @@ def _as_image_tensor(arr):
     return tensor.unsqueeze(0) if tensor.ndim == 2 else tensor
 
 
+def _max_iou(box, boxes):
+    """Largest IoU of one XYXY box against a set of XYXY boxes."""
+    if len(boxes) == 0:
+        return 0.0
+    lt = torch.maximum(box[None, :2], boxes[:, :2])
+    rb = torch.minimum(box[None, 2:], boxes[:, 2:])
+    inter = (rb - lt).clamp(min=0).prod(-1)
+    area = (box[2] - box[0]) * (box[3] - box[1])
+    union = area + (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1]) - inter
+    return (inter / union.clamp(min=1e-6)).max().item()
+
+
+def mosaic_tiles(tiles, size):
+    """Combine four (image [C,size,size], boxes XYXY, labels) into one size x size 2x2 mosaic.
+
+    Each tile is resized to size/2 and placed in a quadrant; boxes are scaled and clipped to their quadrant.
+    Images are already on the input canvas (512 px), so the coordinates stay consistent with the other paths.
+    """
+    half = size // 2
+    canvas = torch.zeros_like(tiles[0][0])
+    boxes_out, labels_out = [], []
+    for (image, boxes, labels), (ox, oy) in zip(tiles, [(0, 0), (half, 0), (0, half), (half, half)]):
+        canvas[:, oy:oy + half, ox:ox + half] = F.interpolate(
+            image.unsqueeze(0), size=(half, half), mode='bilinear', align_corners=False)[0]
+        if len(boxes):
+            scaled = boxes * (half / size) + boxes.new_tensor([ox, oy, ox, oy])
+            scaled[:, 0::2].clamp_(ox, ox + half)
+            scaled[:, 1::2].clamp_(oy, oy + half)
+            keep = (scaled[:, 2] - scaled[:, 0] > 1) & (scaled[:, 3] - scaled[:, 1] > 1)
+            boxes_out.append(scaled[keep])
+            labels_out.append(labels[keep])
+    boxes = torch.cat(boxes_out) if boxes_out else tiles[0][1][:0]
+    labels = torch.cat(labels_out) if labels_out else tiles[0][2][:0]
+    return canvas, boxes, labels
+
+
+def copy_paste(image, boxes, labels, donor_image, donor_boxes, donor_labels, max_iou=0.3, max_objects=3):
+    """Paste up to `max_objects` objects cropped from a donor image, avoiding overlaps with existing boxes."""
+    _, height, width = image.shape
+    for j in torch.randperm(len(donor_boxes))[:max_objects]:
+        x1, y1, x2, y2 = donor_boxes[j].round().long().tolist()
+        x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
+        crop = donor_image[:, y1:y2, x1:x2]
+        ch, cw = crop.shape[1], crop.shape[2]
+        if ch < 2 or cw < 2:
+            continue
+        px = int(torch.randint(0, width - cw + 1, (1,))) if width > cw else 0
+        py = int(torch.randint(0, height - ch + 1, (1,))) if height > ch else 0
+        new_box = boxes.new_tensor([px, py, px + cw, py + ch])
+        if _max_iou(new_box, boxes) > max_iou:
+            continue
+        image[:, py:py + ch, px:px + cw] = crop
+        boxes = torch.cat([boxes, new_box[None]])
+        labels = torch.cat([labels, donor_labels[j][None]])
+    return image, boxes, labels
+
+
 class SARMultiTask(Dataset):
     """One item is (image [C, size, size], label 0..8, target), target = {'boxes': XYXY on the
     resized image, 'labels': 1..9, 'image_id': COCO id, 'orig_size': (h, w)}; C is 1, or 3 for the
     DINOv3 pseudo-RGB pre-processing."""
 
     def __init__(self, root, split, train=False, size=512, limit=None, val_fraction=0.1, seed=0,
-                 preprocess=None, cache_dir=None):
+                 preprocess=None, cache_dir=None, mosaic=0.0, copy_paste=0.0, copy_paste_max_iou=0.3):
         self.root = Path(root)
+        self.train = train
+        self.size = size
+        self.mosaic = mosaic  # probability of building a 2x2 mosaic from four images (train only)
+        self.copy_paste = copy_paste  # probability of pasting objects from another image (train only)
+        self.copy_paste_max_iou = copy_paste_max_iou
         self.image_dir = None
         train_dir = _course_train_dir(self.root) if split in ('train', 'val') else None
         if train_dir is not None:  # course data: hold out part of train for local validation
@@ -131,7 +194,12 @@ class SARMultiTask(Dataset):
             tmp.replace(path)  # atomic: a half-written cache file is never visible to another worker
         return _as_image_tensor(np.ascontiguousarray(arr))
 
-    def __getitem__(self, i):
+    def _load_transformed(self, i):
+        """Load image `i`, run the base transform (resize/flips/normalise) and return image, boxes, labels.
+
+        `boxes` are plain XYXY float tensors on the `size x size` input canvas, ready for the augmentation
+        helpers; image_id / orig_size are kept so predicted boxes can be mapped back for COCO scoring.
+        """
         row = self.rows[i]
         info = self.coco_images.get(row['file_name']) or self.coco_images[Path(row['file_name']).name]
         anns = self.annotations[info['id']]
@@ -142,9 +210,22 @@ class SARMultiTask(Dataset):
         if self.preprocess is not None:
             image = self._preprocessed(image, row['file_name'])
         image, boxes = self.transform(image, boxes)
-        target = {'boxes': boxes, 'labels': torch.tensor([a['category_id'] for a in anns]),
-                  'image_id': info['id'], 'orig_size': orig_size}
-        return image, row['label'], target
+        boxes = boxes.as_subclass(torch.Tensor).float()
+        labels = torch.tensor([a['category_id'] for a in anns])
+        return image, boxes, labels, info['id'], orig_size
+
+    def __getitem__(self, i):
+        image, boxes, labels, image_id, orig_size = self._load_transformed(i)
+        if self.train and self.mosaic and random.random() < self.mosaic:  # 4 images -> one 2x2 mosaic
+            tiles = [(image, boxes, labels)] + [self._load_transformed(random.randrange(len(self)))[:3]
+                                                for _ in range(3)]
+            image, boxes, labels = mosaic_tiles(tiles, self.size)
+        if self.train and self.copy_paste and random.random() < self.copy_paste:  # paste donor objects
+            donor = self._load_transformed(random.randrange(len(self)))
+            image, boxes, labels = copy_paste(image, boxes, labels, donor[0], donor[1], donor[2],
+                                              self.copy_paste_max_iou)
+        target = {'boxes': boxes, 'labels': labels, 'image_id': image_id, 'orig_size': orig_size}
+        return image, self.rows[i]['label'], target
 
 
 def collate(batch):

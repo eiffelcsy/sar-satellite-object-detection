@@ -82,19 +82,18 @@ python train.py --config configs/vit_lora.yaml   # the Δm reference; one run, a
 bash run_all.sh                                  # all eight reference runs, about 7 h
 ```
 
-The backbone, the PEFT method and the detection head are chosen in a YAML config under `configs/` (schema in
+The backbone, the PEFT method and the training options are chosen in a YAML config under `configs/` (schema in
 `sarbench/config.py`); the command line stays available for one-off overrides, e.g.
 `python train.py --config configs/vit_lora.yaml --epochs 2 --limit 64`.
 
-The detector is `faster_rcnn` by default; `configs/dinov3_deformable_detr_lora.yaml` switches to a
-query-based **Deformable-DETR** head (`detector.name: deformable_detr`, ~11 M parameters) that samples every
-feature-pyramid level, including the stride-4 P2 map for tiny objects.
+The best DINOv3 recipe is `configs/dinov3_dora.yaml`: DINOv3 ViT-B/16 + pseudo-RGB input + **DoRA** (attn+mlp) +
+a real-detail **P2 conv stem** + **mosaic/copy-paste** augmentation, 48 epochs.
 
 - Reference configs: `vit_{full,lora,moelora}`, `terramind_{full,lora,moelora}`, `vit_scratch`,
   `terramind_scratch`. `python train.py --config configs/<name>.yaml` (`python train.py -h`).
-- DINOv3: `configs/dinov3_{lora,moelora,full}.yaml` use the DINOv3 ViT-B/16 backbone with a pseudo-RGB input
-  (normalized amplitude + despeckled base + Sobel edge map). Accept the (gated) licence on the model page and
-  `huggingface-cli login` once first.
+- DINOv3: `configs/dinov3_{dora,lora,moelora,full}.yaml` use the DINOv3 ViT-B/16 backbone with a pseudo-RGB
+  input (normalized amplitude + despeckled base + Sobel edge map). Accept the (gated) licence on the model page
+  and `huggingface-cli login` once first.
 - `full` and `scratch` train 106 M parameters: over the 40 M budget, for reference only.
 - Pretrained weights download from Hugging Face on first use (ViT 0.4 GB, TerraMind 1.5 GB, DINOv3 ~0.35 GB).
 - Times for one RTX PRO 6000 Blackwell GPU. Memory: [docs/DETAILS.md](docs/DETAILS.md#time-and-memory).
@@ -159,12 +158,11 @@ run_all.sh            the eight reference runs (calls train.py with configs)
 make_submission.py    write_submission(): predictions -> submission.zip
 sarbench/             the code behind train.py
 ├── config.py         load a YAML run config into train.py arguments
-├── data.py           images + boxes at 512 × 512, flips; boxes back to original pixels
+├── data.py           images + boxes at 512 × 512, flips, mosaic, copy-paste
 ├── channels.py       pseudo-RGB assembly for the DINOv3 input (amplitude + despeckled + edge)
 ├── backbones.py      backbone registry: ViT (ImageNet-21k), TerraMind-1.0-base, DINOv3
-├── adapters.py       PEFT registry: LoRA, MoE-LoRA on a frozen backbone
-├── detr.py           Deformable-DETR detection head (optional `detector.name`)
-├── model.py          backbone + class head + ViTDet feature pyramid + detector
+├── adapters.py       PEFT registry: LoRA, DoRA, MoE-LoRA on a frozen backbone
+├── model.py          backbone + class head + ViTDet pyramid (+ P2 stem) + Faster R-CNN
 └── metrics.py        accuracy, macro-F1, COCO box AP
 tests/                checks of sarbench/ (python -m pytest tests)
 docs/DETAILS.md       model, training protocol, design notes, time and memory

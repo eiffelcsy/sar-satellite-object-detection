@@ -17,3 +17,5 @@ preprocess:
   pseudo_rgb: true
   edge: sobel
   cache: preprocess_cache
+train:
+  epochs: 48

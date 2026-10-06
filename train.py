@@ -36,8 +36,9 @@ def parse_args(argv=None):
                    else Path(__file__).resolve().parents[1] / 'dataset' / 'SARFact-Course-20K')
     p.add_argument('--backbone', default=cfg['backbone'], help='backbone name from the registry (e.g. vit, terramind, dinov3)')
     p.add_argument('--init', choices=['pretrained', 'scratch'], default=cfg['init'])
-    p.add_argument('--adapt', choices=['full', 'lora', 'moelora'], default=cfg['adapt'])
-    p.add_argument('--detector', choices=['faster_rcnn', 'deformable_detr'], default=cfg['detector'])
+    p.add_argument('--adapt', choices=['full', 'lora', 'dora', 'moelora'], default=cfg['adapt'])
+    p.add_argument('--detail-stem', action='store_true', default=cfg['detail_stem'],
+                   help='add a conv stem on the input to give the P2 level real stride-4 detail')
     p.add_argument('--epochs', type=int, default=cfg['epochs'])
     p.add_argument('--batch-size', type=int, default=cfg['batch_size'])
     p.add_argument('--lr', type=float, default=cfg['lr'])
@@ -51,6 +52,10 @@ def parse_args(argv=None):
                    help='use only the first N images of every split (quick checks)')
     p.add_argument('--val-fraction', type=float, default=cfg['val_fraction'],
                    help='course data only: fraction of train held out for validation')
+    p.add_argument('--mosaic', type=float, default=cfg['mosaic'],
+                   help='train-time probability of combining 4 images into a 2x2 mosaic (0 disables)')
+    p.add_argument('--copy-paste', dest='copy_paste', type=float, default=cfg['copy_paste'],
+                   help='train-time probability of pasting objects from another image (0 disables)')
     p.add_argument('--seed', type=int, default=cfg['seed'])
     p.add_argument('--out', type=Path, default=Path(cfg['out']))
     p.add_argument('--preprocess', action='store_true', default=cfg['preprocess'],
@@ -83,7 +88,6 @@ def parse_args(argv=None):
     args.backbone_kwargs = dict(cfg['backbone_kwargs']) if args.backbone == cfg['backbone'] else {}
     args.peft_kwargs = dict(cfg['peft_kwargs']) if args.adapt == cfg['adapt'] else {}
     args.peft_targets = list(cfg['peft_targets']) if (args.adapt == cfg['adapt'] and cfg['peft_targets']) else None
-    args.detector_kwargs = dict(cfg['detector_kwargs']) if args.detector == cfg['detector'] else {}
     args.loss_weights = dict(cfg['loss_weights'])
     if args.init == 'scratch' and args.adapt != 'full':
         p.error('--init scratch is only valid with --adapt full')
@@ -139,7 +143,8 @@ def make_loader(args, split):
     train = split == 'train'
     dataset = SARMultiTask(args.data, split, train=train, limit=args.limit,
                            val_fraction=args.val_fraction, seed=args.seed,
-                           preprocess=build_preprocess(args), cache_dir=args.preprocess_cache)
+                           preprocess=build_preprocess(args), cache_dir=args.preprocess_cache,
+                           mosaic=args.mosaic, copy_paste=args.copy_paste)
     return DataLoader(dataset, args.batch_size, shuffle=train, num_workers=args.workers, collate_fn=collate,
                       persistent_workers=train and args.workers > 0)  # training workers live across epochs
 
@@ -231,8 +236,8 @@ def main():
         raise SystemExit(f'--pseudo-rgb builds 3 channels but backbone {args.backbone!r} expects '
                          f'{backbone.in_chans}; use a 3-channel backbone (e.g. dinov3).')
     add_adapters(backbone, args.adapt, targets=args.peft_targets, **args.peft_kwargs)  # 'full' is a no-op
-    model = MultiTaskModel(backbone, task_routing=args.adapt == 'moelora', detector=args.detector,
-                           detector_kwargs=args.detector_kwargs).cuda()
+    model = MultiTaskModel(backbone, task_routing=args.adapt == 'moelora',
+                           detail_stem=args.detail_stem).cuda()
     parameters = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log(f'parameters: {parameters:,} total, {trainable:,} trainable', log_file)

@@ -34,3 +34,5 @@ preprocess:
   edge: sobel        # sobel | highpass
   despeckle: true    # SAR-BM3D for channel 2; false falls back to a Gaussian blur
   cache: preprocess_cache
+train:
+  epochs: 48

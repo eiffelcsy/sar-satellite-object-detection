@@ -14,4 +14,5 @@ preprocess:
   edge: sobel
   cache: preprocess_cache
 train:
+  epochs: 48
   backbone_lr: 0.00002

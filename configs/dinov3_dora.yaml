@@ -1,0 +1,38 @@
+# DINOv3 ViT-B/16 + pseudo-RGB + DoRA + real-detail P2 stem + copy-paste/mosaic augmentation, 48 epochs.
+#
+# Improvements over configs/dinov3_lora.yaml:
+#   - DoRA instead of LoRA (weight-decomposed; same parameter budget, usually a small accuracy gain),
+#   - a conv stem on the input gives the P2 level genuine stride-4 detail (tiny SAR objects),
+#   - mosaic (0.3) and copy-paste (0.5) train-time augmentation,
+#   - 48 epochs instead of 24,
+#   - the RoI box regression loss is upweighted.
+#
+# Gated-weights / pseudo-RGB / cache notes: see configs/dinov3_lora.yaml.
+# Run: python train.py --config configs/dinov3_dora.yaml
+name: dinov3_dora
+backbone:
+  name: dinov3
+  pretrained: true
+  params:
+    model_name: facebook/dinov3-vitb16-pretrain-lvd1689m
+peft:
+  method: dora
+  params:
+    rank: 32
+    alpha: 32
+  targets: [attn, mlp]
+model:
+  detail_stem: true
+preprocess:
+  pseudo_rgb: true
+  edge: sobel
+  cache: preprocess_cache
+data:
+  mosaic: 0.3
+  copy_paste: 0.5
+loss:
+  classification: 1.0
+  loss_box_reg: 2.0      # Faster R-CNN RoI box regression
+  loss_rpn_box_reg: 1.5  # RPN box regression
+train:
+  epochs: 48

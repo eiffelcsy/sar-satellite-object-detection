@@ -3,13 +3,13 @@ import pytest
 import torch
 from torch import nn
 
-from sarbench.adapters import LoRA, MoELoRA, add_adapters, set_task
+from sarbench.adapters import DoRA, LoRA, MoELoRA, add_adapters, set_task
 from sarbench.backbones import build_backbone
 
 # 12 blocks x rank 16 x ((768 + 2304) + (768 + 768)) for A and B of qkv and proj;
-# MoE-LoRA: the same A and B sizes (4 experts x rank 4 = 16), plus 12 blocks x 2 layers x 2 routers x 768 x 4 experts
-TRAINABLE = {'lora': 884_736, 'moelora': 1_032_192}
-ADAPTER_WEIGHTS = ('.down.weight', '.up.weight', '.routers.0.weight', '.routers.1.weight')
+# DoRA adds the per-output magnitude (2304 + 768 per block); MoE-LoRA: 4 experts x rank 4 = 16, plus 2 routers
+TRAINABLE = {'lora': 884_736, 'dora': 921_600, 'moelora': 1_032_192}
+ADAPTER_WEIGHTS = ('.down.weight', '.up.weight', '.magnitude', '.routers.0.weight', '.routers.1.weight')
 
 
 def tokens(backbone, x):
@@ -32,17 +32,17 @@ def tokens_per_task(name, kind):
     return task0, tokens(backbone, x)
 
 
-@pytest.mark.parametrize('kind', ['lora', 'moelora'])
+@pytest.mark.parametrize('kind,tol', [('lora', 1e-6), ('dora', 1e-5), ('moelora', 1e-6)])
 @pytest.mark.parametrize('name', ['vit', 'terramind'])
-def test_adapters_are_noops_at_init(name, kind):
+def test_adapters_are_noops_at_init(name, kind, tol):
     backbone = build_backbone(name, pretrained=True)
     x = torch.randn(2, 1, 512, 512, device='cuda')
     before = tokens(backbone, x)
     add_adapters(backbone, kind)
-    assert (tokens(backbone, x) - before).abs().max() <= 1e-6
+    assert (tokens(backbone, x) - before).abs().max() <= tol  # DoRA's weight renormalization adds fp noise
 
 
-@pytest.mark.parametrize('kind', ['lora', 'moelora'])
+@pytest.mark.parametrize('kind', ['lora', 'dora', 'moelora'])
 @pytest.mark.parametrize('name', ['vit', 'terramind'])
 def test_only_adapter_weights_train(name, kind):
     backbone = build_backbone(name, pretrained=False)
@@ -87,6 +87,16 @@ def test_add_adapters_respects_the_configured_target_groups():
     assert isinstance(backbone.qkv, LoRA) and isinstance(backbone.mlp, LoRA)
     assert not backbone.qkv.base.weight.requires_grad  # the frozen base stays frozen
     assert backbone.qkv.down.weight.requires_grad
+
+
+def test_dora_is_a_noop_at_init_and_trains_its_magnitude():
+    base = nn.Linear(16, 8)
+    layer = DoRA(base, rank=4, alpha=8).double()
+    x = torch.randn(2, 5, 16, dtype=torch.float64)
+    torch.testing.assert_close(layer(x), base(x))  # B = 0 and m = ||W||_c -> W' = W exactly
+    nn.init.normal_(layer.up.weight, std=0.1)
+    assert not torch.allclose(layer(x), base(x))
+    assert layer.magnitude.requires_grad and layer.down.weight.requires_grad
 
 
 def test_moelora_is_a_gated_sum_of_lora_experts():

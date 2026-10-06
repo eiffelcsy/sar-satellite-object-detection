@@ -10,18 +10,18 @@ Schema (only `backbone` and `peft` are required):
       pretrained: true             # false -> random weights ('scratch')
       params: {}                   # forwarded to the backbone constructor
     peft:
-      method: lora                 # full | lora | moelora
+      method: dora                 # full | lora | dora | moelora
       params: {rank: 16, alpha: 32}  # forwarded to the adapter constructor
       targets: [attn, mlp]         # optional; backbone module groups to adapt (default: the backbone's own)
-    detector:
-      name: deformable_detr        # faster_rcnn (default) | deformable_detr
-      params: {num_queries: 300}   # forwarded to the detector head (e.g. enc_layers, dec_layers, level_names)
     loss:                          # optional per-term weights on top of the summed loss (default 1.0 each)
       classification: 1.0
-      loss_bbox: 2.0               # Deformable-DETR L1 box loss (loss_box_reg for Faster R-CNN)
-    train: {epochs: 24, batch_size: 16, lr: 1.0e-4, backbone_lr: null, weight_decay: 0.05,
+      loss_box_reg: 2.0            # Faster R-CNN RoI box loss (loss_rpn_box_reg for the RPN)
+    model:
+      detail_stem: true            # real stride-4 detail from the pixels, added to the neck's P2
+    train: {epochs: 48, batch_size: 16, lr: 1.0e-4, backbone_lr: null, weight_decay: 0.05,
             eval_every: 4, workers: 8, seed: 0}
-    data: {root: null, val_fraction: 0.1, limit: null}
+    data: {root: null, val_fraction: 0.1, limit: null, mosaic: 0.5, copy_paste: 0.5}
+          # mosaic / copy_paste: train-time augmentation probabilities (0 disables each)
     preprocess: {enabled: false, pseudo_rgb: false, edge: sobel, despeckle: true, log: true,
                  clip_percentile: 0.5, cache: null, bm3d_sigma: null, bm3d_profile: np, bm3d_threads: 1}
                  # pseudo_rgb: DINOv3 input (amplitude + despeckled base + Sobel/high-pass edges) -> 3 channels;
@@ -38,9 +38,8 @@ DEFAULTS = {
     'backbone_kwargs': {},
     'peft_kwargs': {},
     'peft_targets': None,
-    'detector': 'faster_rcnn',
-    'detector_kwargs': {},
     'loss_weights': {},
+    'detail_stem': False,
     'name': None,
     'epochs': 24,
     'batch_size': 16,
@@ -53,6 +52,8 @@ DEFAULTS = {
     'data': None,
     'val_fraction': 0.1,
     'limit': None,
+    'mosaic': 0.0,
+    'copy_paste': 0.0,
     'out': 'runs',
     'preprocess': False,
     'pseudo_rgb': False,
@@ -70,7 +71,8 @@ DEFAULTS = {
 }
 
 _TRAIN_KEYS = ('epochs', 'batch_size', 'lr', 'backbone_lr', 'weight_decay', 'eval_every', 'workers', 'seed')
-_DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'limit': 'limit'}
+_DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'limit': 'limit',
+              'mosaic': 'mosaic', 'copy_paste': 'copy_paste'}
 _OUTPUT_KEYS = {'dir': 'out', 'wandb': 'wandb', 'wandb_project': 'wandb_project', 'wandb_run_name': 'wandb_run_name'}
 
 
@@ -95,12 +97,9 @@ def load_config(path):
     config['peft_kwargs'] = dict(peft.get('params') or {})
     config['peft_targets'] = list(peft['targets']) if peft.get('targets') else None
 
-    detector = raw.get('detector') or {}
-    if isinstance(detector, str):
-        detector = {'name': detector}
-    config['detector'] = detector.get('name', config['detector'])
-    config['detector_kwargs'] = dict(detector.get('params') or {})
     config['loss_weights'] = dict(raw.get('loss') or {})
+    if 'detail_stem' in (raw.get('model') or {}):
+        config['detail_stem'] = bool(raw['model']['detail_stem'])
 
     if raw.get('name') is not None:
         config['name'] = raw['name']

@@ -33,19 +33,19 @@ def test_dinov3_config_selects_the_checkpoint_and_lora_location():
     assert cfg['pseudo_rgb'] is True and cfg['edge'] == 'sobel'  # 1-channel SAR -> 3-channel DINOv3 input
 
 
-def test_detector_defaults_to_faster_rcnn_and_can_be_switched():
-    assert load_config(CONFIGS / 'vit_lora.yaml')['detector'] == 'faster_rcnn'
-    cfg = load_config(CONFIGS / 'dinov3_deformable_detr_lora.yaml')
-    assert cfg['detector'] == 'deformable_detr'
-    assert cfg['detector_kwargs']['num_queries'] == 300
-    assert cfg['detector_kwargs']['level_names'] == ['0', '1', '2', '3']
+def test_dora_config_with_augmentation_stem_and_long_schedule():
+    cfg = load_config(CONFIGS / 'dinov3_dora.yaml')
+    assert cfg['backbone'] == 'dinov3' and cfg['adapt'] == 'dora'
+    assert cfg['detail_stem'] is True
+    assert cfg['mosaic'] > 0 and cfg['copy_paste'] > 0
+    assert cfg['epochs'] == 48
 
 
 def test_loss_weights_default_empty_and_parse_from_config():
     assert load_config(CONFIGS / 'vit_lora.yaml')['loss_weights'] == {}
-    weights = load_config(CONFIGS / 'dinov3_deformable_detr_lora.yaml')['loss_weights']
+    weights = load_config(CONFIGS / 'dinov3_dora.yaml')['loss_weights']
     assert weights['classification'] == 1.0
-    assert weights['loss_bbox'] > 1.0 and weights['loss_giou'] > 1.0  # the config upweights the box terms
+    assert weights['loss_box_reg'] > 1.0  # the config upweights the RoI box loss
 
 
 def test_every_config_loads():

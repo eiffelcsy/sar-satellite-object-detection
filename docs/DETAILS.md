@@ -8,44 +8,31 @@ Back to the [README](../README.md).
 image [B,C,512,512] -> backbone -> tokens [B,1024,768]   (32 x 32 patches of 16 px; C=1 or 3)
   classification: mean over tokens -> LayerNorm -> Linear(768, 9)
   detection:      tokens as a [B,768,32,32] map -> SimpleFeaturePyramid (strides 4 to 64, 256 channels)
-                  -> detector: RegionProposalNetwork + RoIHeads (torchvision Faster R-CNN) by default,
-                     or a Deformable-DETR head (query-based, no anchors); 9 classes + background
-loss = cross-entropy + the detection losses
+                  (+ optional conv stem that adds real stride-4 detail to P2)
+                  -> RegionProposalNetwork + RoIHeads (torchvision Faster R-CNN, 9 classes + background)
+loss = cross-entropy + the four Faster R-CNN losses, each scaled by its config `loss` weight
 ```
 
 ![The reference model](reference_model.png)
 
-**Detector** (set in the config's `detector.name`):
+**P2 stem** (`model.detail_stem: true`). The single-scale ViT sees only 16 px patches, so the neck's stride-4
+level is upsampled and carries no genuine high-frequency content. `sarbench/model.py` adds a small conv stem
+(two stride-2 convs on the 512 px input) whose stride-4 output is added to P2, which is what tiny SAR objects
+need. It costs ~0.1 M parameters.
 
-- `faster_rcnn` (default): torchvision Faster R-CNN (RPN + RoI heads), ~20 M with the neck.
-- `deformable_detr`: a compact Deformable-DETR head (`sarbench/detr.py`, Zhu et al. 2021), ~11 M at hidden
-  256, 6 encoder + 6 decoder layers, 300 queries. It projects every pyramid level to 256, runs multi-scale
-  deformable attention, and predicts boxes directly (no anchors/NMS). Training uses Hungarian matching + CE
-  (no-object class) + L1 + GIoU; evaluation returns the same `{'boxes','labels','scores'}` format. Its
-  `level_names` picks which neck levels feed it (`'0'`=stride 4 … `'pool'`=stride 64);
-  `configs/dinov3_deformable_detr_lora.yaml` uses P2–P5. The head width is fixed at 256 regardless of the
-  backbone, keeping it inside the parameter budget.
+**Loss weights** (`loss` in the config). The epoch loss is the sum of the terms, each multiplied by its config
+weight (default 1.0), in `train.py`. The per-term values logged in parentheses are always raw:
+`classification` (the multi-task class head, cross-entropy), `loss_objectness`, `loss_rpn_box_reg`,
+`loss_classifier` and `loss_box_reg` (RoI box regression). E.g. `loss: {loss_box_reg: 2.0}` leans on the boxes.
 
-  **Memory.** The deformable encoder runs self-attention over *all* pyramid tokens, so including P2 (stride 4)
-  at 512 px gives ~21,760 tokens per image (P2 alone is 16,384) — far more than a Faster R-CNN head, whose
-  memory is local. `configs/dinov3_deformable_detr_lora.yaml` therefore sets `grad_checkpointing: true`
-  (recompute encoder layers in backward) and `MSDeformAttn` accumulates levels one at a time instead of
-  stacking them. If it still OOMs, use coarser levels (`level_names: ['1', '2', '3', 'pool']`, the standard
-  Deformable-DETR set) or lower `--batch-size`; `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` also helps.
+**Augmentation** (`data.mosaic`, `data.copy_paste`, train split only). Both operate on the 512 px canvas after
+the base transform, so evaluation and box mapping are unaffected:
 
-**Loss weights** (`loss` in the config). The epoch loss is the sum of the terms below, each multiplied by its
-config weight (default 1.0), applied in `train.py`. The per-term values logged in parentheses are always raw.
-Use the key names of the active detector:
+- **mosaic** — combine four images into a 2×2 grid (each resized to 256 px), scaling/clipping their boxes;
+- **copy-paste** — crop up to 3 objects from a donor image and paste them where they do not overlap existing
+  boxes (IoU < 0.3).
 
-- always: `classification` (the multi-task class head, cross-entropy).
-- `deformable_detr`: `loss_classifier` (query set CE), `loss_bbox` (L1), `loss_giou`, `loss_aux` (auxiliary
-  decoder layers). E.g. `loss: {loss_bbox: 1.5, loss_giou: 1.5}` leans on the boxes.
-- `faster_rcnn`: `loss_objectness`, `loss_rpn_box_reg`, `loss_classifier`, `loss_box_reg` (`loss_box_reg` is
-  the RoI box regression; `loss_rpn_box_reg` the RPN one).
-
-For `deformable_detr`, the Hungarian matcher costs (`cost_bbox`, `cost_giou`) and the no-object weight
-(`eos_coef`) live in `sarbench/detr.py` and affect assignment, not the summed loss; pass them via
-`detector.params` if needed.
+`configs/dinov3_dora.yaml` uses `mosaic: 0.3`, `copy_paste: 0.5`.
 
 **Backbones** (set in the config's `backbone.name`):
 
@@ -77,6 +64,9 @@ single gray channel to RGB.
 - `full`: every backbone weight trains.
 - `lora`: the backbone is frozen; the selected projections get `y = W x + (alpha / r) B A x`, with r = 16 and
   alpha = 32 for ViT/TerraMind (0.88 M trainable backbone parameters for the ViT).
+- `dora`: weight-decomposed LoRA (Liu et al. 2024), `W' = m * (W + (alpha / r) B A) / ||W + (alpha / r) B A||_c`
+  with a learnable per-output magnitude `m` (initialized to `||W||_c`, so it is an exact no-op at init). Same
+  A/B as LoRA plus the magnitude; usually a small accuracy gain at the same budget.
 - `moelora`: as `lora`, but the rank-16 update is split into 4 experts of rank 4 (alpha = 8, so alpha / r = 2
   as in `lora`), mixed per token by a softmax router. Each task has its own router (1.03 M trainable backbone
   parameters for the ViT).

@@ -1,9 +1,10 @@
-"""PEFT adapters (LoRA, MoE-LoRA) for the attention layers of a frozen backbone, behind a small registry.
+"""PEFT adapters (LoRA, DoRA, MoE-LoRA) for the attention layers of a frozen backbone, behind a small registry.
 
 Each backbone lists the attention projections to wrap via `adapter_targets()` (see backbones.py), so the same
 adapter works for a fused-qkv ViT and a separate q/k/v/o ViT. The method and its hyper-parameters come from the
 YAML configs (`peft.method` / `peft.params`).
 """
+import torch.nn.functional as F
 from torch import nn
 
 ADAPTERS = {}
@@ -33,6 +34,29 @@ class LoRA(nn.Module):
 
     def forward(self, x):
         return self.base(x) + self.scale * self.up(self.down(x))
+
+
+@register_adapter('dora')
+class DoRA(nn.Module):
+    """Weight-decomposed LoRA (Liu et al., 2024): W' = m * (W + (alpha / r) B A) / ||W + (alpha / r) B A||_c.
+
+    `m` is a per-output-neuron magnitude initialized to the frozen weight's column norm, and the update is
+    renormalized, so init is an exact no-op and training starts from the pretrained layer (as LoRA does).
+    """
+
+    def __init__(self, base: nn.Linear, rank=16, alpha=32):
+        super().__init__()
+        self.base = base
+        self.down = nn.Linear(base.in_features, rank, bias=False)  # A
+        self.up = nn.Linear(rank, base.out_features, bias=False)  # B
+        nn.init.zeros_(self.up.weight)  # B = 0 -> W' = m * W / ||W||_c = W at init
+        self.scale = alpha / rank
+        self.magnitude = nn.Parameter(base.weight.detach().norm(dim=1))  # ||W||_c per output neuron
+
+    def forward(self, x):
+        weight = self.base.weight + self.scale * (self.up.weight @ self.down.weight)
+        weight = self.magnitude.unsqueeze(1) * weight / (weight.norm(dim=1, keepdim=True) + 1e-6)
+        return F.linear(x, weight, self.base.bias)
 
 
 @register_adapter('moelora')
