@@ -26,6 +26,13 @@ loss = cross-entropy + the detection losses
   `configs/dinov3_deformable_detr_lora.yaml` uses P2–P5. The head width is fixed at 256 regardless of the
   backbone, keeping it inside the parameter budget.
 
+  **Memory.** The deformable encoder runs self-attention over *all* pyramid tokens, so including P2 (stride 4)
+  at 512 px gives ~21,760 tokens per image (P2 alone is 16,384) — far more than a Faster R-CNN head, whose
+  memory is local. `configs/dinov3_deformable_detr_lora.yaml` therefore sets `grad_checkpointing: true`
+  (recompute encoder layers in backward) and `MSDeformAttn` accumulates levels one at a time instead of
+  stacking them. If it still OOMs, use coarser levels (`level_names: ['1', '2', '3', 'pool']`, the standard
+  Deformable-DETR set) or lower `--batch-size`; `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` also helps.
+
 **Loss weights** (`loss` in the config). The epoch loss is the sum of the terms below, each multiplied by its
 config weight (default 1.0), applied in `train.py`. The per-term values logged in parentheses are always raw.
 Use the key names of the active detector:

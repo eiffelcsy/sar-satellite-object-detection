@@ -29,6 +29,7 @@ detector:
     n_heads: 8
     n_points: 4
     level_names: ['0', '1', '2', '3']  # P2-P5 (strides 4, 8, 16, 32)
+    grad_checkpointing: true           # P2 makes the encoder long; recompute layers to save GPU memory
 preprocess:
   pseudo_rgb: true
   edge: sobel

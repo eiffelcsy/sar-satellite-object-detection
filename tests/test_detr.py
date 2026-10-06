@@ -47,6 +47,22 @@ def test_empty_targets_are_handled():
     assert all(torch.isfinite(v) and v.item() >= 0 for v in losses.values())
 
 
+def test_grad_checkpointing_matches_plain_and_backpropagates():
+    def run(grad_checkpointing):
+        torch.manual_seed(0)
+        head = DeformableDetrHead(in_channels=16, num_classes=3, num_queries=10, level_names=('0', '1'),
+                                  d_model=32, n_heads=4, n_points=2, enc_layers=2, dec_layers=2,
+                                  dim_feedforward=64, dropout=0.0, grad_checkpointing=grad_checkpointing).train()
+        _, losses = head(FEATURES, TARGETS, image_size=(64, 64))
+        total = sum(losses.values())
+        total.backward()
+        return float(total), sum(p.grad is not None for p in head.parameters())
+
+    plain, plain_grads = run(False)
+    ckpt, ckpt_grads = run(True)
+    assert abs(plain - ckpt) < 1e-5 and plain_grads == ckpt_grads
+
+
 def test_msdeformattn_preserves_shape_and_differentiates():
     attn = MSDeformAttn(d_model=32, n_levels=2, n_heads=4, n_points=2)
     query = torch.randn(2, 5, 32, requires_grad=True)

@@ -18,6 +18,7 @@ import torch
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 from torchvision.ops import box_convert, generalized_box_iou
 
 
@@ -86,15 +87,19 @@ class MSDeformAttn(nn.Module):
             + offsets / normalizer[None, None, None, :, None, :]
         value_list = value.split([h * w for h, w in spatial_shapes.tolist()], dim=1)
         sampling_grids = 2 * locations - 1
-        sampled = []
+        # Accumulate the levels one at a time: a single stacked tensor over all levels is many GiB at P2
+        # resolution, whereas each level's sampled tensor is `n_levels` times smaller.
+        weights = weights.transpose(1, 2)  # (n, heads, len_q, n_levels, n_points)
+        output = None
         for level, (h, w) in enumerate(spatial_shapes.tolist()):
             value_l = value_list[level].flatten(2).transpose(1, 2).reshape(
                 n * self.n_heads, self.d_model // self.n_heads, h, w)
             grid_l = sampling_grids[:, :, :, level].transpose(1, 2).flatten(0, 1)
-            sampled.append(F.grid_sample(value_l, grid_l, mode='bilinear', padding_mode='zeros',
-                                         align_corners=False))
-        weights = weights.transpose(1, 2).reshape(n * self.n_heads, 1, len_q, self.n_levels * self.n_points)
-        output = (torch.stack(sampled, dim=-2).flatten(-2) * weights).sum(-1)
+            sampled_l = F.grid_sample(value_l, grid_l, mode='bilinear', padding_mode='zeros',
+                                      align_corners=False)  # (n*heads, C/heads, len_q, n_points)
+            weight_l = weights[:, :, :, level].reshape(n * self.n_heads, 1, len_q, self.n_points)
+            term = (sampled_l * weight_l).sum(-1)  # (n*heads, C/heads, len_q)
+            output = term if output is None else output + term
         output = output.view(n, self.d_model, len_q).transpose(1, 2).contiguous()
         return self.output_proj(output)
 
@@ -118,14 +123,20 @@ class DeformableTransformerEncoderLayer(nn.Module):
 
 
 class DeformableTransformerEncoder(nn.Module):
-    def __init__(self, layer, num_layers):
+    def __init__(self, layer, num_layers, grad_checkpointing=False):
         super().__init__()
         self.layers = _get_clones(layer, num_layers)
+        self.grad_checkpointing = grad_checkpointing
 
     def forward(self, src, spatial_shapes, level_start_index, pos):
         reference_points = _reference_points(spatial_shapes, src.device).unsqueeze(0).repeat(src.shape[0], 1, 1, 1)
         for layer in self.layers:
-            src = layer(src, pos, reference_points, spatial_shapes, level_start_index)
+            if self.grad_checkpointing and self.training:
+                # Recompute the layer in backward instead of storing its (large) attention activations.
+                src = checkpoint(layer, src, pos, reference_points, spatial_shapes, level_start_index,
+                                 use_reentrant=False)
+            else:
+                src = layer(src, pos, reference_points, spatial_shapes, level_start_index)
         return src
 
 
@@ -270,7 +281,7 @@ class DeformableDetrHead(nn.Module):
     def __init__(self, in_channels=256, num_classes=9, num_queries=300, level_names=('0', '1', '2', '3'),
                  d_model=256, n_heads=8, n_points=4, enc_layers=6, dec_layers=6, dim_feedforward=1024,
                  dropout=0.1, score_thresh=0.05, detections_per_img=100, aux_loss=True,
-                 cost_class=1.0, cost_bbox=5.0, cost_giou=2.0, eos_coef=0.1):
+                 cost_class=1.0, cost_bbox=5.0, cost_giou=2.0, eos_coef=0.1, grad_checkpointing=False):
         super().__init__()
         self.num_classes, self.num_queries = num_classes, num_queries
         self.level_names = list(level_names)
@@ -280,7 +291,7 @@ class DeformableDetrHead(nn.Module):
         self.level_embed = nn.Parameter(torch.zeros(self.n_levels, d_model))
         self.encoder = DeformableTransformerEncoder(
             DeformableTransformerEncoderLayer(d_model, dim_feedforward, dropout, self.n_levels, n_heads, n_points),
-            enc_layers)
+            enc_layers, grad_checkpointing)
         self.decoder_layers = _get_clones(
             DeformableTransformerDecoderLayer(d_model, dim_feedforward, dropout, self.n_levels, n_heads, n_points),
             dec_layers)

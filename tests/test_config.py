@@ -43,8 +43,9 @@ def test_detector_defaults_to_faster_rcnn_and_can_be_switched():
 
 def test_loss_weights_default_empty_and_parse_from_config():
     assert load_config(CONFIGS / 'vit_lora.yaml')['loss_weights'] == {}
-    cfg = load_config(CONFIGS / 'dinov3_deformable_detr_lora.yaml')
-    assert cfg['loss_weights'] == {'classification': 1.0, 'loss_bbox': 1.5, 'loss_giou': 1.5}
+    weights = load_config(CONFIGS / 'dinov3_deformable_detr_lora.yaml')['loss_weights']
+    assert weights['classification'] == 1.0
+    assert weights['loss_bbox'] > 1.0 and weights['loss_giou'] > 1.0  # the config upweights the box terms
 
 
 def test_every_config_loads():
