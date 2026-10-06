@@ -37,6 +37,7 @@ def parse_args(argv=None):
     p.add_argument('--backbone', default=cfg['backbone'], help='backbone name from the registry (e.g. vit, terramind, dinov3)')
     p.add_argument('--init', choices=['pretrained', 'scratch'], default=cfg['init'])
     p.add_argument('--adapt', choices=['full', 'lora', 'moelora'], default=cfg['adapt'])
+    p.add_argument('--detector', choices=['faster_rcnn', 'deformable_detr'], default=cfg['detector'])
     p.add_argument('--epochs', type=int, default=cfg['epochs'])
     p.add_argument('--batch-size', type=int, default=cfg['batch_size'])
     p.add_argument('--lr', type=float, default=cfg['lr'])
@@ -82,6 +83,8 @@ def parse_args(argv=None):
     args.backbone_kwargs = dict(cfg['backbone_kwargs']) if args.backbone == cfg['backbone'] else {}
     args.peft_kwargs = dict(cfg['peft_kwargs']) if args.adapt == cfg['adapt'] else {}
     args.peft_targets = list(cfg['peft_targets']) if (args.adapt == cfg['adapt'] and cfg['peft_targets']) else None
+    args.detector_kwargs = dict(cfg['detector_kwargs']) if args.detector == cfg['detector'] else {}
+    args.loss_weights = dict(cfg['loss_weights'])
     if args.init == 'scratch' and args.adapt != 'full':
         p.error('--init scratch is only valid with --adapt full')
     if args.backbone_lr is None:
@@ -148,8 +151,14 @@ def lr_factor(step, warmup, total):
     return 0.5 * (1 + math.cos(math.pi * (step - warmup) / max(total - warmup, 1)))  # --epochs 1: no decay phase
 
 
-def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=None):
-    """One pass over the training set; the loss is cross-entropy plus the four Faster R-CNN losses."""
+def weighted_total(losses, loss_weights):
+    """Sum the loss terms, scaling each by its config weight (default 1.0)."""
+    weights = loss_weights or {}
+    return sum(weights.get(name, 1.0) * value for name, value in losses.items())
+
+
+def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=None, loss_weights=None):
+    """One pass over the training set; the loss is cross-entropy plus the detector losses, weighted per term."""
     model.train()
     start, seen = time.time(), 0
     for step, (images, labels, targets) in enumerate(loader, 1):
@@ -157,7 +166,7 @@ def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=Non
         with torch.autocast('cuda', dtype=torch.bfloat16):  # bf16 has fp32's range: no loss scaling needed
             logits, _, det_losses = model(images.cuda(), targets)
             losses = {'classification': F.cross_entropy(logits, labels.cuda()), **det_losses}
-        loss = sum(losses.values())
+        loss = weighted_total(losses, loss_weights)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -165,7 +174,7 @@ def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=Non
         seen += len(images)
         if step % 50 == 0 or step == len(loader):
             parts = ' '.join(f'{name} {value.item():.3f}' for name, value in losses.items())
-            log(f'epoch {epoch} iter {step}/{len(loader)} loss {loss.item():.3f} ({parts}) '
+            log(f'epoch {epoch} iter {step}/{len(loader)} loss {loss.item():.3f} (weighted total; raw: {parts}) '
                 f'lr {optimizer.param_groups[1]["lr"]:.2e} {seen / (time.time() - start):.1f} images/s', log_file)
             if run is not None:
                 run.log({f'train/{name}': value.item() for name, value in losses.items()}
@@ -222,7 +231,8 @@ def main():
         raise SystemExit(f'--pseudo-rgb builds 3 channels but backbone {args.backbone!r} expects '
                          f'{backbone.in_chans}; use a 3-channel backbone (e.g. dinov3).')
     add_adapters(backbone, args.adapt, targets=args.peft_targets, **args.peft_kwargs)  # 'full' is a no-op
-    model = MultiTaskModel(backbone, task_routing=args.adapt == 'moelora').cuda()
+    model = MultiTaskModel(backbone, task_routing=args.adapt == 'moelora', detector=args.detector,
+                           detector_kwargs=args.detector_kwargs).cuda()
     parameters = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log(f'parameters: {parameters:,} total, {trainable:,} trainable', log_file)
@@ -240,7 +250,7 @@ def main():
     # Train, validating every --eval-every epochs; the reported model is the last-epoch model
     history, start = [], time.time()
     for epoch in range(1, args.epochs + 1):
-        train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file, run)
+        train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file, run, args.loss_weights)
         if epoch % args.eval_every == 0 or epoch == args.epochs:
             val, val_detections = evaluate(model, val_loader, val_loader.dataset.instances_json)
             history.append({'epoch': epoch, **val})

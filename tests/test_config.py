@@ -33,6 +33,20 @@ def test_dinov3_config_selects_the_checkpoint_and_lora_location():
     assert cfg['pseudo_rgb'] is True and cfg['edge'] == 'sobel'  # 1-channel SAR -> 3-channel DINOv3 input
 
 
+def test_detector_defaults_to_faster_rcnn_and_can_be_switched():
+    assert load_config(CONFIGS / 'vit_lora.yaml')['detector'] == 'faster_rcnn'
+    cfg = load_config(CONFIGS / 'dinov3_deformable_detr_lora.yaml')
+    assert cfg['detector'] == 'deformable_detr'
+    assert cfg['detector_kwargs']['num_queries'] == 300
+    assert cfg['detector_kwargs']['level_names'] == ['0', '1', '2', '3']
+
+
+def test_loss_weights_default_empty_and_parse_from_config():
+    assert load_config(CONFIGS / 'vit_lora.yaml')['loss_weights'] == {}
+    cfg = load_config(CONFIGS / 'dinov3_deformable_detr_lora.yaml')
+    assert cfg['loss_weights'] == {'classification': 1.0, 'loss_bbox': 1.5, 'loss_giou': 1.5}
+
+
 def test_every_config_loads():
     paths = sorted(CONFIGS.glob('*.yaml'))
     assert paths, 'no configs/ found'

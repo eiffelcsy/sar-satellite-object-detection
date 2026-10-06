@@ -5,14 +5,40 @@ Back to the [README](../README.md).
 ## Model
 
 ```
-image [B,1,512,512] -> backbone -> tokens [B,1024,768]   (32 x 32 patches of 16 px)
+image [B,C,512,512] -> backbone -> tokens [B,1024,768]   (32 x 32 patches of 16 px; C=1 or 3)
   classification: mean over tokens -> LayerNorm -> Linear(768, 9)
   detection:      tokens as a [B,768,32,32] map -> SimpleFeaturePyramid (strides 4 to 64, 256 channels)
-                  -> RegionProposalNetwork + RoIHeads (torchvision Faster R-CNN, 9 classes + background)
-loss = cross-entropy + the four Faster R-CNN losses
+                  -> detector: RegionProposalNetwork + RoIHeads (torchvision Faster R-CNN) by default,
+                     or a Deformable-DETR head (query-based, no anchors); 9 classes + background
+loss = cross-entropy + the detection losses
 ```
 
 ![The reference model](reference_model.png)
+
+**Detector** (set in the config's `detector.name`):
+
+- `faster_rcnn` (default): torchvision Faster R-CNN (RPN + RoI heads), ~20 M with the neck.
+- `deformable_detr`: a compact Deformable-DETR head (`sarbench/detr.py`, Zhu et al. 2021), ~11 M at hidden
+  256, 6 encoder + 6 decoder layers, 300 queries. It projects every pyramid level to 256, runs multi-scale
+  deformable attention, and predicts boxes directly (no anchors/NMS). Training uses Hungarian matching + CE
+  (no-object class) + L1 + GIoU; evaluation returns the same `{'boxes','labels','scores'}` format. Its
+  `level_names` picks which neck levels feed it (`'0'`=stride 4 … `'pool'`=stride 64);
+  `configs/dinov3_deformable_detr_lora.yaml` uses P2–P5. The head width is fixed at 256 regardless of the
+  backbone, keeping it inside the parameter budget.
+
+**Loss weights** (`loss` in the config). The epoch loss is the sum of the terms below, each multiplied by its
+config weight (default 1.0), applied in `train.py`. The per-term values logged in parentheses are always raw.
+Use the key names of the active detector:
+
+- always: `classification` (the multi-task class head, cross-entropy).
+- `deformable_detr`: `loss_classifier` (query set CE), `loss_bbox` (L1), `loss_giou`, `loss_aux` (auxiliary
+  decoder layers). E.g. `loss: {loss_bbox: 1.5, loss_giou: 1.5}` leans on the boxes.
+- `faster_rcnn`: `loss_objectness`, `loss_rpn_box_reg`, `loss_classifier`, `loss_box_reg` (`loss_box_reg` is
+  the RoI box regression; `loss_rpn_box_reg` the RPN one).
+
+For `deformable_detr`, the Hungarian matcher costs (`cost_bbox`, `cost_giou`) and the no-object weight
+(`eos_coef`) live in `sarbench/detr.py` and affect assignment, not the summed loss; pass them via
+`detector.params` if needed.
 
 **Backbones** (set in the config's `backbone.name`):
 

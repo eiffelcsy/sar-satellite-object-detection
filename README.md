@@ -82,9 +82,13 @@ python train.py --config configs/vit_lora.yaml   # the Δm reference; one run, a
 bash run_all.sh                                  # all eight reference runs, about 7 h
 ```
 
-The backbone and the PEFT method are chosen in a YAML config under `configs/` (schema in
+The backbone, the PEFT method and the detection head are chosen in a YAML config under `configs/` (schema in
 `sarbench/config.py`); the command line stays available for one-off overrides, e.g.
 `python train.py --config configs/vit_lora.yaml --epochs 2 --limit 64`.
+
+The detector is `faster_rcnn` by default; `configs/dinov3_deformable_detr_lora.yaml` switches to a
+query-based **Deformable-DETR** head (`detector.name: deformable_detr`, ~11 M parameters) that samples every
+feature-pyramid level, including the stride-4 P2 map for tiny objects.
 
 - Reference configs: `vit_{full,lora,moelora}`, `terramind_{full,lora,moelora}`, `vit_scratch`,
   `terramind_scratch`. `python train.py --config configs/<name>.yaml` (`python train.py -h`).
@@ -159,7 +163,8 @@ sarbench/             the code behind train.py
 ├── channels.py       pseudo-RGB assembly for the DINOv3 input (amplitude + despeckled + edge)
 ├── backbones.py      backbone registry: ViT (ImageNet-21k), TerraMind-1.0-base, DINOv3
 ├── adapters.py       PEFT registry: LoRA, MoE-LoRA on a frozen backbone
-├── model.py          backbone + class head + ViTDet feature pyramid + Faster R-CNN
+├── detr.py           Deformable-DETR detection head (optional `detector.name`)
+├── model.py          backbone + class head + ViTDet feature pyramid + detector
 └── metrics.py        accuracy, macro-F1, COCO box AP
 tests/                checks of sarbench/ (python -m pytest tests)
 docs/DETAILS.md       model, training protocol, design notes, time and memory

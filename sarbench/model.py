@@ -1,4 +1,7 @@
-"""The multi-task model: one shared ViT backbone feeds a classification head and a Faster R-CNN detector."""
+"""The multi-task model: one shared ViT backbone feeds a classification head and a detector.
+
+The detector is either torchvision Faster R-CNN (anchors + RPN + RoI heads, the default) or a Deformable-DETR
+head (query-based, no anchors), selected by `detector` / the config's `detector.name`."""
 from collections import OrderedDict
 
 import torch
@@ -12,6 +15,7 @@ from torchvision.models.detection.rpn import RegionProposalNetwork, RPNHead
 from torchvision.ops import MultiScaleRoIAlign
 
 from .adapters import set_task
+from .detr import DeformableDetrHead
 
 
 class SimpleFeaturePyramid(nn.Module):
@@ -40,25 +44,32 @@ class SimpleFeaturePyramid(nn.Module):
 class MultiTaskModel(nn.Module):
     """backbone tokens -> classification logits (mean token -> LayerNorm -> Linear) and Faster R-CNN detections."""
 
-    def __init__(self, backbone, task_routing: bool, num_classes=9):
+    def __init__(self, backbone, task_routing: bool, num_classes=9, detector='faster_rcnn', detector_kwargs=None):
         super().__init__()
         self.backbone = backbone
         self.task_routing = task_routing  # MoE-LoRA: the backbone runs once per task, with that task's routers
+        self.detector = detector
         self.cls_head = nn.Sequential(nn.LayerNorm(backbone.embed_dim), nn.Linear(backbone.embed_dim, num_classes))
         self.neck = SimpleFeaturePyramid(backbone.embed_dim)
-        # Small objects (median ~16 px at 512 px, 99 % below ~240 px): two anchor scales per octave, from 8 px at
-        # stride 4 up to 181 px at stride 64, times 3 aspect ratios = 6 anchors per location.
-        anchors = AnchorGenerator(((8, 11), (16, 23), (32, 45), (64, 91), (128, 181)), ((0.5, 1.0, 2.0),) * 5)
-        # Everything else is torchvision's Faster R-CNN default.
-        self.rpn = RegionProposalNetwork(
-            anchors, RPNHead(256, 6), fg_iou_thresh=0.7, bg_iou_thresh=0.3, batch_size_per_image=256,
-            positive_fraction=0.5, pre_nms_top_n=dict(training=2000, testing=1000),
-            post_nms_top_n=dict(training=2000, testing=1000), nms_thresh=0.7)
-        self.roi_heads = RoIHeads(
-            MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=7, sampling_ratio=2),
-            TwoMLPHead(256 * 7 * 7, 1024), FastRCNNPredictor(1024, num_classes + 1),  # + 1: background
-            fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=512, positive_fraction=0.25,
-            bbox_reg_weights=None, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100)
+        if detector == 'deformable_detr':
+            self.det_head = DeformableDetrHead(in_channels=256, num_classes=num_classes,
+                                               **(detector_kwargs or {}))
+        elif detector == 'faster_rcnn':
+            # Small objects (median ~16 px at 512 px, 99 % below ~240 px): two anchor scales per octave, from
+            # 8 px at stride 4 up to 181 px at stride 64, times 3 aspect ratios = 6 anchors per location.
+            anchors = AnchorGenerator(((8, 11), (16, 23), (32, 45), (64, 91), (128, 181)), ((0.5, 1.0, 2.0),) * 5)
+            # Everything else is torchvision's Faster R-CNN default.
+            self.rpn = RegionProposalNetwork(
+                anchors, RPNHead(256, 6), fg_iou_thresh=0.7, bg_iou_thresh=0.3, batch_size_per_image=256,
+                positive_fraction=0.5, pre_nms_top_n=dict(training=2000, testing=1000),
+                post_nms_top_n=dict(training=2000, testing=1000), nms_thresh=0.7)
+            self.roi_heads = RoIHeads(
+                MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=7, sampling_ratio=2),
+                TwoMLPHead(256 * 7 * 7, 1024), FastRCNNPredictor(1024, num_classes + 1),  # + 1: background
+                fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=512, positive_fraction=0.25,
+                bbox_reg_weights=None, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100)
+        else:
+            raise ValueError(f"unknown detector '{detector}'; available: faster_rcnn, deformable_detr")
 
     def forward(self, images, targets=None):
         """images [B, 1, H, W], targets: per-image {'boxes' XYXY, 'labels' 1..9} (training only) ->
@@ -72,10 +83,14 @@ class MultiTaskModel(nn.Module):
         h, w = images.shape[-2] // 16, images.shape[-1] // 16  # one token per 16 x 16 patch
         features = self.neck(tokens.transpose(1, 2).unflatten(2, (h, w)))  # tokens as a [B, 768, h, w] map
         # Precision rule: the box coder casts anchors to the dtype of the regression output, so in bf16 every
-        # coordinate near 512 would snap to a 2 px grid. RPN and RoIHeads therefore run in fp32.
+        # coordinate near 512 would snap to a 2 px grid. The detection head therefore runs in fp32.
         with torch.autocast(images.device.type, enabled=False):
             features = {name: f.float() for name, f in features.items()}
-            image_list = ImageList(images, [tuple(images.shape[-2:])] * len(images))
-            proposals, rpn_losses = self.rpn(image_list, features, targets)
-            detections, roi_losses = self.roi_heads(features, proposals, image_list.image_sizes, targets)
-        return logits, detections, {**rpn_losses, **roi_losses}
+            if self.detector == 'deformable_detr':
+                detections, det_losses = self.det_head(features, targets, image_size=tuple(images.shape[-2:]))
+            else:
+                image_list = ImageList(images, [tuple(images.shape[-2:])] * len(images))
+                proposals, rpn_losses = self.rpn(image_list, features, targets)
+                detections, roi_losses = self.roi_heads(features, proposals, image_list.image_sizes, targets)
+                det_losses = {**rpn_losses, **roi_losses}
+        return logits, detections, det_losses
