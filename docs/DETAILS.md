@@ -70,6 +70,9 @@ single gray channel to RGB.
 - `moelora`: as `lora`, but the rank-16 update is split into 4 experts of rank 4 (alpha = 8, so alpha / r = 2
   as in `lora`), mixed per token by a softmax router. Each task has its own router (1.03 M trainable backbone
   parameters for the ViT).
+- `moedora`: mixture-of-experts DoRA — each expert is a DoRA update (`W_e = W + (alpha / r) B_e A_e`,
+  weight-decomposed and renormalized with a learned per-output magnitude), mixed per token by the task router.
+  Unlike `moelora` it renormalizes each expert before gating; it also runs the backbone once per task.
 - `peft.targets` (optional): which module groups a backbone exposes for adaptation. ViT/TerraMind have only
   `attn` (their `qkv`/`proj`); DINOv3 supports `attn` (q/k/v/o_proj) and `mlp` (up/down_proj, fc1/fc2).
   `configs/dinov3_lora.yaml` sets `[attn, mlp]`; without it, only attention is adapted.

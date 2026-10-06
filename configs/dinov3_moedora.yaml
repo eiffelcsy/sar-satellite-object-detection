@@ -1,0 +1,37 @@
+# DINOv3 ViT-B/16 + MoE-DoRA — the ablation against configs/dinov3_dora.yaml and configs/dinov3_moelora.yaml.
+#
+# Everything except the PEFT method matches the other two (same backbone, pseudo-RGB, detail stem,
+# mosaic/copy-paste, loss weights, 48 epochs, attn+mlp targets). Capacity is matched to DoRA: 4 experts x
+# rank 8 = rank 32 total and alpha / rank = 1. Each expert is a DoRA update (weight-decomposed + renormalized),
+# mixed per token by the task router; the backbone therefore runs once per task.
+#
+# Gated-weights note: see configs/dinov3_lora.yaml.
+# Run: python train.py --config configs/dinov3_moedora.yaml
+name: dinov3_moedora
+backbone:
+  name: dinov3
+  pretrained: true
+  params:
+    model_name: facebook/dinov3-vitb16-pretrain-lvd1689m
+peft:
+  method: moedora
+  params:
+    experts: 4
+    rank: 8
+    alpha: 8
+  targets: [attn, mlp]
+model:
+  detail_stem: true
+preprocess:
+  pseudo_rgb: true
+  edge: sobel
+  cache: preprocess_cache
+data:
+  mosaic: 0.3
+  copy_paste: 0.5
+loss:
+  classification: 1.0
+  loss_box_reg: 2.0
+  loss_rpn_box_reg: 1.5
+train:
+  epochs: 48

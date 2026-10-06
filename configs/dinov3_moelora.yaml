@@ -1,4 +1,11 @@
-# DINOv3 ViT-B/16 (Meta) + MoE-LoRA. See configs/dinov3_lora.yaml for the gated-weights note.
+# DINOv3 ViT-B/16 + MoE-LoRA — the DoRA ablation (configs/dinov3_dora.yaml).
+#
+# Everything except the PEFT method is identical to configs/dinov3_dora.yaml (same backbone, pseudo-RGB,
+# detail stem, mosaic/copy-paste, loss weights, 48 epochs, attn+mlp targets). The MoE-LoRA update is matched
+# to DoRA's capacity: 4 experts x rank 8 = rank 32 total (DoRA uses rank 32) and alpha / rank = 1 (DoRA uses
+# alpha 32 / rank 32 = 1). The repo reference MoE-LoRA used 4 experts x rank 4 (rank 16).
+#
+# Gated-weights note: see configs/dinov3_lora.yaml.
 # Run: python train.py --config configs/dinov3_moelora.yaml
 name: dinov3_moelora
 backbone:
@@ -10,12 +17,21 @@ peft:
   method: moelora
   params:
     experts: 4
-    rank: 4
+    rank: 8
     alpha: 8
   targets: [attn, mlp]
+model:
+  detail_stem: true
 preprocess:
   pseudo_rgb: true
   edge: sobel
   cache: preprocess_cache
+data:
+  mosaic: 0.3
+  copy_paste: 0.5
+loss:
+  classification: 1.0
+  loss_box_reg: 2.0
+  loss_rpn_box_reg: 1.5
 train:
   epochs: 48

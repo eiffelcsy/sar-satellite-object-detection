@@ -41,6 +41,20 @@ def test_dora_config_with_augmentation_stem_and_long_schedule():
     assert cfg['epochs'] == 48
 
 
+def test_peft_configs_match_for_the_ablation():
+    """dinov3_{dora,moelora,moedora} differ only in the PEFT method, so any metric gap is the adapter."""
+    dora = load_config(CONFIGS / 'dinov3_dora.yaml')
+    shared = ('backbone', 'init', 'backbone_kwargs', 'peft_targets', 'detail_stem', 'pseudo_rgb', 'edge',
+              'mosaic', 'copy_paste', 'loss_weights', 'epochs', 'preprocess_cache')
+    for name in ('moelora', 'moedora'):
+        cfg = load_config(CONFIGS / f'dinov3_{name}.yaml')
+        assert all(dora[key] == cfg[key] for key in shared), name
+        assert cfg['adapt'] == name
+        assert cfg['peft_kwargs']['experts'] * cfg['peft_kwargs']['rank'] == dora['peft_kwargs']['rank']
+        assert cfg['peft_kwargs']['alpha'] / cfg['peft_kwargs']['rank'] \
+            == dora['peft_kwargs']['alpha'] / dora['peft_kwargs']['rank']
+
+
 def test_loss_weights_default_empty_and_parse_from_config():
     assert load_config(CONFIGS / 'vit_lora.yaml')['loss_weights'] == {}
     weights = load_config(CONFIGS / 'dinov3_dora.yaml')['loss_weights']

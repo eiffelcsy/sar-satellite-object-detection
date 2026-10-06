@@ -91,9 +91,10 @@ a real-detail **P2 conv stem** + **mosaic/copy-paste** augmentation, 48 epochs.
 
 - Reference configs: `vit_{full,lora,moelora}`, `terramind_{full,lora,moelora}`, `vit_scratch`,
   `terramind_scratch`. `python train.py --config configs/<name>.yaml` (`python train.py -h`).
-- DINOv3: `configs/dinov3_{dora,lora,moelora,full}.yaml` use the DINOv3 ViT-B/16 backbone with a pseudo-RGB
-  input (normalized amplitude + despeckled base + Sobel edge map). Accept the (gated) licence on the model page
-  and `huggingface-cli login` once first.
+- DINOv3: `configs/dinov3_{dora,moelora,moedora,lora,full}.yaml` use the DINOv3 ViT-B/16 backbone with a
+  pseudo-RGB input (normalized amplitude + despeckled base + Sobel edge map). The `_dora`, `_moelora` and
+  `_moedora` configs share every other hyper-parameter, so they form a clean PEFT ablation. Accept the (gated)
+  licence on the model page and `huggingface-cli login` once first.
 - `full` and `scratch` train 106 M parameters: over the 40 M budget, for reference only.
 - Pretrained weights download from Hugging Face on first use (ViT 0.4 GB, TerraMind 1.5 GB, DINOv3 ~0.35 GB).
 - Times for one RTX PRO 6000 Blackwell GPU. Memory: [docs/DETAILS.md](docs/DETAILS.md#time-and-memory).
@@ -161,7 +162,7 @@ sarbench/             the code behind train.py
 ├── data.py           images + boxes at 512 × 512, flips, mosaic, copy-paste
 ├── channels.py       pseudo-RGB assembly for the DINOv3 input (amplitude + despeckled + edge)
 ├── backbones.py      backbone registry: ViT (ImageNet-21k), TerraMind-1.0-base, DINOv3
-├── adapters.py       PEFT registry: LoRA, DoRA, MoE-LoRA on a frozen backbone
+├── adapters.py       PEFT registry: LoRA, DoRA, MoE-LoRA, MoE-DoRA on a frozen backbone
 ├── model.py          backbone + class head + ViTDet pyramid (+ P2 stem) + Faster R-CNN
 └── metrics.py        accuracy, macro-F1, COCO box AP
 tests/                checks of sarbench/ (python -m pytest tests)

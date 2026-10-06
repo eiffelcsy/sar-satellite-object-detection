@@ -36,7 +36,7 @@ def parse_args(argv=None):
                    else Path(__file__).resolve().parents[1] / 'dataset' / 'SARFact-Course-20K')
     p.add_argument('--backbone', default=cfg['backbone'], help='backbone name from the registry (e.g. vit, terramind, dinov3)')
     p.add_argument('--init', choices=['pretrained', 'scratch'], default=cfg['init'])
-    p.add_argument('--adapt', choices=['full', 'lora', 'dora', 'moelora'], default=cfg['adapt'])
+    p.add_argument('--adapt', choices=['full', 'lora', 'dora', 'moelora', 'moedora'], default=cfg['adapt'])
     p.add_argument('--detail-stem', action='store_true', default=cfg['detail_stem'],
                    help='add a conv stem on the input to give the P2 level real stride-4 detail')
     p.add_argument('--epochs', type=int, default=cfg['epochs'])
@@ -236,7 +236,7 @@ def main():
         raise SystemExit(f'--pseudo-rgb builds 3 channels but backbone {args.backbone!r} expects '
                          f'{backbone.in_chans}; use a 3-channel backbone (e.g. dinov3).')
     add_adapters(backbone, args.adapt, targets=args.peft_targets, **args.peft_kwargs)  # 'full' is a no-op
-    model = MultiTaskModel(backbone, task_routing=args.adapt == 'moelora',
+    model = MultiTaskModel(backbone, task_routing=args.adapt in ('moelora', 'moedora'),
                            detail_stem=args.detail_stem).cuda()
     parameters = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

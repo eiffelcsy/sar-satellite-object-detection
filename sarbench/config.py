@@ -10,7 +10,7 @@ Schema (only `backbone` and `peft` are required):
       pretrained: true             # false -> random weights ('scratch')
       params: {}                   # forwarded to the backbone constructor
     peft:
-      method: dora                 # full | lora | dora | moelora
+      method: dora                 # full | lora | dora | moelora | moedora
       params: {rank: 16, alpha: 32}  # forwarded to the adapter constructor
       targets: [attn, mlp]         # optional; backbone module groups to adapt (default: the backbone's own)
     loss:                          # optional per-term weights on top of the summed loss (default 1.0 each)
