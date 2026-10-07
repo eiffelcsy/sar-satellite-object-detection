@@ -56,6 +56,16 @@ def test_peft_configs_match_for_the_ablation():
             == dora['peft_kwargs']['alpha'] / dora['peft_kwargs']['rank']
 
 
+def test_splus_ablation_only_changes_the_backbone_checkpoint():
+    dora = load_config(CONFIGS / 'dinov3_dora.yaml')
+    splus = load_config(CONFIGS / 'dinov3_splus_dora.yaml')
+    assert splus['backbone'] == dora['backbone'] == 'dinov3'
+    assert splus['backbone_kwargs']['model_name'] == 'facebook/dinov3-vits16plus-pretrain-lvd1689m'
+    for key in ('adapt', 'peft_kwargs', 'peft_targets', 'detail_stem', 'pseudo_rgb', 'edge',
+                'mosaic', 'copy_paste', 'loss_weights', 'epochs'):
+        assert splus[key] == dora[key], key
+
+
 def test_loss_weights_default_empty_and_parse_from_config():
     assert load_config(CONFIGS / 'vit_lora.yaml')['loss_weights'] == {}
     weights = load_config(CONFIGS / 'dinov3_dora.yaml')['loss_weights']

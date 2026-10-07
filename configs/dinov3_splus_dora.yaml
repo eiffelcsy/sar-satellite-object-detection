@@ -1,0 +1,38 @@
+# Backbone-size ablation: DINOv3 ViT-S+/16 (distilled) instead of ViT-B/16.
+#
+# Everything except `backbone.params.model_name` matches configs/dinov3_dora.yaml (same pseudo-RGB input,
+# DoRA on attn+mlp, detail stem, mosaic/copy-paste, loss weights, 48 epochs), so any metric gap is the
+# backbone. ViT-S+/16 is much smaller (~29 M backbone vs ~86 M), leaving room under the 130 M / 40 M caps.
+#
+# Gated weights: accept the licence at
+#   https://huggingface.co/facebook/dinov3-vits16plus-pretrain-lvd1689m
+# and `huggingface-cli login` once first.
+#
+# Run: python train.py --config configs/dinov3_splus_dora.yaml
+name: dinov3_splus_dora
+backbone:
+  name: dinov3
+  pretrained: true
+  params:
+    model_name: facebook/dinov3-vits16plus-pretrain-lvd1689m
+peft:
+  method: dora
+  params:
+    rank: 32
+    alpha: 32
+  targets: [attn, mlp]
+model:
+  detail_stem: true
+preprocess:
+  pseudo_rgb: true
+  edge: sobel
+  cache: preprocess_cache
+data:
+  mosaic: 0.3
+  copy_paste: 0.5
+loss:
+  classification: 1.0
+  loss_box_reg: 2.0
+  loss_rpn_box_reg: 1.5
+train:
+  epochs: 48

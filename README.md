@@ -95,6 +95,8 @@ a real-detail **P2 conv stem** + **mosaic/copy-paste** augmentation, 48 epochs.
   pseudo-RGB input (normalized amplitude + despeckled base + Sobel edge map). The `_dora`, `_moelora` and
   `_moedora` configs share every other hyper-parameter, so they form a clean PEFT ablation. Accept the (gated)
   licence on the model page and `huggingface-cli login` once first.
+- `configs/dinov3_splus_dora.yaml` is the backbone-size ablation: the smaller distilled DINOv3 **ViT-S+/16**
+  (`facebook/dinov3-vits16plus-pretrain-lvd1689m`, ~29 M) with the same recipe as `dinov3_dora`.
 - `full` and `scratch` train 106 M parameters: over the 40 M budget, for reference only.
 - Pretrained weights download from Hugging Face on first use (ViT 0.4 GB, TerraMind 1.5 GB, DINOv3 ~0.35 GB).
 - Times for one RTX PRO 6000 Blackwell GPU. Memory: [docs/DETAILS.md](docs/DETAILS.md#time-and-memory).

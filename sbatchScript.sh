@@ -53,4 +53,5 @@ source .venv/bin/activate
 # srun --gres=gpu:1 python train.py --config configs/vit_moelora.yaml --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/ --wandb
 # srun --gres=gpu:1 python train.py --config configs/dinov3_moelora.yaml --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/ --wandb
 # srun --gres=gpu:1 python train.py --config configs/dinov3_dora.yaml --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/ --wandb
-srun --gres=gpu:1 python train.py --config configs/dinov3_moedora.yaml --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/ --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_moedora.yaml --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/ --wandb
+srun --gres=gpu:1 python train.py --config configs/dinov3_splus_dora.yaml --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/ --wandb

@@ -40,9 +40,12 @@ the base transform, so evaluation and box mapping are unaffected:
 - `terramind`: TerraMind-1.0-base (IBM/ESA), an Earth-observation model, through its Sentinel-1 GRD input.
 - `dinov3`: DINOv3 ViT (Meta) through HuggingFace transformers; the default checkpoint is
   `facebook/dinov3-vitb16-pretrain-lvd1689m` (~86 M). The configuration is set in `configs/dinov3_*.yaml`;
-  `model_name` can be swapped for `facebook/dinov3-vits16-pretrain-lvd1689m` (lighter) or
-  `facebook/dinov3-vitl16-pretrain-sat493m` (satellite, ~303 M, over the parameter budget). DINOv3 weights
-  are gated: accept the licence and `huggingface-cli login`.
+  `model_name` can be swapped for `facebook/dinov3-vits16plus-pretrain-lvd1689m` (distilled ViT-S+/16, ~29 M;
+  the backbone-size ablation, `configs/dinov3_splus_dora.yaml`), `facebook/dinov3-vits16-pretrain-lvd1689m`
+  (ViT-S/16) or `facebook/dinov3-vitl16-pretrain-sat493m` (satellite, ~303 M, over the parameter budget).
+  DINOv3 weights are gated: accept the licence and `huggingface-cli login`.
+  `hidden_size` is read from the checkpoint, so a smaller ViT-S+ automatically shrinks the neck, class head and
+  adapter dimensions.
   Adapting DINOv3 uses its separate `q_proj` / `k_proj` / `v_proj` (the "qkv_proj") and `o_proj` ("out_proj")
   attention layers plus the `up_proj` / `down_proj` MLP layers (fc1/fc2), selected by the config's
   `peft.targets: [attn, mlp]`. `configs/dinov3_lora.yaml` uses r = 32, alpha = 32.
