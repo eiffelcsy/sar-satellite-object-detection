@@ -126,7 +126,8 @@ class MoEDoRA(nn.Module):
         fused = torch.einsum('nle,oe->nlo', gates, factor).to(base_out.dtype)  # sum_e g_e f_e
         gated = gates.repeat_interleave(self.rank, dim=-1)  # expert e's gate on each of its r hidden units
         delta_out = F.linear(self.down(x) * gated, (factor.unsqueeze(-1) * up).reshape(out_f, -1))
-        return base_out * fused + self.scale * delta_out + self.base.bias
+        out = base_out * fused + self.scale * delta_out
+        return out if self.base.bias is None else out + self.base.bias  # DINOv3 projections have bias=False
 
 
 def add_adapters(backbone, kind, targets=None, **params):

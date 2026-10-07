@@ -117,6 +117,15 @@ def test_moedora_is_a_noop_at_init_and_routes_by_task():
     assert layer.magnitude.requires_grad and layer.down.weight.requires_grad
 
 
+def test_moedora_handles_a_bias_free_base():
+    """DINOv3 projections use bias=False, so the recomposed forward must tolerate base.bias is None."""
+    layer = MoEDoRA(nn.Linear(16, 8, bias=False), experts=2, rank=3, alpha=6).double()
+    x = torch.randn(2, 5, 16, dtype=torch.float64)
+    torch.testing.assert_close(layer(x), layer.base(x))  # exact no-op at init
+    nn.init.normal_(layer.up.weight, std=0.1)
+    assert layer(x).shape == (2, 5, 8) and torch.isfinite(layer(x)).all()
+
+
 def test_moedora_lean_forward_matches_the_explicit_experts():
     """The memory-lean low-rank forward equals summing the E explicitly renormalized DoRA experts."""
     torch.manual_seed(0)
