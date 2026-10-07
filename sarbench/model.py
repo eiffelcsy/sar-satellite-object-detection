@@ -1,4 +1,8 @@
-"""The multi-task model: one shared ViT backbone feeds a classification head and a Faster R-CNN detector."""
+"""The multi-task model: one shared ViT backbone feeds a classification head and a Faster R-CNN detector.
+
+Configurable pieces (`model.*` in the YAML): `detail_stem` (real stride-4 detail for P2), `fusion_layers`
+(learnable fusion of several ViT blocks before the neck) and `head` (`standard` | `deform` | `cascade` RoI head).
+"""
 from collections import OrderedDict
 
 import torch
@@ -12,6 +16,7 @@ from torchvision.models.detection.rpn import RegionProposalNetwork, RPNHead
 from torchvision.ops import MultiScaleRoIAlign
 
 from .adapters import set_task
+from .heads import CascadeRoIHeads, DeformConvBoxHead
 
 
 class SimpleFeaturePyramid(nn.Module):
@@ -57,39 +62,104 @@ class ConvStem(nn.Module):
         return self.stem(x)
 
 
+class LayerFusion(nn.Module):
+    """Learnable softmax-weighted sum of the tokens from several ViT blocks (`model.fusion_layers`).
+
+    Earlier blocks carry lower-level, higher-resolution detail that the final block has abstracted away; fusing
+    them before the neck gives the FPN richer features for small objects. Initialized as (almost) the last
+    block, so it starts from the standard single-layer behaviour.
+    """
+
+    def __init__(self, num_layers):
+        super().__init__()
+        self.weights = nn.Parameter(torch.zeros(num_layers))
+        with torch.no_grad():
+            self.weights[-1] = 3.0
+
+    def forward(self, tokens):
+        weights = self.weights.softmax(0).view(-1, 1, 1)
+        return sum(weight * token for weight, token in zip(weights, tokens))
+
+
 class MultiTaskModel(nn.Module):
     """backbone tokens -> classification logits (mean token -> LayerNorm -> Linear) and Faster R-CNN detections."""
 
-    def __init__(self, backbone, task_routing: bool, num_classes=9, detail_stem=False):
+    def __init__(self, backbone, task_routing: bool, num_classes=9, detail_stem=False,
+                 fusion_layers=None, head='standard', head_params=None):
         super().__init__()
         self.backbone = backbone
         self.task_routing = task_routing  # MoE-LoRA: the backbone runs once per task, with that task's routers
         self.cls_head = nn.Sequential(nn.LayerNorm(backbone.embed_dim), nn.Linear(backbone.embed_dim, num_classes))
         self.neck = SimpleFeaturePyramid(backbone.embed_dim)
         self.detail_stem = ConvStem(backbone.in_chans) if detail_stem else None  # real detail for P2
+        # Multi-layer fusion: normalize negative indices, register hooks in execution order.
+        self.fusion_layers = self.fusion = None
+        if fusion_layers:
+            blocks = len(backbone.blocks)
+            self.fusion_layers = sorted(i % blocks for i in fusion_layers)
+            self.fusion = LayerFusion(len(self.fusion_layers))
         # Small objects (median ~16 px at 512 px, 99 % below ~240 px): two anchor scales per octave, from 8 px at
         # stride 4 up to 181 px at stride 64, times 3 aspect ratios = 6 anchors per location.
         anchors = AnchorGenerator(((8, 11), (16, 23), (32, 45), (64, 91), (128, 181)), ((0.5, 1.0, 2.0),) * 5)
-        # Everything else is torchvision's Faster R-CNN default.
         self.rpn = RegionProposalNetwork(
             anchors, RPNHead(256, 6), fg_iou_thresh=0.7, bg_iou_thresh=0.3, batch_size_per_image=256,
             positive_fraction=0.5, pre_nms_top_n=dict(training=2000, testing=1000),
             post_nms_top_n=dict(training=2000, testing=1000), nms_thresh=0.7)
-        self.roi_heads = RoIHeads(
-            MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=7, sampling_ratio=2),
-            TwoMLPHead(256 * 7 * 7, 1024), FastRCNNPredictor(1024, num_classes + 1),  # + 1: background
-            fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=512, positive_fraction=0.25,
-            bbox_reg_weights=None, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100)
+        self.roi_heads = self._build_roi_heads(num_classes, head, head_params or {})
+
+    def _build_roi_heads(self, num_classes, head, params):
+        """The RoI head ablation: torchvision's head, a Deformable-Conv head, or Cascade R-CNN."""
+        roi_pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=7, sampling_ratio=2)
+        common = dict(fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=512, positive_fraction=0.25,
+                      bbox_reg_weights=None, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100)
+        if head == 'standard':
+            return RoIHeads(roi_pool, TwoMLPHead(256 * 7 * 7, 1024), FastRCNNPredictor(1024, num_classes + 1),
+                            **common)
+        if head == 'deform':
+            return RoIHeads(roi_pool, DeformConvBoxHead(**params), FastRCNNPredictor(1024, num_classes + 1),
+                            **common)
+        if head == 'cascade':
+            stages = params.get('num_stages', 3)
+            # A per-stage box head costs ~14 M each (3 stages would blow the 40 M trainable budget), so the
+            # head is shared by default and only the per-stage predictors (with rising IoU thresholds) differ.
+            box_heads = [TwoMLPHead(256 * 7 * 7, 1024) for _ in range(1 if params.get('share_head', True)
+                                                                        else stages)]
+            predictors = [FastRCNNPredictor(1024, num_classes + 1) for _ in range(stages)]
+            thresholds = tuple(params.get('fg_iou_thresholds', ())) \
+                or tuple(round(0.5 + 0.1 * i, 2) for i in range(stages))
+            return CascadeRoIHeads(
+                roi_pool, box_heads, predictors, fg_iou_thresholds=thresholds,
+                bg_iou_threshold=params.get('bg_iou_threshold', 0.5),
+                batch_size_per_image=512, positive_fraction=0.25, bbox_reg_weights=None,
+                score_thresh=0.05, nms_thresh=0.5, detections_per_img=100,
+                stage_loss_weights=params.get('stage_loss_weights'))
+        raise ValueError(f"unknown head '{head}'; available: standard, deform, cascade")
+
+    def _backbone_tokens(self, images):
+        """Run the backbone; with fusion, return the learnable weighted sum of the selected blocks' tokens."""
+        if self.fusion is None:
+            return self.backbone(images)
+        captured = []
+        handles = [self.backbone.blocks[i].register_forward_hook(
+            lambda module, args, output: captured.append(output[0] if isinstance(output, tuple) else output))
+            for i in self.fusion_layers]
+        try:
+            self.backbone(images)
+        finally:
+            for handle in handles:
+                handle.remove()
+        prefix = getattr(self.backbone, 'num_prefix_tokens', 0)
+        return self.fusion([tokens[:, prefix:] for tokens in captured])
 
     def forward(self, images, targets=None):
         """images [B, C, H, W], targets: per-image {'boxes' XYXY, 'labels' 1..9} (training only) ->
-        (logits [B, num_classes], per-image detections (eval mode), the four Faster R-CNN losses (training mode))."""
+        (logits [B, num_classes], per-image detections (eval mode), the detection losses (training mode))."""
         set_task(self.backbone, 0)  # 0 = classification, 1 = detection; a no-op without MoE-LoRA
-        tokens = self.backbone(images)
+        tokens = self._backbone_tokens(images)
         logits = self.cls_head(tokens.mean(dim=1))
         if self.task_routing:
             set_task(self.backbone, 1)
-            tokens = self.backbone(images)
+            tokens = self._backbone_tokens(images)
         h, w = images.shape[-2] // 16, images.shape[-1] // 16  # one token per 16 x 16 patch
         features = self.neck(tokens.transpose(1, 2).unflatten(2, (h, w)))  # tokens as a [B, 768, h, w] map
         if self.detail_stem is not None:  # add genuine stride-4 detail (from the pixels) to the upsampled P2

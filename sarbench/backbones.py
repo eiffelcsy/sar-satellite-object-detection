@@ -33,6 +33,7 @@ class ViT(nn.Module):
                                      in_chans=in_chans, num_classes=0)
         self.embed_dim = self.vit.embed_dim
         self.in_chans = in_chans
+        self.num_prefix_tokens = self.vit.num_prefix_tokens
 
     @property
     def blocks(self):
@@ -58,6 +59,7 @@ class TerraMind(nn.Module):
                                                  modalities=['S1GRD'])
         self.embed_dim = 768
         self.in_chans = 1  # a single gray channel, repeated to VV/VH inside forward
+        self.num_prefix_tokens = 0
 
     @property
     def blocks(self):

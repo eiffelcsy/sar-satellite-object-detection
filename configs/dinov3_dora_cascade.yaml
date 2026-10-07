@@ -1,0 +1,36 @@
+# Cascade R-CNN ablation: dinov3_dora with `model.head: cascade` (3 stages, IoU thresholds 0.5/0.6/0.7).
+# Everything else matches configs/dinov3_dora.yaml, so the delta is the detection head only (compare with
+# configs/dinov3_dora_deform.yaml). The box head is shared across stages to stay under the 40 M trainable cap;
+# set `head_params: {share_head: false}` for a full per-stage cascade (adds ~28 M trainable).
+# Run: python train.py --config configs/dinov3_dora_cascade.yaml
+name: dinov3_dora_cascade
+backbone:
+  name: dinov3
+  pretrained: true
+  params:
+    model_name: facebook/dinov3-vitb16-pretrain-lvd1689m
+peft:
+  method: dora
+  params:
+    rank: 32
+    alpha: 32
+  targets: [attn, mlp]
+model:
+  detail_stem: true
+  head: cascade
+  head_params:
+    num_stages: 3
+    share_head: true
+preprocess:
+  pseudo_rgb: true
+  edge: sobel
+  cache: preprocess_cache
+data:
+  mosaic: 0.3
+  copy_paste: 0.5
+loss:
+  classification: 1.0
+  loss_box_reg: 2.0
+  loss_rpn_box_reg: 1.5
+train:
+  epochs: 48

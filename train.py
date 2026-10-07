@@ -36,9 +36,13 @@ def parse_args(argv=None):
                    else Path(__file__).resolve().parents[1] / 'dataset' / 'SARFact-Course-20K')
     p.add_argument('--backbone', default=cfg['backbone'], help='backbone name from the registry (e.g. vit, terramind, dinov3)')
     p.add_argument('--init', choices=['pretrained', 'scratch'], default=cfg['init'])
-    p.add_argument('--adapt', choices=['full', 'lora', 'dora', 'moelora', 'moedora'], default=cfg['adapt'])
+    p.add_argument('--adapt', choices=['full', 'lora', 'dora', 'moelora'], default=cfg['adapt'])
     p.add_argument('--detail-stem', action='store_true', default=cfg['detail_stem'],
                    help='add a conv stem on the input to give the P2 level real stride-4 detail')
+    p.add_argument('--fusion-layers', nargs='+', type=int, default=cfg['fusion_layers'],
+                   help='ViT block indices whose tokens are fused before the neck (multi-layer FPN fusion)')
+    p.add_argument('--head', choices=['standard', 'deform', 'cascade'], default=cfg['head'],
+                   help='RoI detection head: torchvision (standard), Deformable-Conv, or Cascade R-CNN')
     p.add_argument('--epochs', type=int, default=cfg['epochs'])
     p.add_argument('--batch-size', type=int, default=cfg['batch_size'])
     p.add_argument('--lr', type=float, default=cfg['lr'])
@@ -88,6 +92,7 @@ def parse_args(argv=None):
     args.backbone_kwargs = dict(cfg['backbone_kwargs']) if args.backbone == cfg['backbone'] else {}
     args.peft_kwargs = dict(cfg['peft_kwargs']) if args.adapt == cfg['adapt'] else {}
     args.peft_targets = list(cfg['peft_targets']) if (args.adapt == cfg['adapt'] and cfg['peft_targets']) else None
+    args.head_params = dict(cfg['head_params'])
     args.loss_weights = dict(cfg['loss_weights'])
     if args.init == 'scratch' and args.adapt != 'full':
         p.error('--init scratch is only valid with --adapt full')
@@ -236,8 +241,9 @@ def main():
         raise SystemExit(f'--pseudo-rgb builds 3 channels but backbone {args.backbone!r} expects '
                          f'{backbone.in_chans}; use a 3-channel backbone (e.g. dinov3).')
     add_adapters(backbone, args.adapt, targets=args.peft_targets, **args.peft_kwargs)  # 'full' is a no-op
-    model = MultiTaskModel(backbone, task_routing=args.adapt in ('moelora', 'moedora'),
-                           detail_stem=args.detail_stem).cuda()
+    model = MultiTaskModel(backbone, task_routing=args.adapt == 'moelora', detail_stem=args.detail_stem,
+                           fusion_layers=args.fusion_layers, head=args.head,
+                           head_params=args.head_params).cuda()
     parameters = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log(f'parameters: {parameters:,} total, {trainable:,} trainable', log_file)

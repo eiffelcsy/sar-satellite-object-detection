@@ -1,16 +1,14 @@
 """Adapters: exact no-ops at init, only adapter weights train, MoE-LoRA routes per task."""
 import pytest
 import torch
-import torch.nn.functional as F
 from torch import nn
 
-from sarbench.adapters import DoRA, LoRA, MoEDoRA, MoELoRA, add_adapters, set_task
+from sarbench.adapters import DoRA, LoRA, MoELoRA, add_adapters, set_task
 from sarbench.backbones import build_backbone
 
 # 12 blocks x rank 16 x ((768 + 2304) + (768 + 768)) for A and B of qkv and proj;
-# DoRA adds the per-output magnitude (2304 + 768 per block); MoE-LoRA / MoE-DoRA: 4 experts x rank 4 = 16,
-# two routers per adapter, and MoE-DoRA also the per-expert magnitudes (4 x (2304 + 768) per block)
-TRAINABLE = {'lora': 884_736, 'dora': 921_600, 'moelora': 1_032_192, 'moedora': 1_179_648}
+# DoRA adds the per-output magnitude (2304 + 768 per block); MoE-LoRA: 4 experts x rank 4 = 16, two routers
+TRAINABLE = {'lora': 884_736, 'dora': 921_600, 'moelora': 1_032_192}
 ADAPTER_WEIGHTS = ('.down.weight', '.up.weight', '.magnitude', '.routers.0.weight', '.routers.1.weight')
 
 
@@ -25,7 +23,7 @@ def tokens_per_task(name, kind):
     backbone = build_backbone(name, pretrained=False)
     add_adapters(backbone, kind)
     for layer in backbone.modules():
-        if isinstance(layer, (DoRA, LoRA, MoELoRA, MoEDoRA)):
+        if isinstance(layer, (DoRA, LoRA, MoELoRA)):
             nn.init.normal_(layer.up.weight, std=0.02)
     x = torch.randn(2, 1, 512, 512, device='cuda')
     set_task(backbone, 0)
@@ -34,7 +32,7 @@ def tokens_per_task(name, kind):
     return task0, tokens(backbone, x)
 
 
-@pytest.mark.parametrize('kind,tol', [('lora', 1e-6), ('dora', 1e-5), ('moelora', 1e-6), ('moedora', 1e-5)])
+@pytest.mark.parametrize('kind,tol', [('lora', 1e-6), ('dora', 1e-5), ('moelora', 1e-6)])
 @pytest.mark.parametrize('name', ['vit', 'terramind'])
 def test_adapters_are_noops_at_init(name, kind, tol):
     backbone = build_backbone(name, pretrained=True)
@@ -44,7 +42,7 @@ def test_adapters_are_noops_at_init(name, kind, tol):
     assert (tokens(backbone, x) - before).abs().max() <= tol  # DoRA's weight renormalization adds fp noise
 
 
-@pytest.mark.parametrize('kind', ['lora', 'dora', 'moelora', 'moedora'])
+@pytest.mark.parametrize('kind', ['lora', 'dora', 'moelora'])
 @pytest.mark.parametrize('name', ['vit', 'terramind'])
 def test_only_adapter_weights_train(name, kind):
     backbone = build_backbone(name, pretrained=False)
@@ -57,12 +55,6 @@ def test_only_adapter_weights_train(name, kind):
 @pytest.mark.parametrize('name', ['vit', 'terramind'])
 def test_moelora_tokens_depend_on_task(name):
     task0, task1 = tokens_per_task(name, 'moelora')
-    assert (task0 - task1).abs().max() > 1e-3
-
-
-@pytest.mark.parametrize('name', ['vit', 'terramind'])
-def test_moedora_tokens_depend_on_task(name):
-    task0, task1 = tokens_per_task(name, 'moedora')
     assert (task0 - task1).abs().max() > 1e-3
 
 
@@ -105,46 +97,6 @@ def test_dora_is_a_noop_at_init_and_trains_its_magnitude():
     nn.init.normal_(layer.up.weight, std=0.1)
     assert not torch.allclose(layer(x), base(x))
     assert layer.magnitude.requires_grad and layer.down.weight.requires_grad
-
-
-def test_moedora_is_a_noop_at_init_and_routes_by_task():
-    base = nn.Linear(16, 8)
-    layer = MoEDoRA(base, experts=3, rank=2, alpha=4).double()
-    x = torch.randn(2, 5, 16, dtype=torch.float64)
-    torch.testing.assert_close(layer(x), base(x))  # B_e = 0, m_e = ||W||_c -> every expert equals W
-    nn.init.normal_(layer.up.weight, std=0.1)
-    assert not torch.allclose(layer(x), base(x))
-    assert layer.magnitude.requires_grad and layer.down.weight.requires_grad
-
-
-def test_moedora_handles_a_bias_free_base():
-    """DINOv3 projections use bias=False, so the recomposed forward must tolerate base.bias is None."""
-    layer = MoEDoRA(nn.Linear(16, 8, bias=False), experts=2, rank=3, alpha=6).double()
-    x = torch.randn(2, 5, 16, dtype=torch.float64)
-    torch.testing.assert_close(layer(x), layer.base(x))  # exact no-op at init
-    nn.init.normal_(layer.up.weight, std=0.1)
-    assert layer(x).shape == (2, 5, 8) and torch.isfinite(layer(x)).all()
-
-
-def test_moedora_lean_forward_matches_the_explicit_experts():
-    """The memory-lean low-rank forward equals summing the E explicitly renormalized DoRA experts."""
-    torch.manual_seed(0)
-    layer = MoEDoRA(nn.Linear(24, 16), experts=4, rank=3, alpha=6).double()
-    nn.init.normal_(layer.base.weight)
-    nn.init.normal_(layer.base.bias)
-    nn.init.normal_(layer.down.weight, std=0.05)
-    nn.init.normal_(layer.up.weight, std=0.05)
-    nn.init.normal_(layer.magnitude)
-    x = torch.randn(2, 7, 24, dtype=torch.float64)
-    set_task(layer, 1)
-    down, up = layer.down.weight.view(4, 3, 24), layer.up.weight.view(16, 4, 3)
-    gates = layer.routers[1](x).softmax(-1)
-    experts = []
-    for e in range(4):
-        weight = layer.base.weight + layer.scale * (up[:, e] @ down[e])
-        weight = layer.magnitude[:, e:e + 1] * weight / (weight.norm(dim=-1, keepdim=True) + 1e-6)
-        experts.append(gates[..., e:e + 1] * F.linear(x, weight, layer.base.bias))
-    torch.testing.assert_close(layer(x), sum(experts))
 
 
 def test_moelora_is_a_gated_sum_of_lora_experts():

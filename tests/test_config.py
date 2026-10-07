@@ -42,11 +42,11 @@ def test_dora_config_with_augmentation_stem_and_long_schedule():
 
 
 def test_peft_configs_match_for_the_ablation():
-    """dinov3_{dora,moelora,moedora} differ only in the PEFT method, so any metric gap is the adapter."""
+    """dinov3_{dora,moelora} differ only in the PEFT method, so any metric gap is the adapter."""
     dora = load_config(CONFIGS / 'dinov3_dora.yaml')
     shared = ('backbone', 'init', 'peft_targets', 'detail_stem', 'pseudo_rgb', 'edge',
               'mosaic', 'copy_paste', 'loss_weights', 'epochs', 'preprocess_cache')
-    for name in ('moelora', 'moedora'):
+    for name in ('moelora',):
         cfg = load_config(CONFIGS / f'dinov3_{name}.yaml')
         assert all(dora[key] == cfg[key] for key in shared), name
         assert dora['backbone_kwargs']['model_name'] == cfg['backbone_kwargs']['model_name']
@@ -64,6 +64,21 @@ def test_splus_ablation_only_changes_the_backbone_checkpoint():
     for key in ('adapt', 'peft_kwargs', 'peft_targets', 'detail_stem', 'pseudo_rgb', 'edge',
                 'mosaic', 'copy_paste', 'loss_weights', 'epochs'):
         assert splus[key] == dora[key], key
+
+
+def test_head_and_fusion_ablation_configs_match_the_baseline():
+    base = load_config(CONFIGS / 'dinov3_dora.yaml')
+    shared = ('backbone', 'init', 'backbone_kwargs', 'adapt', 'peft_kwargs', 'peft_targets', 'detail_stem',
+              'pseudo_rgb', 'edge', 'mosaic', 'copy_paste', 'loss_weights', 'epochs', 'preprocess_cache')
+    fusion = load_config(CONFIGS / 'dinov3_dora_fusion.yaml')
+    assert fusion['fusion_layers'] == [5, 8, 11] and fusion['head'] == 'standard'
+    assert all(fusion[key] == base[key] for key in shared)
+    deform = load_config(CONFIGS / 'dinov3_dora_deform.yaml')
+    assert deform['head'] == 'deform' and deform['fusion_layers'] is None
+    assert all(deform[key] == base[key] for key in shared)
+    cascade = load_config(CONFIGS / 'dinov3_dora_cascade.yaml')
+    assert cascade['head'] == 'cascade' and cascade['head_params']['num_stages'] == 3
+    assert all(cascade[key] == base[key] for key in shared)
 
 
 def test_loss_weights_default_empty_and_parse_from_config():

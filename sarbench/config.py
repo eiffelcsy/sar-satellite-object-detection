@@ -10,7 +10,7 @@ Schema (only `backbone` and `peft` are required):
       pretrained: true             # false -> random weights ('scratch')
       params: {}                   # forwarded to the backbone constructor
     peft:
-      method: dora                 # full | lora | dora | moelora | moedora
+      method: dora                 # full | lora | dora | moelora
       params: {rank: 16, alpha: 32}  # forwarded to the adapter constructor
       targets: [attn, mlp]         # optional; backbone module groups to adapt (default: the backbone's own)
     loss:                          # optional per-term weights on top of the summed loss (default 1.0 each)
@@ -18,6 +18,9 @@ Schema (only `backbone` and `peft` are required):
       loss_box_reg: 2.0            # Faster R-CNN RoI box loss (loss_rpn_box_reg for the RPN)
     model:
       detail_stem: true            # real stride-4 detail from the pixels, added to the neck's P2
+      fusion_layers: [5, 8, 11]    # optional: learnable weighted sum of these ViT blocks before the neck
+      head: cascade                # standard (default) | deform | cascade RoI head
+      head_params: {num_stages: 3} # forwarded to the head (deform: kernel_size/num_convs; cascade: num_stages)
     train: {epochs: 48, batch_size: 16, lr: 1.0e-4, backbone_lr: null, weight_decay: 0.05,
             eval_every: 4, workers: 8, seed: 0}
     data: {root: null, val_fraction: 0.1, limit: null, mosaic: 0.5, copy_paste: 0.5}
@@ -40,6 +43,9 @@ DEFAULTS = {
     'peft_targets': None,
     'loss_weights': {},
     'detail_stem': False,
+    'fusion_layers': None,
+    'head': 'standard',
+    'head_params': {},
     'name': None,
     'epochs': 24,
     'batch_size': 16,
@@ -98,8 +104,15 @@ def load_config(path):
     config['peft_targets'] = list(peft['targets']) if peft.get('targets') else None
 
     config['loss_weights'] = dict(raw.get('loss') or {})
-    if 'detail_stem' in (raw.get('model') or {}):
-        config['detail_stem'] = bool(raw['model']['detail_stem'])
+    model = raw.get('model') or {}
+    if 'detail_stem' in model:
+        config['detail_stem'] = bool(model['detail_stem'])
+    if 'fusion_layers' in model:
+        config['fusion_layers'] = list(model['fusion_layers']) or None
+    if 'head' in model:
+        config['head'] = model['head']
+    if 'head_params' in model:
+        config['head_params'] = dict(model['head_params'] or {})
 
     if raw.get('name') is not None:
         config['name'] = raw['name']

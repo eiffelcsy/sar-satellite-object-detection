@@ -7,13 +7,30 @@ Back to the [README](../README.md).
 ```
 image [B,C,512,512] -> backbone -> tokens [B,1024,768]   (32 x 32 patches of 16 px; C=1 or 3)
   classification: mean over tokens -> LayerNorm -> Linear(768, 9)
-  detection:      tokens as a [B,768,32,32] map -> SimpleFeaturePyramid (strides 4 to 64, 256 channels)
+  detection:      tokens (+ optional multi-layer fusion) as a [B,768,32,32] map
+                  -> SimpleFeaturePyramid (strides 4 to 64, 256 channels)
                   (+ optional conv stem that adds real stride-4 detail to P2)
-                  -> RegionProposalNetwork + RoIHeads (torchvision Faster R-CNN, 9 classes + background)
-loss = cross-entropy + the four Faster R-CNN losses, each scaled by its config `loss` weight
+                  -> RegionProposalNetwork + RoI head (Faster R-CNN, Deformable-Conv, or Cascade R-CNN)
+loss = cross-entropy + the detection losses, each scaled by its config `loss` weight
 ```
 
 ![The reference model](reference_model.png)
+
+**Multi-layer fusion** (`model.fusion_layers: [5, 8, 11]`). The neck normally sees only the final ViT block's
+tokens. `sarbench/model.py` registers forward hooks on the listed blocks, drops their prefix tokens and combines
+them with a learnable softmax weighting (`LayerFusion`, initialized to the last block, so it starts from the
+standard single-layer behaviour). Earlier blocks carry the lower-level detail the last block has abstracted away,
+which helps small objects. Cost: one weight per block.
+
+**Detection head** (`model.head`; ablation configs `configs/dinov3_dora_{deform,cascade}.yaml`):
+
+- `standard`: torchvision Faster R-CNN's 2-layer MLP box head.
+- `deform`: `sarbench/heads.py` `DeformConvBoxHead` — deformable convolutions (Dai et al. 2017) on the pooled
+  7x7 RoI features, so the head samples around the true object shape instead of a fixed grid (+~1.4 M).
+- `cascade`: `CascadeRoIHeads` — 3 RoI stages with IoU thresholds 0.5/0.6/0.7, each decoding boxes that are
+  re-pooled and refined by the next stage. The **box head is shared** across stages (a per-stage head adds ~28 M
+  and would breach the 40 M trainable cap; set `head_params: {share_head: false}` to disable sharing). Per-stage
+  losses are summed into `loss_classifier` / `loss_box_reg`.
 
 **P2 stem** (`model.detail_stem: true`). The single-scale ViT sees only 16 px patches, so the neck's stride-4
 level is upsampled and carries no genuine high-frequency content. `sarbench/model.py` adds a small conv stem
@@ -73,14 +90,6 @@ single gray channel to RGB.
 - `moelora`: as `lora`, but the rank-16 update is split into 4 experts of rank 4 (alpha = 8, so alpha / r = 2
   as in `lora`), mixed per token by a softmax router. Each task has its own router (1.03 M trainable backbone
   parameters for the ViT).
-- `moedora`: mixture-of-experts DoRA — each expert is a DoRA update (`W_e = W + (alpha / r) B_e A_e`,
-  weight-decomposed and renormalized with a learned per-output magnitude), mixed per token by the task router.
-  Unlike `moelora` it renormalizes each expert before gating; it also runs the backbone once per task.
-  It is the heaviest adapter: the forward never materializes the `(out, E, in)` effective weight or E full
-  projections (each expert's per-output renormalization factor is folded into its `B` rows and the experts
-  collapse into one gated low-rank matmul), but it still needs the backbone activations for E gated experts.
-  `configs/dinov3_moedora.yaml` enables `backbone.params.grad_checkpointing: true` (recompute ViT blocks in
-  backward) and may need `--batch-size 8`; see the memory note under DINOv3.
 - `peft.targets` (optional): which module groups a backbone exposes for adaptation. ViT/TerraMind have only
   `attn` (their `qkv`/`proj`); DINOv3 supports `attn` (q/k/v/o_proj) and `mlp` (up/down_proj, fc1/fc2).
   `configs/dinov3_lora.yaml` sets `[attn, mlp]`; without it, only attention is adapted.
