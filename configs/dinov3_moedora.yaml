@@ -13,6 +13,7 @@ backbone:
   pretrained: true
   params:
     model_name: facebook/dinov3-vitb16-pretrain-lvd1689m
+    grad_checkpointing: true  # MoE-DoRA is memory-heavy; recompute ViT blocks in backward
 peft:
   method: moedora
   params:

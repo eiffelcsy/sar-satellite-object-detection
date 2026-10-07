@@ -109,13 +109,24 @@ class MoEDoRA(nn.Module):
         self.task = 0
 
     def forward(self, x):
+        """Memory-lean form: never materialize the (out, E, in) effective weight or E full projections.
+
+        Starting from `y = sum_e g_e (m_e / ||W_e||_c) * (W + scale B_e A_e) x`, the per-output factor
+        `f_e = m_e / ||W_e||_c` is folded into the expert's B rows, so the experts collapse into one gated
+        low-rank matmul, exactly as in MoE-LoRA. Peak activations are ~3 output-sized tensors, not E.
+        """
         out_f, in_f = self.base.out_features, self.base.in_features
         gates = self.routers[self.task](x).softmax(dim=-1)  # (N, L, E)
         down = self.down.weight.view(self.experts, self.rank, in_f)  # (E, r, in)
-        up = (self.scale * self.up.weight).view(out_f, self.experts, self.rank)  # (out, E, r)
-        weight = self.base.weight.unsqueeze(1) + torch.einsum('oer,eri->oei', up, down)  # (out, E, in)
-        weight = self.magnitude.unsqueeze(-1) * weight / (weight.norm(dim=-1, keepdim=True) + 1e-6)
-        return sum(gates[..., e:e + 1] * F.linear(x, weight[:, e], self.base.bias) for e in range(self.experts))
+        up = self.up.weight.view(out_f, self.experts, self.rank)  # (out, E, r)
+        delta = torch.einsum('oer,eri->oei', self.scale * up, down)  # (out, E, in), transient
+        denom = (self.base.weight.unsqueeze(1) + delta).norm(dim=-1) + 1e-6  # (out, E) = ||W_e||_c
+        factor = self.magnitude / denom  # (out, E), the DoRA renormalization factor per expert
+        base_out = F.linear(x, self.base.weight)  # (N, L, out), no bias
+        fused = torch.einsum('nle,oe->nlo', gates, factor).to(base_out.dtype)  # sum_e g_e f_e
+        gated = gates.repeat_interleave(self.rank, dim=-1)  # expert e's gate on each of its r hidden units
+        delta_out = F.linear(self.down(x) * gated, (factor.unsqueeze(-1) * up).reshape(out_f, -1))
+        return base_out * fused + self.scale * delta_out + self.base.bias
 
 
 def add_adapters(backbone, kind, targets=None, **params):

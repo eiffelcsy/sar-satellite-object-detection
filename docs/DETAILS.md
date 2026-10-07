@@ -73,6 +73,11 @@ single gray channel to RGB.
 - `moedora`: mixture-of-experts DoRA — each expert is a DoRA update (`W_e = W + (alpha / r) B_e A_e`,
   weight-decomposed and renormalized with a learned per-output magnitude), mixed per token by the task router.
   Unlike `moelora` it renormalizes each expert before gating; it also runs the backbone once per task.
+  It is the heaviest adapter: the forward never materializes the `(out, E, in)` effective weight or E full
+  projections (each expert's per-output renormalization factor is folded into its `B` rows and the experts
+  collapse into one gated low-rank matmul), but it still needs the backbone activations for E gated experts.
+  `configs/dinov3_moedora.yaml` enables `backbone.params.grad_checkpointing: true` (recompute ViT blocks in
+  backward) and may need `--batch-size 8`; see the memory note under DINOv3.
 - `peft.targets` (optional): which module groups a backbone exposes for adaptation. ViT/TerraMind have only
   `attn` (their `qkv`/`proj`); DINOv3 supports `attn` (q/k/v/o_proj) and `mlp` (up/down_proj, fc1/fc2).
   `configs/dinov3_lora.yaml` sets `[attn, mlp]`; without it, only attention is adapted.

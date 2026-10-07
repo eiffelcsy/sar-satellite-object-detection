@@ -1,6 +1,7 @@
 """Adapters: exact no-ops at init, only adapter weights train, MoE-LoRA routes per task."""
 import pytest
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from sarbench.adapters import DoRA, LoRA, MoEDoRA, MoELoRA, add_adapters, set_task
@@ -114,6 +115,27 @@ def test_moedora_is_a_noop_at_init_and_routes_by_task():
     nn.init.normal_(layer.up.weight, std=0.1)
     assert not torch.allclose(layer(x), base(x))
     assert layer.magnitude.requires_grad and layer.down.weight.requires_grad
+
+
+def test_moedora_lean_forward_matches_the_explicit_experts():
+    """The memory-lean low-rank forward equals summing the E explicitly renormalized DoRA experts."""
+    torch.manual_seed(0)
+    layer = MoEDoRA(nn.Linear(24, 16), experts=4, rank=3, alpha=6).double()
+    nn.init.normal_(layer.base.weight)
+    nn.init.normal_(layer.base.bias)
+    nn.init.normal_(layer.down.weight, std=0.05)
+    nn.init.normal_(layer.up.weight, std=0.05)
+    nn.init.normal_(layer.magnitude)
+    x = torch.randn(2, 7, 24, dtype=torch.float64)
+    set_task(layer, 1)
+    down, up = layer.down.weight.view(4, 3, 24), layer.up.weight.view(16, 4, 3)
+    gates = layer.routers[1](x).softmax(-1)
+    experts = []
+    for e in range(4):
+        weight = layer.base.weight + layer.scale * (up[:, e] @ down[e])
+        weight = layer.magnitude[:, e:e + 1] * weight / (weight.norm(dim=-1, keepdim=True) + 1e-6)
+        experts.append(gates[..., e:e + 1] * F.linear(x, weight, layer.base.bias))
+    torch.testing.assert_close(layer(x), sum(experts))
 
 
 def test_moelora_is_a_gated_sum_of_lora_experts():

@@ -84,13 +84,18 @@ class DINOv3(nn.Module):
     the licence on the model page and `huggingface-cli login` once before the first run.
     """
 
-    def __init__(self, pretrained: bool, model_name: str = 'facebook/dinov3-vitb16-pretrain-lvd1689m', **kwargs):
+    def __init__(self, pretrained: bool, model_name: str = 'facebook/dinov3-vitb16-pretrain-lvd1689m',
+                 grad_checkpointing: bool = False, **kwargs):
         super().__init__()
         from transformers import DINOv3ViTConfig, DINOv3ViTModel  # lazy: only DINOv3 needs transformers
         if pretrained:
             self.dinov3 = DINOv3ViTModel.from_pretrained(model_name, **kwargs)
         else:
             self.dinov3 = DINOv3ViTModel(DINOv3ViTConfig.from_pretrained(model_name, **kwargs))
+        if grad_checkpointing:  # recompute blocks in backward: much lower activation memory, ~30 % slower
+            self.dinov3.gradient_checkpointing_enable()
+            if hasattr(self.dinov3, 'enable_input_require_grads'):  # frozen embeddings still need a grad path
+                self.dinov3.enable_input_require_grads()
         self.model_name = model_name
         self.embed_dim = self.dinov3.config.hidden_size
         self.in_chans = self.dinov3.config.num_channels
