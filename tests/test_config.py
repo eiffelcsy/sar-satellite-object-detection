@@ -66,18 +66,17 @@ def test_splus_ablation_only_changes_the_backbone_checkpoint():
         assert splus[key] == dora[key], key
 
 
-def test_head_and_fusion_ablation_configs_match_the_baseline():
+def test_head_ablation_configs_match_the_baseline_and_add_fusion():
     base = load_config(CONFIGS / 'dinov3_dora.yaml')
     shared = ('backbone', 'init', 'backbone_kwargs', 'adapt', 'peft_kwargs', 'peft_targets', 'detail_stem',
               'pseudo_rgb', 'edge', 'mosaic', 'copy_paste', 'loss_weights', 'epochs', 'preprocess_cache')
-    fusion = load_config(CONFIGS / 'dinov3_dora_fusion.yaml')
-    assert fusion['fusion_layers'] == [5, 8, 11] and fusion['head'] == 'standard'
-    assert all(fusion[key] == base[key] for key in shared)
+    assert base['fusion_layers'] is None and base['head'] == 'standard'
     deform = load_config(CONFIGS / 'dinov3_dora_deform.yaml')
-    assert deform['head'] == 'deform' and deform['fusion_layers'] is None
+    assert deform['head'] == 'deform' and deform['fusion_layers'] == [5, 8, 11]
     assert all(deform[key] == base[key] for key in shared)
     cascade = load_config(CONFIGS / 'dinov3_dora_cascade.yaml')
-    assert cascade['head'] == 'cascade' and cascade['head_params']['num_stages'] == 3
+    assert cascade['head'] == 'cascade' and cascade['fusion_layers'] == [5, 8, 11]
+    assert cascade['head_params']['num_stages'] == 3
     assert all(cascade[key] == base[key] for key in shared)
 
 

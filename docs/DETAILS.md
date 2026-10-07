@@ -22,7 +22,8 @@ them with a learnable softmax weighting (`LayerFusion`, initialized to the last 
 standard single-layer behaviour). Earlier blocks carry the lower-level detail the last block has abstracted away,
 which helps small objects. Cost: one weight per block.
 
-**Detection head** (`model.head`; ablation configs `configs/dinov3_dora_{deform,cascade}.yaml`):
+**Detection head** (`model.head`; ablation configs `configs/dinov3_dora_{deform,cascade}.yaml`, which also enable
+multi-layer fusion):
 
 - `standard`: torchvision Faster R-CNN's 2-layer MLP box head.
 - `deform`: `sarbench/heads.py` `DeformConvBoxHead` — deformable convolutions (Dai et al. 2017) on the pooled

@@ -8,7 +8,7 @@
 #################################################
 
 #SBATCH --nodes=1                   # How many nodes required? Usually 1
-#SBATCH --cpus-per-task=4           # Number of CPU to request for the job
+#SBATCH --cpus-per-task=8           # Number of CPU to request for the job
 #SBATCH --mem=32GB                   # How much memory does your job require?
 #SBATCH --gres=gpu:1                # Do you require GPUS? If not delete this line
 #SBATCH --time=01-00:00:00          # How long to run the job for? Jobs exceed this time will be terminated
@@ -49,9 +49,16 @@ source .venv/bin/activate
 # If you require any packages, install it as usual before the srun job submission.
 # pip3 install numpy
 
-# Submit your job to the cluster
-# srun --gres=gpu:1 python train.py --config configs/vit_moelora.yaml --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/ --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_moelora.yaml --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/ --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora.yaml --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/ --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_moedora.yaml --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/ --wandb
-srun --gres=gpu:1 python train.py --config configs/dinov3_splus_dora.yaml --data /common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/ --wandb
+# Submit your job to the cluster.
+DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
+
+# Reference / baseline runs (uncomment the ones you want; one DINOv3 run is roughly 1.5-2 h):
+# srun --gres=gpu:1 python train.py --config configs/vit_moelora.yaml --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_moelora.yaml --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_dora.yaml --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_splus_dora.yaml --data "$DATA" --wandb
+
+# Ablations versus configs/dinov3_dora.yaml (multi-layer fusion + a new RoI head each); run sequentially:
+# srun --gres=gpu:1 python train.py --config configs/dinov3_splus_dora.yaml --data "$DATA" --wandb
+srun --gres=gpu:1 python train.py --config configs/dinov3_dora_deform.yaml --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_cascade.yaml --data "$DATA" --wandb

@@ -1,7 +1,7 @@
-# Cascade R-CNN ablation: dinov3_dora with `model.head: cascade` (3 stages, IoU thresholds 0.5/0.6/0.7).
-# Everything else matches configs/dinov3_dora.yaml, so the delta is the detection head only (compare with
-# configs/dinov3_dora_deform.yaml). The box head is shared across stages to stay under the 40 M trainable cap;
-# set `head_params: {share_head: false}` for a full per-stage cascade (adds ~28 M trainable).
+# Cascade R-CNN + multi-layer fusion: dinov3_dora with `model.head: cascade` (3 stages, IoU 0.5/0.6/0.7) and
+# `model.fusion_layers`. Everything else matches configs/dinov3_dora.yaml, so the delta is the detection head
+# plus fusion (compare with configs/dinov3_dora_deform.yaml). The box head is shared across stages to stay under
+# the 40 M trainable cap; set `head_params: {share_head: false}` for a full per-stage cascade (adds ~28 M).
 # Run: python train.py --config configs/dinov3_dora_cascade.yaml
 name: dinov3_dora_cascade
 backbone:
@@ -17,6 +17,7 @@ peft:
   targets: [attn, mlp]
 model:
   detail_stem: true
+  fusion_layers: [5, 8, 11]  # 0-indexed ViT blocks combined with learnable softmax weights before the neck
   head: cascade
   head_params:
     num_stages: 3

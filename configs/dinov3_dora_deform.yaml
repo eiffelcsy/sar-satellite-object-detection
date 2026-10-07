@@ -1,6 +1,6 @@
-# Deformable-Conv RoI head ablation: dinov3_dora with `model.head: deform`.
+# Deformable-Conv RoI head + multi-layer fusion: dinov3_dora with `model.head: deform` and `model.fusion_layers`.
 # Everything else (backbone, DoRA, detail stem, augmentation, loss, 48 epochs) matches configs/dinov3_dora.yaml,
-# so the delta is the detection head only. Compare with configs/dinov3_dora_cascade.yaml.
+# so the delta is the detection head plus fusion. Compare with configs/dinov3_dora_cascade.yaml.
 # Run: python train.py --config configs/dinov3_dora_deform.yaml
 name: dinov3_dora_deform
 backbone:
@@ -16,6 +16,7 @@ peft:
   targets: [attn, mlp]
 model:
   detail_stem: true
+  fusion_layers: [5, 8, 11]  # 0-indexed ViT blocks combined with learnable softmax weights before the neck
   head: deform
   head_params:
     num_convs: 2
