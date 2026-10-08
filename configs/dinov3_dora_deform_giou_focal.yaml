@@ -1,9 +1,8 @@
-# Standard Faster R-CNN head + all new detection losses + finer RoIAlign.
-# Head-comparison trio (identical apart from `model.head`): this file (standard),
-# configs/dinov3_dora_deform_giou_focal.yaml (deform) and configs/dinov3_dora_cascade_giou_focal.yaml (cascade).
-# The single-term loss cells are configs/dinov3_dora_giou.yaml and configs/dinov3_dora_focal.yaml.
-# Run: python train.py --config configs/dinov3_dora_giou_focal.yaml
-name: dinov3_dora_giou_focal
+# Deformable-Conv RoI head + all new detection losses + finer RoIAlign.
+# Head-comparison trio (identical apart from `model.head`): configs/dinov3_dora_giou_focal.yaml (standard),
+# this file (deform) and configs/dinov3_dora_cascade_giou_focal.yaml (cascade). Also multi-layer fusion.
+# Run: python train.py --config configs/dinov3_dora_deform_giou_focal.yaml
+name: dinov3_dora_deform_giou_focal
 backbone:
   name: dinov3
   pretrained: true
@@ -18,7 +17,12 @@ peft:
 model:
   detail_stem: true
   fusion_layers: [5, 8, 11]  # 0-indexed ViT blocks combined with learnable softmax weights before the neck
-  giou_weight: 1.0        # extra GIoU term on the RoI box loss (all heads)
+  head: deform
+  head_params:
+    num_convs: 1
+    kernel_size: 3
+    hidden_dim: 512
+  giou_weight: 1.0        # extra GIoU term on the RoI box loss
   focal_loss: true        # focal for RPN objectness, RoI classifier and image classifier
   focal_gamma: 2.0
   focal_alpha: 0.25

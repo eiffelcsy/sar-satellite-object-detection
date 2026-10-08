@@ -1,0 +1,50 @@
+# Cascade R-CNN + all new detection losses + finer RoIAlign.
+#
+# = dinov3_dora_cascade.yaml (multi-layer fusion, 3 per-stage hidden-256 heads, IoU 0.4/0.5/0.6, rebalanced
+# stage losses) plus:
+#   - giou_weight: extra GIoU term on every stage's RoI box loss,
+#   - focal_loss: focal for the RPN objectness, the RoI classifiers and the image classifier,
+#   - roi_sampling_ratio: 4 for the shared RoIAlign.
+# Note: focal shrinks the loss scale, so the `loss:` weights below may want re-tuning.
+# Run: python train.py --config configs/dinov3_dora_cascade_giou_focal.yaml
+name: dinov3_dora_cascade_giou_focal
+backbone:
+  name: dinov3
+  pretrained: true
+  params:
+    model_name: facebook/dinov3-vitb16-pretrain-lvd1689m
+peft:
+  method: dora
+  params:
+    rank: 32
+    alpha: 32
+  targets: [attn, mlp]
+model:
+  detail_stem: true
+  fusion_layers: [5, 8, 11]  # 0-indexed ViT blocks combined with learnable softmax weights before the neck
+  head: cascade
+  head_params:
+    num_stages: 3
+    share_head: false
+    hidden_dim: 256
+    fg_iou_thresholds: [0.4, 0.5, 0.6]
+    bg_iou_threshold: 0.4
+    stage_loss_weights: [0.5, 0.25, 0.25]
+  giou_weight: 1.0        # extra GIoU term on every stage's RoI box loss
+  focal_loss: true        # focal for RPN objectness, RoI classifiers and image classifier
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+  roi_sampling_ratio: 4   # finer RoIAlign for small objects
+preprocess:
+  pseudo_rgb: true
+  edge: sobel
+  cache: preprocess_cache
+data:
+  mosaic: 0.3
+  copy_paste: 0.5
+loss:
+  classification: 1.0
+  loss_box_reg: 2.0
+  loss_rpn_box_reg: 1.5
+train:
+  epochs: 48
