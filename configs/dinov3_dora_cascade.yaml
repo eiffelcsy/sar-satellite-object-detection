@@ -26,6 +26,7 @@ model:
     share_head: false              # per-stage heads; hidden 256 keeps this cheaper than one 1024 head
     hidden_dim: 256
     fg_iou_thresholds: [0.4, 0.5, 0.6]  # lower than the 0.5/0.6/0.7 default: 16 px objects have noisy IoU
+    bg_iou_threshold: 0.4              # must be <= the smallest fg threshold (Matcher requires low <= high)
     stage_loss_weights: [1.0, 0.5, 0.5]  # rebalance the 3 summed stage losses vs the RPN/classification
 preprocess:
   pseudo_rgb: true

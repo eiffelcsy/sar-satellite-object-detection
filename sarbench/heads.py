@@ -44,6 +44,8 @@ class CascadeRoIHeads(RoIHeads):
     def __init__(self, box_roi_pool, box_heads, box_predictors, fg_iou_thresholds=(0.5, 0.6, 0.7),
                  bg_iou_threshold=0.5, batch_size_per_image=512, positive_fraction=0.25, bbox_reg_weights=None,
                  score_thresh=0.05, nms_thresh=0.5, detections_per_img=100, stage_loss_weights=None):
+        # Matcher requires low <= high, so the background threshold must not exceed the smallest fg threshold.
+        bg_iou_threshold = min(bg_iou_threshold, min(fg_iou_thresholds))
         # The base RoIHeads supplies the box coder, the RoI pool and post-processing shared by all stages.
         super().__init__(box_roi_pool, box_heads[0], box_predictors[0], fg_iou_thresholds[0], bg_iou_threshold,
                          batch_size_per_image, positive_fraction, bbox_reg_weights, score_thresh, nms_thresh,
