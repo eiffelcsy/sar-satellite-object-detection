@@ -59,12 +59,12 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # srun --gres=gpu:1 python train.py --config configs/dinov3_splus_dora.yaml --data "$DATA" --wandb
 
 # Head / backbone ablations versus configs/dinov3_dora.yaml (uncomment to run):
-# srun --gres=gpu:1 python train.py --config configs/dinov3_splus_dora.yaml --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_dora.yaml --data "$DATA" --wandb
 # srun --gres=gpu:1 python train.py --config configs/dinov3_dora_deform.yaml --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_cascade.yaml --data "$DATA" --wandb
+srun --gres=gpu:1 python train.py --config configs/dinov3_dora_cascade.yaml --data "$DATA" --wandb
 
 # Loss-term ablation (GIoU / focal): baseline + the three loss variants, run sequentially:
-srun --gres=gpu:1 python train.py --config configs/dinov3_dora.yaml --data "$DATA" --wandb
-srun --gres=gpu:1 python train.py --config configs/dinov3_dora_giou.yaml --data "$DATA" --wandb
-srun --gres=gpu:1 python train.py --config configs/dinov3_dora_focal.yaml --data "$DATA" --wandb
-srun --gres=gpu:1 python train.py --config configs/dinov3_dora_giou_focal.yaml --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_dora.yaml --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_giou.yaml --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_focal.yaml --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_giou_focal.yaml --data "$DATA" --wandb
