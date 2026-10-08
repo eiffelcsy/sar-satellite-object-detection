@@ -91,12 +91,10 @@ class CascadeRoIHeads(RoIHeads):
         detections = []
         for stage, predictor in enumerate(self.box_predictors):
             head = self.box_heads[min(stage, len(self.box_heads) - 1)]  # shared head unless per-stage provided
-            if stage > 0:
-                if self.training:
-                    boxes, labels, regression_targets = self._sample(
-                        boxes, targets, self.cascade_matchers[stage], self.cascade_samplers[stage])
-                else:
-                    boxes = [det['boxes'] for det in detections]
+            if stage > 0 and self.training:
+                boxes, labels, regression_targets = self._sample(
+                    boxes, targets, self.cascade_matchers[stage], self.cascade_samplers[stage])
+            # At inference the refined boxes from the previous stage carry over as this stage's proposals.
             pooled = self.box_roi_pool(features, boxes, image_shapes)
             class_logits, box_regression = predictor(head(pooled))
             if self.training:
