@@ -19,8 +19,9 @@ model:
   fusion_layers: [5, 8, 11]  # 0-indexed ViT blocks combined with learnable softmax weights before the neck
   head: deform
   head_params:
-    num_convs: 2
+    num_convs: 1
     kernel_size: 3
+    hidden_dim: 512
 preprocess:
   pseudo_rgb: true
   edge: sobel

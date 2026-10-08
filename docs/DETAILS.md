@@ -28,10 +28,18 @@ multi-layer fusion):
 - `standard`: torchvision Faster R-CNN's 2-layer MLP box head.
 - `deform`: `sarbench/heads.py` `DeformConvBoxHead` — deformable convolutions (Dai et al. 2017) on the pooled
   7x7 RoI features, so the head samples around the true object shape instead of a fixed grid (+~1.4 M).
-- `cascade`: `CascadeRoIHeads` — 3 RoI stages with IoU thresholds 0.5/0.6/0.7, each decoding boxes that are
-  re-pooled and refined by the next stage. The **box head is shared** across stages (a per-stage head adds ~28 M
-  and would breach the 40 M trainable cap; set `head_params: {share_head: false}` to disable sharing). Per-stage
-  losses are summed into `loss_classifier` / `loss_box_reg`.
+- `cascade`: `CascadeRoIHeads` — S RoI stages (default 3) with rising IoU thresholds, each decoding boxes that
+  are re-pooled and refined by the next. Per-stage losses are summed into `loss_classifier` / `loss_box_reg`.
+  `head_params` controls: `num_stages`, `fg_iou_thresholds` (default 0.5/0.6/0.7; lower them for tiny objects),
+  `stage_loss_weights` (default all 1.0), `share_head` (default `true`; a per-stage head at hidden 1024 adds
+  ~28 M) and `hidden_dim` (default 1024; **hidden 256 with `share_head: false` gives a full per-stage cascade
+  that costs less than one 1024 head**). At inference, intermediate stages pass *all* refined proposals to the
+  next stage (no NMS/score threshold) so small-object recall is preserved; only the last stage post-processes.
+
+  **Heads in practice.** On this dataset the plain head won: Deformable-Conv was marginally worse (within seed
+  noise), and Cascade traded mAP/AP50/AP75 for clearly better macro-F1/accuracy — the detection head's gradients
+  shape the shared backbone, so it indirectly changes the classifier. The lower thresholds / per-stage heads /
+  loss re-weighting above are the fair retry; the `dinov3_dora` config remains the best detector overall.
 
 **P2 stem** (`model.detail_stem: true`). The single-scale ViT sees only 16 px patches, so the neck's stride-4
 level is upsampled and carries no genuine high-frequency content. `sarbench/model.py` adds a small conv stem

@@ -105,6 +105,11 @@ class CascadeRoIHeads(RoIHeads):
                 losses['loss_box_reg'] = losses.get('loss_box_reg', 0.) + weight * loss_box_reg
                 boxes = self.box_coder.decode(box_regression.detach(), boxes)
                 boxes = [clip_boxes_to_image(b, s) for b, s in zip(boxes, image_shapes)]
+            elif stage < len(self.box_predictors) - 1:
+                # Keep every refined proposal between stages (no score threshold / NMS): the later stages need
+                # high-recall candidates for small objects. Only the final stage thresholds and suppresses.
+                refined = self.box_coder.decode(box_regression, boxes)
+                boxes = [clip_boxes_to_image(b, s) for b, s in zip(refined, image_shapes)]
             else:
                 all_boxes, all_scores, all_labels = self.postprocess_detections(
                     class_logits, box_regression, boxes, image_shapes)

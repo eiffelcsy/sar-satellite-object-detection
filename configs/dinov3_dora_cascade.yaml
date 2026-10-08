@@ -1,7 +1,9 @@
-# Cascade R-CNN + multi-layer fusion: dinov3_dora with `model.head: cascade` (3 stages, IoU 0.5/0.6/0.7) and
-# `model.fusion_layers`. Everything else matches configs/dinov3_dora.yaml, so the delta is the detection head
-# plus fusion (compare with configs/dinov3_dora_deform.yaml). The box head is shared across stages to stay under
-# the 40 M trainable cap; set `head_params: {share_head: false}` for a full per-stage cascade (adds ~28 M).
+# Cascade R-CNN + multi-layer fusion: dinov3_dora with `model.head: cascade` and `model.fusion_layers`.
+# Everything else matches configs/dinov3_dora.yaml, so the delta is the detection head plus fusion.
+# Cascade is tuned for tiny objects: 3 per-stage heads at hidden 256 (cheaper than one 1024 head, so it fits
+# the budget), lower IoU thresholds 0.4/0.5/0.6 (16 px objects have noisy IoU), and stage loss weights that
+# keep the summed RoI loss comparable to the single-stage runs. Between stages inference keeps all refined
+# proposals (no NMS/threshold) so later stages can still recover small objects.
 # Run: python train.py --config configs/dinov3_dora_cascade.yaml
 name: dinov3_dora_cascade
 backbone:
@@ -21,7 +23,10 @@ model:
   head: cascade
   head_params:
     num_stages: 3
-    share_head: true
+    share_head: false              # per-stage heads; hidden 256 keeps this cheaper than one 1024 head
+    hidden_dim: 256
+    fg_iou_thresholds: [0.4, 0.5, 0.6]  # lower than the 0.5/0.6/0.7 default: 16 px objects have noisy IoU
+    stage_loss_weights: [1.0, 0.5, 0.5]  # rebalance the 3 summed stage losses vs the RPN/classification
 preprocess:
   pseudo_rgb: true
   edge: sobel

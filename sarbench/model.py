@@ -108,23 +108,29 @@ class MultiTaskModel(nn.Module):
         self.roi_heads = self._build_roi_heads(num_classes, head, head_params or {})
 
     def _build_roi_heads(self, num_classes, head, params):
-        """The RoI head ablation: torchvision's head, a Deformable-Conv head, or Cascade R-CNN."""
+        """The RoI head ablation: torchvision's head, a Deformable-Conv head, or Cascade R-CNN.
+
+        `hidden_dim` (default 1024) sets the box-head width for every variant.
+        """
         roi_pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=7, sampling_ratio=2)
+        hidden = params.get('hidden_dim', 1024)
         common = dict(fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=512, positive_fraction=0.25,
                       bbox_reg_weights=None, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100)
         if head == 'standard':
-            return RoIHeads(roi_pool, TwoMLPHead(256 * 7 * 7, 1024), FastRCNNPredictor(1024, num_classes + 1),
-                            **common)
+            return RoIHeads(roi_pool, TwoMLPHead(256 * 7 * 7, hidden),
+                            FastRCNNPredictor(hidden, num_classes + 1), **common)
         if head == 'deform':
-            return RoIHeads(roi_pool, DeformConvBoxHead(**params), FastRCNNPredictor(1024, num_classes + 1),
-                            **common)
+            keys = ('in_channels', 'kernel_size', 'num_convs')
+            return RoIHeads(roi_pool, DeformConvBoxHead(out_channels=hidden,
+                                                        **{k: params[k] for k in keys if k in params}),
+                            FastRCNNPredictor(hidden, num_classes + 1), **common)
         if head == 'cascade':
             stages = params.get('num_stages', 3)
-            # A per-stage box head costs ~14 M each (3 stages would blow the 40 M trainable budget), so the
-            # head is shared by default and only the per-stage predictors (with rising IoU thresholds) differ.
-            box_heads = [TwoMLPHead(256 * 7 * 7, 1024) for _ in range(1 if params.get('share_head', True)
-                                                                        else stages)]
-            predictors = [FastRCNNPredictor(1024, num_classes + 1) for _ in range(stages)]
+            # A per-stage head at hidden 1024 costs ~14 M each; the head is shared by default. A smaller
+            # hidden_dim lets you afford a full per-stage cascade within the 40 M trainable budget.
+            box_heads = [TwoMLPHead(256 * 7 * 7, hidden)
+                         for _ in range(1 if params.get('share_head', True) else stages)]
+            predictors = [FastRCNNPredictor(hidden, num_classes + 1) for _ in range(stages)]
             thresholds = tuple(params.get('fg_iou_thresholds', ())) \
                 or tuple(round(0.5 + 0.1 * i, 2) for i in range(stages))
             return CascadeRoIHeads(
