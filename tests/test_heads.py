@@ -23,6 +23,17 @@ def test_deform_conv_box_head_output_dim():
     assert DeformConvBoxHead()(torch.randn(3, 256, 7, 7)).shape == (3, 1024)
 
 
+def test_cascade_refined_boxes_are_per_image_four_columns():
+    """BoxCoder.decode returns [N, C, 4]; the refinement must reduce it to per-image [n, 4] boxes."""
+    pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=7, sampling_ratio=2)
+    cascade = CascadeRoIHeads(pool, [TwoMLPHead(256 * 7 * 7, 1024)],
+                              [FastRCNNPredictor(1024, 10) for _ in range(3)])
+    boxes = [torch.rand(5, 4) * 100, torch.rand(3, 4) * 100]
+    refined = cascade._refined_boxes(torch.randn(8, 10 * 4), torch.randn(8, 10), boxes, [(128, 128)] * 2)
+    assert [r.shape for r in refined] == [(5, 4), (3, 4)]
+    assert all((r >= 0).all() and (r <= 128).all() for r in refined)
+
+
 def test_cascade_roi_heads_train_and_eval():
     pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=7, sampling_ratio=2)
     heads = [TwoMLPHead(256 * 7 * 7, 1024)]  # shared box head; one predictor per stage

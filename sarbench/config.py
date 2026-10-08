@@ -21,6 +21,12 @@ Schema (only `backbone` and `peft` are required):
       fusion_layers: [5, 8, 11]    # optional: learnable weighted sum of these ViT blocks before the neck
       head: cascade                # standard (default) | deform | cascade RoI head
       head_params: {num_stages: 3} # forwarded to the head (deform: kernel_size/num_convs; cascade: num_stages)
+      focal_loss: true             # focal loss for the RPN objectness, RoI classifier and image classifier
+      focal_gamma: 2.0
+      focal_alpha: 0.25            # RPN (binary) focal only
+      giou_weight: 1.0             # extra GIoU term added to the RoI box regression loss (all heads)
+      roi_sampling_ratio: 4        # RoIAlign sampling_ratio (applies to every head)
+      roi_output_size: 7           # RoIAlign output_size
     train: {epochs: 48, batch_size: 16, lr: 1.0e-4, backbone_lr: null, weight_decay: 0.05,
             eval_every: 4, workers: 8, seed: 0}
     data: {root: null, val_fraction: 0.1, limit: null, mosaic: 0.5, copy_paste: 0.5}
@@ -46,6 +52,12 @@ DEFAULTS = {
     'fusion_layers': None,
     'head': 'standard',
     'head_params': {},
+    'focal_loss': False,
+    'focal_gamma': 2.0,
+    'focal_alpha': 0.25,
+    'giou_weight': 0.0,
+    'roi_sampling_ratio': 2,
+    'roi_output_size': 7,
     'name': None,
     'epochs': 24,
     'batch_size': 16,
@@ -113,6 +125,11 @@ def load_config(path):
         config['head'] = model['head']
     if 'head_params' in model:
         config['head_params'] = dict(model['head_params'] or {})
+    if 'focal_loss' in model:
+        config['focal_loss'] = bool(model['focal_loss'])
+    for key in ('focal_gamma', 'focal_alpha', 'giou_weight', 'roi_sampling_ratio', 'roi_output_size'):
+        if key in model:
+            config[key] = model[key]
 
     if raw.get('name') is not None:
         config['name'] = raw['name']

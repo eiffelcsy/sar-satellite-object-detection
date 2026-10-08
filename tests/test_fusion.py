@@ -46,6 +46,19 @@ def test_layer_fusion_preserves_shape_and_is_a_softmax_weighted_sum():
 
 
 @pytest.mark.parametrize('head', ['standard', 'deform', 'cascade'])
+def test_focal_and_giou_losses_run_for_every_head(head):
+    """The new loss terms (focal RPN/RoI/image + GIoU box) are finite and differentiable for all heads."""
+    model = MultiTaskModel(_StubBackbone(), task_routing=False, num_classes=9, detail_stem=True, head=head,
+                           focal_loss=True, focal_gamma=2.0, focal_alpha=0.25, giou_weight=1.0,
+                           roi_sampling_ratio=4)
+    model.train()
+    _, _, losses = model(IMAGES, TARGETS)
+    assert {'loss_objectness', 'loss_rpn_box_reg', 'loss_classifier', 'loss_box_reg'} <= set(losses)
+    assert all(torch.isfinite(value) for value in losses.values())
+    sum(losses.values()).backward()
+
+
+@pytest.mark.parametrize('head', ['standard', 'deform', 'cascade'])
 def test_head_variants_forward_backward_and_fuse(head):
     model = MultiTaskModel(_StubBackbone(), task_routing=False, num_classes=9, detail_stem=True,
                            fusion_layers=[1, 2, 3], head=head)

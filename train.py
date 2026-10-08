@@ -16,6 +16,7 @@ from sarbench.backbones import build_backbone
 from sarbench.channels import PseudoRGB
 from sarbench.config import DEFAULTS, load_config
 from sarbench.data import SARMultiTask, collate, split_available, to_original_xywh
+from sarbench.losses import multiclass_focal_loss
 from sarbench.metrics import classification_metrics, detection_metrics
 from sarbench.model import MultiTaskModel
 from sarbench.preprocess import SARPreprocess
@@ -92,6 +93,8 @@ def parse_args(argv=None):
     args.backbone_kwargs = dict(cfg['backbone_kwargs']) if args.backbone == cfg['backbone'] else {}
     args.peft_kwargs = dict(cfg['peft_kwargs']) if args.adapt == cfg['adapt'] else {}
     args.peft_targets = list(cfg['peft_targets']) if (args.adapt == cfg['adapt'] and cfg['peft_targets']) else None
+    for key in ('focal_loss', 'focal_gamma', 'focal_alpha', 'giou_weight', 'roi_sampling_ratio', 'roi_output_size'):
+        setattr(args, key, cfg[key])
     args.head_params = dict(cfg['head_params'])
     args.loss_weights = dict(cfg['loss_weights'])
     if args.init == 'scratch' and args.adapt != 'full':
@@ -167,15 +170,20 @@ def weighted_total(losses, loss_weights):
     return sum(weights.get(name, 1.0) * value for name, value in losses.items())
 
 
-def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=None, loss_weights=None):
-    """One pass over the training set; the loss is cross-entropy plus the detector losses, weighted per term."""
+def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=None, loss_weights=None,
+                    focal_loss=False, focal_gamma=2.0):
+    """One pass over the training set; the loss is classification plus the detector losses, weighted per term."""
     model.train()
     start, seen = time.time(), 0
     for step, (images, labels, targets) in enumerate(loader, 1):
         targets = [{'boxes': t['boxes'].cuda(), 'labels': t['labels'].cuda()} for t in targets]
         with torch.autocast('cuda', dtype=torch.bfloat16):  # bf16 has fp32's range: no loss scaling needed
             logits, _, det_losses = model(images.cuda(), targets)
-            losses = {'classification': F.cross_entropy(logits, labels.cuda()), **det_losses}
+            if focal_loss:  # focal-weighted cross-entropy on the image classifier
+                classification = multiclass_focal_loss(logits, labels.cuda(), gamma=focal_gamma)
+            else:
+                classification = F.cross_entropy(logits, labels.cuda())
+            losses = {'classification': classification, **det_losses}
         loss = weighted_total(losses, loss_weights)
         optimizer.zero_grad()
         loss.backward()
@@ -242,8 +250,10 @@ def main():
                          f'{backbone.in_chans}; use a 3-channel backbone (e.g. dinov3).')
     add_adapters(backbone, args.adapt, targets=args.peft_targets, **args.peft_kwargs)  # 'full' is a no-op
     model = MultiTaskModel(backbone, task_routing=args.adapt == 'moelora', detail_stem=args.detail_stem,
-                           fusion_layers=args.fusion_layers, head=args.head,
-                           head_params=args.head_params).cuda()
+                           fusion_layers=args.fusion_layers, head=args.head, head_params=args.head_params,
+                           focal_loss=args.focal_loss, focal_gamma=args.focal_gamma, focal_alpha=args.focal_alpha,
+                           giou_weight=args.giou_weight, roi_sampling_ratio=args.roi_sampling_ratio,
+                           roi_output_size=args.roi_output_size).cuda()
     parameters = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log(f'parameters: {parameters:,} total, {trainable:,} trainable', log_file)
@@ -261,7 +271,8 @@ def main():
     # Train, validating every --eval-every epochs; the reported model is the last-epoch model
     history, start = [], time.time()
     for epoch in range(1, args.epochs + 1):
-        train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file, run, args.loss_weights)
+        train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file, run, args.loss_weights,
+                        args.focal_loss, args.focal_gamma)
         if epoch % args.eval_every == 0 or epoch == args.epochs:
             val, val_detections = evaluate(model, val_loader, val_loader.dataset.instances_json)
             history.append({'epoch': epoch, **val})

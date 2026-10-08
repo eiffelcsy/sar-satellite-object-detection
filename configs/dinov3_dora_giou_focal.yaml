@@ -1,0 +1,34 @@
+# Loss ablation: dinov3_dora + GIoU box term + focal loss (both, all heads). Nothing else changes.
+# Together with dinov3_dora_giou.yaml and dinov3_dora_focal.yaml this is the 2x2 loss ablation.
+# Run: python train.py --config configs/dinov3_dora_giou_focal.yaml
+name: dinov3_dora_giou_focal
+backbone:
+  name: dinov3
+  pretrained: true
+  params:
+    model_name: facebook/dinov3-vitb16-pretrain-lvd1689m
+peft:
+  method: dora
+  params:
+    rank: 32
+    alpha: 32
+  targets: [attn, mlp]
+model:
+  detail_stem: true
+  giou_weight: 1.0        # extra GIoU term on the RoI box loss (all heads)
+  focal_loss: true        # focal for RPN objectness, RoI classifier and image classifier
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+preprocess:
+  pseudo_rgb: true
+  edge: sobel
+  cache: preprocess_cache
+data:
+  mosaic: 0.3
+  copy_paste: 0.5
+loss:
+  classification: 1.0
+  loss_box_reg: 2.0
+  loss_rpn_box_reg: 1.5
+train:
+  epochs: 48

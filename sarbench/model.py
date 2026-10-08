@@ -11,12 +11,11 @@ from torch import nn
 from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor, TwoMLPHead
 from torchvision.models.detection.image_list import ImageList
-from torchvision.models.detection.roi_heads import RoIHeads
 from torchvision.models.detection.rpn import RegionProposalNetwork, RPNHead
 from torchvision.ops import MultiScaleRoIAlign
 
 from .adapters import set_task
-from .heads import CascadeRoIHeads, DeformConvBoxHead
+from .heads import CascadeRoIHeads, DeformConvBoxHead, DetRoIHeads, FocalRPN
 
 
 class SimpleFeaturePyramid(nn.Module):
@@ -85,13 +84,18 @@ class MultiTaskModel(nn.Module):
     """backbone tokens -> classification logits (mean token -> LayerNorm -> Linear) and Faster R-CNN detections."""
 
     def __init__(self, backbone, task_routing: bool, num_classes=9, detail_stem=False,
-                 fusion_layers=None, head='standard', head_params=None):
+                 fusion_layers=None, head='standard', head_params=None, focal_loss=False, focal_gamma=2.0,
+                 focal_alpha=0.25, giou_weight=0.0, roi_sampling_ratio=2, roi_output_size=7):
         super().__init__()
         self.backbone = backbone
         self.task_routing = task_routing  # MoE-LoRA: the backbone runs once per task, with that task's routers
         self.cls_head = nn.Sequential(nn.LayerNorm(backbone.embed_dim), nn.Linear(backbone.embed_dim, num_classes))
         self.neck = SimpleFeaturePyramid(backbone.embed_dim)
         self.detail_stem = ConvStem(backbone.in_chans) if detail_stem else None  # real detail for P2
+        # Detection-loss / RoI options shared by every head.
+        self.focal_loss, self.focal_gamma, self.focal_alpha = focal_loss, focal_gamma, focal_alpha
+        self.giou_weight = giou_weight
+        self.roi_sampling_ratio, self.roi_output_size = roi_sampling_ratio, roi_output_size
         # Multi-layer fusion: normalize negative indices, register hooks in execution order.
         self.fusion_layers = self.fusion = None
         if fusion_layers:
@@ -101,29 +105,33 @@ class MultiTaskModel(nn.Module):
         # Small objects (median ~16 px at 512 px, 99 % below ~240 px): two anchor scales per octave, from 8 px at
         # stride 4 up to 181 px at stride 64, times 3 aspect ratios = 6 anchors per location.
         anchors = AnchorGenerator(((8, 11), (16, 23), (32, 45), (64, 91), (128, 181)), ((0.5, 1.0, 2.0),) * 5)
-        self.rpn = RegionProposalNetwork(
+        rpn_class = FocalRPN if focal_loss else RegionProposalNetwork
+        self.rpn = rpn_class(
             anchors, RPNHead(256, 6), fg_iou_thresh=0.7, bg_iou_thresh=0.3, batch_size_per_image=256,
-            positive_fraction=0.5, pre_nms_top_n=dict(training=2000, testing=1000),
-            post_nms_top_n=dict(training=2000, testing=1000), nms_thresh=0.7)
+            positive_fraction=0.5, pre_nms_top_n=dict(training=2000, testing=2000),
+            post_nms_top_n=dict(training=2000, testing=2000), nms_thresh=0.7,
+            **({'focal_gamma': focal_gamma, 'focal_alpha': focal_alpha} if focal_loss else {}))
         self.roi_heads = self._build_roi_heads(num_classes, head, head_params or {})
 
     def _build_roi_heads(self, num_classes, head, params):
-        """The RoI head ablation: torchvision's head, a Deformable-Conv head, or Cascade R-CNN.
+        """The RoI head ablation: torchvision's head (with focal/GIoU), a Deformable-Conv head, or Cascade.
 
         `hidden_dim` (default 1024) sets the box-head width for every variant.
         """
-        roi_pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=7, sampling_ratio=2)
+        roi_pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=self.roi_output_size,
+                                      sampling_ratio=self.roi_sampling_ratio)
         hidden = params.get('hidden_dim', 1024)
+        loss_opts = dict(focal_loss=self.focal_loss, focal_gamma=self.focal_gamma, giou_weight=self.giou_weight)
         common = dict(fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=512, positive_fraction=0.25,
                       bbox_reg_weights=None, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100)
         if head == 'standard':
-            return RoIHeads(roi_pool, TwoMLPHead(256 * 7 * 7, hidden),
-                            FastRCNNPredictor(hidden, num_classes + 1), **common)
+            return DetRoIHeads(roi_pool, TwoMLPHead(256 * 7 * 7, hidden),
+                               FastRCNNPredictor(hidden, num_classes + 1), **common, **loss_opts)
         if head == 'deform':
             keys = ('in_channels', 'kernel_size', 'num_convs')
-            return RoIHeads(roi_pool, DeformConvBoxHead(out_channels=hidden,
-                                                        **{k: params[k] for k in keys if k in params}),
-                            FastRCNNPredictor(hidden, num_classes + 1), **common)
+            return DetRoIHeads(roi_pool, DeformConvBoxHead(out_channels=hidden,
+                                                           **{k: params[k] for k in keys if k in params}),
+                               FastRCNNPredictor(hidden, num_classes + 1), **common, **loss_opts)
         if head == 'cascade':
             stages = params.get('num_stages', 3)
             # A per-stage head at hidden 1024 costs ~14 M each; the head is shared by default. A smaller
@@ -138,7 +146,7 @@ class MultiTaskModel(nn.Module):
                 bg_iou_threshold=params.get('bg_iou_threshold', 0.5),
                 batch_size_per_image=512, positive_fraction=0.25, bbox_reg_weights=None,
                 score_thresh=0.05, nms_thresh=0.5, detections_per_img=100,
-                stage_loss_weights=params.get('stage_loss_weights'))
+                stage_loss_weights=params.get('stage_loss_weights'), **loss_opts)
         raise ValueError(f"unknown head '{head}'; available: standard, deform, cascade")
 
     def _backbone_tokens(self, images):

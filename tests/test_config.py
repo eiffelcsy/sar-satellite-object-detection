@@ -80,6 +80,17 @@ def test_head_ablation_configs_match_the_baseline_and_add_fusion():
     assert all(cascade[key] == base[key] for key in shared)
 
 
+def test_detection_loss_ablation_configs():
+    base = load_config(CONFIGS / 'dinov3_dora.yaml')
+    assert (base['giou_weight'], base['focal_loss'], base['roi_sampling_ratio']) == (0.0, False, 2)
+    shared = ('backbone', 'init', 'backbone_kwargs', 'adapt', 'peft_kwargs', 'peft_targets', 'detail_stem',
+              'pseudo_rgb', 'edge', 'mosaic', 'copy_paste', 'loss_weights', 'epochs', 'preprocess_cache')
+    for name, giou, focal in (('giou', 1.0, False), ('focal', 0.0, True), ('giou_focal', 1.0, True)):
+        cfg = load_config(CONFIGS / f'dinov3_dora_{name}.yaml')
+        assert cfg['giou_weight'] == giou and cfg['focal_loss'] is focal
+        assert all(cfg[key] == base[key] for key in shared), name
+
+
 def test_loss_weights_default_empty_and_parse_from_config():
     assert load_config(CONFIGS / 'vit_lora.yaml')['loss_weights'] == {}
     weights = load_config(CONFIGS / 'dinov3_dora.yaml')['loss_weights']

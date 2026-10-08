@@ -41,6 +41,16 @@ multi-layer fusion):
   shape the shared backbone, so it indirectly changes the classifier. The lower thresholds / per-stage heads /
   loss re-weighting above are the fair retry; the `dinov3_dora` config remains the best detector overall.
 
+**Detection losses** (`model.*`, applied to every head; enable with `configs/dinov3_dora_giou_focal.yaml`):
+
+- `giou_weight` (default 0): adds a GIoU term to the RoI box-regression loss (on the decoded positive boxes vs
+  their matched GT), which targets localization / AP75.
+- `focal_loss` + `focal_gamma`/`focal_alpha` (default off): focal loss replaces the RPN objectness (binary
+  sigmoid focal), the RoI classifier and the image classifier. gamma = 0 is exactly the previous loss.
+- `roi_sampling_ratio` / `roi_output_size` (default 2 / 7): the single shared `MultiScaleRoIAlign`, so it affects
+  all heads — finer sampling (e.g. 4) helps tiny RoIs.
+- The RPN now keeps the top **2000** proposals after NMS at both training and testing (`model.py`).
+
 **P2 stem** (`model.detail_stem: true`). The single-scale ViT sees only 16 px patches, so the neck's stride-4
 level is upsampled and carries no genuine high-frequency content. `sarbench/model.py` adds a small conv stem
 (two stride-2 convs on the 512 px input) whose stride-4 output is added to P2, which is what tiny SAR objects
