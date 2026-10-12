@@ -75,9 +75,9 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # srun --gres=gpu:1 python train.py --config configs/dinov3_dora_giou_focal.yaml --data "$DATA" --wandb
 
 # Input/model-gap runs (input adapter + WST + scale protection + two-stage), then the Cascade retry:
-srun --gres=gpu:1 python train.py --config configs/dinov3_dora_v2.yaml         --data "$DATA" --wandb
-srun --gres=gpu:1 python train.py --config configs/dinov3_dora_cascade_v2.yaml --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_v2.yaml         --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_cascade_v2.yaml --data "$DATA" --wandb
 
 # ViT-input ablation (plain amplitude repeated vs amplitude/log-amplitude/edge):
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_v2_amp.yaml    --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_v2_logamp.yaml --data "$DATA" --wandb
+srun --gres=gpu:1 python train.py --config configs/dinov3_dora_v2_amp.yaml    --data "$DATA" --wandb
+srun --gres=gpu:1 python train.py --config configs/dinov3_dora_v2_logamp.yaml --data "$DATA" --wandb
