@@ -61,6 +61,52 @@ class ConvStem(nn.Module):
         return self.stem(x)
 
 
+class InputAdapter(nn.Module):
+    """ImageNet normalization followed by a learnable 1x1 conv, initialized as a no-op.
+
+    DINOv3 was pretrained on ImageNet-normalized RGB; the conv lets the first layer remap the SAR pseudo-RGB
+    channels into what the frozen patch embedding expects (the "train on the filtered input" idea).
+    """
+
+    imagenet_mean = (0.485, 0.456, 0.406)
+    imagenet_std = (0.229, 0.224, 0.225)
+
+    def __init__(self, in_chans=3):
+        super().__init__()
+        self.register_buffer('mean', torch.tensor(self.imagenet_mean[:in_chans]).view(1, in_chans, 1, 1))
+        self.register_buffer('std', torch.tensor(self.imagenet_std[:in_chans]).view(1, in_chans, 1, 1))
+        self.proj = nn.Conv2d(in_chans, in_chans, 1)
+        with torch.no_grad():  # identity: starts as a no-op
+            self.proj.weight.copy_(torch.eye(in_chans).view(in_chans, in_chans, 1, 1))
+            self.proj.bias.zero_()
+
+    def forward(self, x):
+        return self.proj((x - self.mean) / self.std)
+
+
+class WSTStem(nn.Module):
+    """Wavelet scattering (J=2, L=8) -> 81 channels at stride 4, projected and added to the P2 level.
+
+    Computed on the augmented pixels, it gives the tiny-object level noise-robust, multi-scale detail.
+    """
+
+    def __init__(self, out_channels=256, J=2, L=8, image_size=512):
+        super().__init__()
+        # Import the 2D frontend directly: kymatio 0.3's top-level import pulls in scattering3d, which breaks
+        # on scipy >= 1.15 (removed sph_harm).
+        from kymatio.scattering2d.frontend.torch_frontend import ScatteringTorch2D
+        self.scattering = ScatteringTorch2D(J=J, L=L, shape=(image_size, image_size))
+        n_coeffs = 1 + J * L + J * (J - 1) // 2 * L * L  # 81 for J=2, L=8
+        self.head = nn.Sequential(
+            nn.Conv2d(n_coeffs, out_channels, 1, bias=False), nn.GELU(),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False), nn.GroupNorm(32, out_channels))
+
+    def forward(self, x):
+        with torch.autocast(x.device.type, enabled=False):  # FFT scattering in fp32
+            scattering = self.scattering(x[:, :1].float().contiguous())
+        return self.head(scattering[:, 0].to(dtype=self.head[0].weight.dtype))
+
+
 class LayerFusion(nn.Module):
     """Learnable softmax-weighted sum of the tokens from several ViT blocks (`model.fusion_layers`).
 
@@ -85,13 +131,18 @@ class MultiTaskModel(nn.Module):
 
     def __init__(self, backbone, task_routing: bool, num_classes=9, detail_stem=False,
                  fusion_layers=None, head='standard', head_params=None, focal_loss=False, focal_gamma=2.0,
-                 focal_alpha=0.25, giou_weight=0.0, roi_sampling_ratio=2, roi_output_size=7):
+                 focal_alpha=0.25, giou_weight=0.0, roi_sampling_ratio=2, roi_output_size=7,
+                 input_adapter=False, wst_stem=False, wst_params=None):
         super().__init__()
         self.backbone = backbone
         self.task_routing = task_routing  # MoE-LoRA: the backbone runs once per task, with that task's routers
         self.cls_head = nn.Sequential(nn.LayerNorm(backbone.embed_dim), nn.Linear(backbone.embed_dim, num_classes))
         self.neck = SimpleFeaturePyramid(backbone.embed_dim)
         self.detail_stem = ConvStem(backbone.in_chans) if detail_stem else None  # real detail for P2
+        self.input_adapter = InputAdapter(backbone.in_chans) if input_adapter else None
+        self.wst_stem = WSTStem(**(wst_params or {})) if wst_stem else None
+        if input_adapter and hasattr(backbone, 'unfreeze_patch_embed'):  # PEFT froze it; re-enable it here
+            backbone.unfreeze_patch_embed()
         # Detection-loss / RoI options shared by every head.
         self.focal_loss, self.focal_gamma, self.focal_alpha = focal_loss, focal_gamma, focal_alpha
         self.giou_weight = giou_weight
@@ -169,15 +220,18 @@ class MultiTaskModel(nn.Module):
         """images [B, C, H, W], targets: per-image {'boxes' XYXY, 'labels' 1..9} (training only) ->
         (logits [B, num_classes], per-image detections (eval mode), the detection losses (training mode))."""
         set_task(self.backbone, 0)  # 0 = classification, 1 = detection; a no-op without MoE-LoRA
-        tokens = self._backbone_tokens(images)
+        backbone_images = self.input_adapter(images) if self.input_adapter is not None else images
+        tokens = self._backbone_tokens(backbone_images)
         logits = self.cls_head(tokens.mean(dim=1))
         if self.task_routing:
             set_task(self.backbone, 1)
-            tokens = self._backbone_tokens(images)
+            tokens = self._backbone_tokens(backbone_images)
         h, w = images.shape[-2] // 16, images.shape[-1] // 16  # one token per 16 x 16 patch
         features = self.neck(tokens.transpose(1, 2).unflatten(2, (h, w)))  # tokens as a [B, 768, h, w] map
         if self.detail_stem is not None:  # add genuine stride-4 detail (from the pixels) to the upsampled P2
             features['0'] = features['0'] + self.detail_stem(images.to(features['0'].dtype))
+        if self.wst_stem is not None:  # scattering detail (81 coeffs at stride 4) added to P2
+            features['0'] = features['0'] + self.wst_stem(images).to(features['0'].dtype)
         # Precision rule: the box coder casts anchors to the dtype of the regression output, so in bf16 every
         # coordinate near 512 would snap to a 2 px grid. RPN and RoIHeads therefore run in fp32.
         with torch.autocast(images.device.type, enabled=False):

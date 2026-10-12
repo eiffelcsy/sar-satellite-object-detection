@@ -1,0 +1,51 @@
+# The revised best recipe: closes the input and model gaps found in the MSFA review.
+#
+# = dinov3_dora_giou_focal.yaml plus:
+#   - input_adapter: ImageNet mean/std + a learnable 1x1 conv (no-op init) and an unfrozen DINOv3 patch
+#     embedding (~0.6 M trainable) -- "train the model on the filtered input";
+#   - wst_stem: wavelet scattering (J=2, L=8 -> 81 ch at stride 4) added to P2, ~0.6 M;
+#   - object-scale-preserving augmentation: mosaic 0.1, scale jitter 0.8-1.25, 0/90/180/270 rotations,
+#     and filter channels computed after the geometric augmentations;
+#   - two stages: 10 epochs of head-only training with the backbone (incl. DoRA) frozen at 2e-4, then the
+#     normal 48-epoch recipe with DoRA on.
+# Run: python train.py --config configs/dinov3_dora_v2.yaml
+name: dinov3_dora_v2
+backbone:
+  name: dinov3
+  pretrained: true
+  params:
+    model_name: facebook/dinov3-vitb16-pretrain-lvd1689m
+peft:
+  method: dora
+  params:
+    rank: 32
+    alpha: 32
+  targets: [attn, mlp]
+model:
+  detail_stem: true
+  fusion_layers: [5, 8, 11]  # 0-indexed ViT blocks combined with learnable softmax weights before the neck
+  input_adapter: true        # ImageNet norm + learnable 1x1 conv (no-op) + unfrozen patch embedding
+  wst_stem: true             # wavelet scattering detail (81 ch at stride 4) added to P2
+  giou_weight: 1.0
+  focal_loss: true
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+  roi_sampling_ratio: 4
+preprocess:
+  pseudo_rgb: true
+  mode: despeckle            # despeckle | amp_log_edge | amplitude (input ablation)
+  edge: sobel
+  cache: preprocess_cache
+data:
+  mosaic: 0.1
+  copy_paste: 0.5
+  scale_jitter: [0.8, 1.25]
+  rotation90: true
+loss:
+  classification: 1.0
+  loss_box_reg: 2.0
+  loss_rpn_box_reg: 1.5
+train:
+  epochs: 48
+  stage_a_epochs: 10
+  stage_a_lr: 2.0e-4

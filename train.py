@@ -45,9 +45,16 @@ def parse_args(argv=None):
                    help='add a conv stem on the input to give the P2 level real stride-4 detail')
     p.add_argument('--fusion-layers', nargs='+', type=int, default=cfg['fusion_layers'],
                    help='ViT block indices whose tokens are fused before the neck (multi-layer FPN fusion)')
+    p.add_argument('--input-adapter', action='store_true', default=cfg['input_adapter'],
+                   help='ImageNet norm + learnable 1x1 conv (no-op init) + unfrozen DINOv3 patch embedding')
+    p.add_argument('--wst-stem', action='store_true', default=cfg['wst_stem'],
+                   help='add wavelet scattering (J=2, L=8 -> 81 ch at stride 4) detail to the neck P2 level')
     p.add_argument('--head', choices=['standard', 'deform', 'cascade'], default=cfg['head'],
                    help='RoI detection head: torchvision (standard), Deformable-Conv, or Cascade R-CNN')
     p.add_argument('--epochs', type=int, default=cfg['epochs'])
+    p.add_argument('--stage-a-epochs', type=int, default=cfg['stage_a_epochs'],
+                   help='freeze the backbone (incl. DoRA) for the first N epochs and train the heads only')
+    p.add_argument('--stage-a-lr', type=float, default=cfg['stage_a_lr'], help='learning rate for stage A')
     p.add_argument('--batch-size', type=int, default=cfg['batch_size'])
     p.add_argument('--lr', type=float, default=cfg['lr'])
     p.add_argument('--backbone-lr', type=float, default=cfg['backbone_lr'],
@@ -64,6 +71,10 @@ def parse_args(argv=None):
                    help='train-time probability of combining 4 images into a 2x2 mosaic (0 disables)')
     p.add_argument('--copy-paste', dest='copy_paste', type=float, default=cfg['copy_paste'],
                    help='train-time probability of pasting objects from another image (0 disables)')
+    p.add_argument('--scale-jitter', nargs=2, type=float, default=cfg['scale_jitter'],
+                   help='train-time scale jitter range, e.g. --scale-jitter 0.8 1.25 (omit to disable)')
+    p.add_argument('--rotation90', action='store_true', default=cfg['rotation90'],
+                   help='train-time random 0/90/180/270-degree rotations')
     p.add_argument('--seed', type=int, default=cfg['seed'])
     p.add_argument('--out', type=Path, default=Path(cfg['out']))
     p.add_argument('--load', type=Path, default=None,
@@ -79,6 +90,9 @@ def parse_args(argv=None):
                    help='SAR-BM3D despeckling + dB log transform + percentile clipping before the network')
     p.add_argument('--pseudo-rgb', action='store_true', default=cfg['pseudo_rgb'],
                    help='DINOv3 input: 1-channel SAR -> 3 channels (amplitude, despeckled base, edge map)')
+    p.add_argument('--pseudo-rgb-mode', choices=['despeckle', 'amp_log_edge', 'amplitude'],
+                   default=cfg['pseudo_rgb_mode'],
+                   help='pseudo-RGB assembly: despeckle | amp_log_edge | amplitude (see sarbench/channels.py)')
     p.add_argument('--edge', choices=['sobel', 'highpass'], default=cfg['edge'],
                    help='with --pseudo-rgb: the channel-3 high-frequency map (default: sobel)')
     p.add_argument('--no-despeckle', action='store_true', default=cfg['no_despeckle'],
@@ -108,6 +122,7 @@ def parse_args(argv=None):
     for key in ('focal_loss', 'focal_gamma', 'focal_alpha', 'giou_weight', 'roi_sampling_ratio', 'roi_output_size'):
         setattr(args, key, cfg[key])
     args.head_params = dict(cfg['head_params'])
+    args.wst_params = dict(cfg['wst_params'])
     args.loss_weights = dict(cfg['loss_weights'])
     if args.init == 'scratch' and args.adapt != 'full':
         p.error('--init scratch is only valid with --adapt full')
@@ -150,7 +165,7 @@ def build_preprocess(args):
     `--pseudo-rgb` builds the three DINOv3 channels; `--preprocess` is the SAR-BM3D + dB pipeline.
     """
     if args.pseudo_rgb:
-        return PseudoRGB(despeckle=not args.no_despeckle, edge=args.edge,
+        return PseudoRGB(despeckle=not args.no_despeckle, edge=args.edge, mode=args.pseudo_rgb_mode,
                          clip_percentile=args.clip_percentile, sigma=args.bm3d_sigma,
                          profile=args.bm3d_profile, threads=args.bm3d_threads)
     if not args.preprocess:
@@ -166,7 +181,8 @@ def make_loader(args, split):
     dataset = SARMultiTask(args.data, split, train=train, limit=args.limit,
                            val_fraction=args.val_fraction, seed=args.seed,
                            preprocess=build_preprocess(args), cache_dir=args.preprocess_cache,
-                           mosaic=args.mosaic, copy_paste=args.copy_paste)
+                           mosaic=args.mosaic, copy_paste=args.copy_paste,
+                           scale_jitter=args.scale_jitter, rotation90=args.rotation90)
     return DataLoader(dataset, args.batch_size, shuffle=train, num_workers=args.workers, collate_fn=collate,
                       persistent_workers=train and args.workers > 0)  # training workers live across epochs
 
@@ -215,13 +231,27 @@ def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=Non
         if step % 50 == 0 or step == len(loader):
             parts = ' '.join(f'{name} {value.item():.3f}' for name, value in losses.items())
             log(f'epoch {epoch} iter {step}/{len(loader)} loss {loss.item():.3f} (weighted total; raw: {parts}) '
-                f'lr {optimizer.param_groups[1]["lr"]:.2e} {seen / (time.time() - start):.1f} images/s', log_file)
+                f'lr {optimizer.param_groups[-1]["lr"]:.2e} {seen / (time.time() - start):.1f} images/s', log_file)
             if run is not None:
                 run.log({f'train/{name}': value.item() for name, value in losses.items()}
-                        | {'train/loss': loss.item(), 'train/lr': optimizer.param_groups[1]['lr'],
+                        | {'train/loss': loss.item(), 'train/lr': optimizer.param_groups[-1]['lr'],
                            'epoch': epoch},
                         step=(epoch - 1) * len(loader) + step)
             start, seen = time.time(), 0
+
+
+def fit(model, train_loader, val_loader, epochs, optimizer, schedule, args, log_file, run, history, start_epoch=1):
+    """Train `epochs` epochs, validating every --eval-every and after the last one; appends to `history`."""
+    for offset in range(epochs):
+        epoch = start_epoch + offset
+        train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file, run, args.loss_weights,
+                        args.focal_loss, args.focal_gamma)
+        if epoch % args.eval_every == 0 or offset == epochs - 1:
+            val, val_detections, val_sub = evaluate(model, val_loader, val_loader.dataset.instances_json)
+            history.append({'epoch': epoch, **val})
+            log(f'epoch {epoch} val: {headline(val)}', log_file)
+            if run is not None:
+                run.log({f'val/{k}': v for k, v in val.items()}, step=epoch * len(train_loader))
 
 
 @torch.no_grad()
@@ -310,7 +340,8 @@ def main():
                            fusion_layers=args.fusion_layers, head=args.head, head_params=args.head_params,
                            focal_loss=args.focal_loss, focal_gamma=args.focal_gamma, focal_alpha=args.focal_alpha,
                            giou_weight=args.giou_weight, roi_sampling_ratio=args.roi_sampling_ratio,
-                           roi_output_size=args.roi_output_size).cuda()
+                           roi_output_size=args.roi_output_size, input_adapter=args.input_adapter,
+                           wst_stem=args.wst_stem, wst_params=args.wst_params).cuda()
     parameters = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log(f'parameters: {parameters:,} total, {trainable:,} trainable', log_file)
@@ -347,25 +378,29 @@ def main():
             run.finish()
         return
 
-    # Optimizer and schedule: trainable backbone parameters at --backbone-lr, all new modules at --lr
+    # Stage A: freeze the backbone (including DoRA) and train only the neck, RPN, RoI and class heads.
     backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
     head_params = [p for name, p in model.named_parameters() if not name.startswith('backbone.')]
+    history, start = [], time.time()
+    if args.stage_a_epochs:
+        log(f'stage A: {args.stage_a_epochs} epochs, backbone frozen, lr {args.stage_a_lr}', log_file)
+        for p in model.backbone.parameters():
+            p.requires_grad_(False)
+        optimizer_a = torch.optim.AdamW(head_params, lr=args.stage_a_lr, weight_decay=args.weight_decay)
+        schedule_a = torch.optim.lr_scheduler.LambdaLR(
+            optimizer_a, lambda step: lr_factor(step, len(train_loader), args.stage_a_epochs * len(train_loader)))
+        fit(model, train_loader, val_loader, args.stage_a_epochs, optimizer_a, schedule_a, args, log_file, run,
+            history)
+        for p in backbone_params:  # switch DoRA/backbone back on for stage B
+            p.requires_grad_(True)
+
+    # Stage B (and the only stage when stage_a_epochs is 0): trainable backbone at --backbone-lr, heads at --lr.
     optimizer = torch.optim.AdamW([{'params': backbone_params, 'lr': args.backbone_lr}, {'params': head_params}],
                                   lr=args.lr, weight_decay=args.weight_decay)
     warmup, total = len(train_loader), args.epochs * len(train_loader)  # one epoch of warmup
     schedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: lr_factor(step, warmup, total))
-
-    # Train, validating every --eval-every epochs; the reported model is the last-epoch model
-    history, start = [], time.time()
-    for epoch in range(1, args.epochs + 1):
-        train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file, run, args.loss_weights,
-                        args.focal_loss, args.focal_gamma)
-        if epoch % args.eval_every == 0 or epoch == args.epochs:
-            val, val_detections, val_sub = evaluate(model, val_loader, val_loader.dataset.instances_json)
-            history.append({'epoch': epoch, **val})
-            log(f'epoch {epoch} val: {headline(val)}', log_file)
-            if run is not None:
-                run.log({f'val/{k}': v for k, v in val.items()}, step=epoch * len(train_loader))
+    fit(model, train_loader, val_loader, args.epochs, optimizer, schedule, args, log_file, run, history,
+        start_epoch=args.stage_a_epochs + 1)
     train_hours = (time.time() - start) / 3600
 
     # Evaluate on test, once (the course val/test labels are withheld, so test may be absent)

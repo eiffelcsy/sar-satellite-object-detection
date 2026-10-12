@@ -1,0 +1,42 @@
+# Input ablation B: [amplitude, log-amplitude, edge]. Otherwise identical to dinov3_dora_v2.
+# Run: python train.py --config configs/dinov3_dora_v2_logamp.yaml
+name: dinov3_dora_v2_logamp
+backbone:
+  name: dinov3
+  pretrained: true
+  params:
+    model_name: facebook/dinov3-vitb16-pretrain-lvd1689m
+peft:
+  method: dora
+  params:
+    rank: 32
+    alpha: 32
+  targets: [attn, mlp]
+model:
+  detail_stem: true
+  fusion_layers: [5, 8, 11]
+  input_adapter: true
+  wst_stem: true
+  giou_weight: 1.0
+  focal_loss: true
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+  roi_sampling_ratio: 4
+preprocess:
+  pseudo_rgb: true
+  mode: amp_log_edge
+  edge: sobel
+  cache: preprocess_cache
+data:
+  mosaic: 0.1
+  copy_paste: 0.5
+  scale_jitter: [0.8, 1.25]
+  rotation90: true
+loss:
+  classification: 1.0
+  loss_box_reg: 2.0
+  loss_rpn_box_reg: 1.5
+train:
+  epochs: 48
+  stage_a_epochs: 10
+  stage_a_lr: 2.0e-4

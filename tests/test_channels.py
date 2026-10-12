@@ -26,6 +26,21 @@ def test_cache_key_reflects_configuration():
         == PseudoRGB(despeckle=False, edge='sobel').cache_key()
     assert PseudoRGB(despeckle=False, edge='sobel').cache_key() \
         != PseudoRGB(despeckle=False, edge='highpass').cache_key()
+    assert PseudoRGB(mode='amplitude').cache_key() != PseudoRGB(mode='amp_log_edge').cache_key()
+
+
+def test_amplitude_mode_repeats_one_channel():
+    img = np.random.RandomState(0).rand(32, 32).astype(np.float32)
+    out = PseudoRGB(mode='amplitude')(img)
+    assert out.shape == (3, 32, 32)
+    assert np.allclose(out[0], out[1]) and np.allclose(out[1], out[2])
+
+
+def test_amp_log_edge_mode_stays_in_range():
+    img = np.random.RandomState(1).rand(32, 32).astype(np.float32)
+    out = PseudoRGB(mode='amp_log_edge')(img)
+    assert out.shape == (3, 32, 32) and np.isfinite(out).all()
+    assert out.min() >= 0.0 and out.max() <= 1.0
 
 
 def test_despeckled_base_uses_sar_bm3d(monkeypatch):

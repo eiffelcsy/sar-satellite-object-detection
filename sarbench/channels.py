@@ -39,10 +39,14 @@ def edge_map(img, mode='sobel', blur_sigma=1.0):
 
 
 class PseudoRGB:
-    """(H, W) intensity image in [0, 1] -> (3, H, W) pseudo-RGB image in [0, 1]."""
+    """(H, W) intensity image in [0, 1] -> (3, H, W) pseudo-RGB image in [0, 1].
+
+    `mode` selects the channel assembly: `despeckle` (amplitude, SAR-BM3D base, edge), `amp_log_edge`
+    (amplitude, log-amplitude, edge) or `amplitude` (amplitude repeated three times).
+    """
 
     def __init__(self, despeckle=True, edge='sobel', clip_percentile=0.5, sigma=None,
-                 profile=PROFILE, threads=THREADS, blur_sigma=1.0):
+                 profile=PROFILE, threads=THREADS, blur_sigma=1.0, mode='despeckle'):
         self.despeckle = despeckle
         self.edge = edge
         self.clip_percentile = clip_percentile
@@ -50,15 +54,22 @@ class PseudoRGB:
         self.profile = profile
         self.threads = threads
         self.blur_sigma = blur_sigma
+        self.mode = mode
 
     def cache_key(self):
         """Stable name for the configuration, used to key the optional on-disk cache."""
         return (f'prgb_d{int(self.despeckle)}_e{self.edge}_c{self.clip_percentile}_s{self.sigma}'
-                f'_p{self.profile}_t{self.threads}_b{self.blur_sigma}')
+                f'_p{self.profile}_t{self.threads}_b{self.blur_sigma}_m{self.mode}')
 
     def __call__(self, img):
         img = np.clip(np.asarray(img, dtype=np.float32), 0.0, 1.0)
         amplitude = normalized_amplitude(img, self.clip_percentile)
+        if self.mode == 'amplitude':
+            return np.stack([amplitude] * 3).astype(np.float32)
+        if self.mode == 'amp_log_edge':
+            log_amplitude = sigma_clip(np.log(np.maximum(img, 1e-4)), self.clip_percentile)
+            edges = sigma_clip(edge_map(amplitude, self.edge, self.blur_sigma), percentile=self.clip_percentile)
+            return np.stack([amplitude, log_amplitude, edges]).astype(np.float32)
         base = despeckled_base(img, self.despeckle, self.sigma, self.profile, self.threads, self.blur_sigma)
         base = sigma_clip(base, percentile=self.clip_percentile)
         edges = sigma_clip(edge_map(base, self.edge, self.blur_sigma), percentile=self.clip_percentile)

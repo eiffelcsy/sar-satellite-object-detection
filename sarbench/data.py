@@ -145,7 +145,8 @@ class SARMultiTask(Dataset):
     DINOv3 pseudo-RGB pre-processing."""
 
     def __init__(self, root, split, train=False, size=512, limit=None, val_fraction=0.1, seed=0,
-                 preprocess=None, cache_dir=None, mosaic=0.0, copy_paste=0.0, copy_paste_max_iou=0.3):
+                 preprocess=None, cache_dir=None, mosaic=0.0, copy_paste=0.0, copy_paste_max_iou=0.3,
+                 scale_jitter=None, rotation90=False):
         self.root = Path(root)
         self.train = train
         self.size = size
@@ -176,14 +177,23 @@ class SARMultiTask(Dataset):
         for ann in coco['annotations']:
             self.annotations[ann['image_id']].append(ann)
         flips = [v2.RandomHorizontalFlip(), v2.RandomVerticalFlip()] if train else []
+        if train and scale_jitter:  # 0.8-1.25 scale jitter: protects small-object scale better than a halving mosaic
+            resize = [v2.ScaleJitter((size, size), scale_range=tuple(scale_jitter)), v2.CenterCrop((size, size))]
+        else:
+            resize = [v2.Resize((size, size))]  # stretches non-square images; boxes are scaled with the pixels
+        rotations = []
+        if train and rotation90:  # 0/90/180/270, free for SAR (no canonical orientation)
+            rotations = [v2.RandomChoice([v2.RandomRotation((d, d)) for d in (0, 90, 180, 270)])]
         steps = [
             v2.ToImage(),
             v2.ConvertBoundingBoxFormat('XYXY'),  # COCO [x, y, w, h] -> [x1, y1, x2, y2]
-            v2.Resize((size, size)),  # stretches non-square images; boxes are scaled with the pixels
+            *resize,
+            *rotations,
             *flips,  # overhead imagery has no canonical "up"
             v2.ToDtype(torch.float32, scale=True),
         ]
         # Pre-processing already returns a [0, 1] image, so the raw-pixel MEAN/STD no longer apply.
+        # With pre-processing the geometry stops here; the filter channels are computed after augmentation.
         if preprocess is None:
             steps.append(v2.Normalize([MEAN], [STD]))
         self.transform = v2.Compose(steps)
@@ -202,6 +212,11 @@ class SARMultiTask(Dataset):
         """Despeckle/normalise the image, reusing an on-disk cache when `cache_dir` is set."""
         return preprocess_image(image, file_name, self.preprocess, self.cache_dir)
 
+    def _preprocess_tensor(self, image):
+        """Run the filter pre-processing on an already-augmented [1, H, W] tensor in [0, 1]."""
+        arr = image[0].numpy() if image.shape[0] == 1 else image.numpy()
+        return _as_image_tensor(self.preprocess(arr))
+
     def _load_transformed(self, i):
         """Load image `i`, run the base transform (resize/flips/normalise) and return image, boxes, labels.
 
@@ -215,7 +230,7 @@ class SARMultiTask(Dataset):
         boxes = tv_tensors.BoundingBoxes([a['bbox'] for a in anns], format='XYWH', canvas_size=orig_size,
                                          dtype=torch.float32)  # integer boxes would be truncated by Resize
         image = Image.open(self._image_path(row['file_name'])).convert('L')  # PIL: torchvision.io cannot read .bmp
-        if self.preprocess is not None:
+        if self.preprocess is not None and not self.train:  # eval: cached; train computes filters after geometry
             image = self._preprocessed(image, row['file_name'])
         image, boxes = self.transform(image, boxes)
         boxes = boxes.as_subclass(torch.Tensor).float()
@@ -232,6 +247,8 @@ class SARMultiTask(Dataset):
             donor = self._load_transformed(random.randrange(len(self)))
             image, boxes, labels = copy_paste(image, boxes, labels, donor[0], donor[1], donor[2],
                                               self.copy_paste_max_iou)
+        if self.train and self.preprocess is not None:  # filter channels after geometry (no cache while training)
+            image = self._preprocess_tensor(image)
         target = {'boxes': boxes, 'labels': labels, 'image_id': image_id, 'orig_size': orig_size}
         return image, self.rows[i]['label'], target
 

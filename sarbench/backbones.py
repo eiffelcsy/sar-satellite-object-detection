@@ -121,6 +121,10 @@ class DINOv3(nn.Module):
                             if hasattr(layer.mlp, name)]
         return targets
 
+    def unfreeze_patch_embed(self):
+        """Re-enable gradients on the patch embedding (PEFT freezes the whole backbone; this is called after)."""
+        self.dinov3.get_input_embeddings().requires_grad_(True)
+
     def forward(self, x):
         if x.shape[1] != self.in_chans:  # gray -> the pretrained RGB channel count
             x = x.repeat(1, self.in_chans, 1, 1)

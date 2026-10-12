@@ -19,6 +19,8 @@ Schema (only `backbone` and `peft` are required):
     model:
       detail_stem: true            # real stride-4 detail from the pixels, added to the neck's P2
       fusion_layers: [5, 8, 11]    # optional: learnable weighted sum of these ViT blocks before the neck
+      input_adapter: true          # ImageNet norm + learnable 1x1 conv (no-op init) + unfrozen patch embedding
+      wst_stem: true               # wavelet scattering (J=2, L=8 -> 81 ch at stride 4) added to P2
       head: cascade                # standard (default) | deform | cascade RoI head
       head_params: {num_stages: 3} # forwarded to the head (deform: kernel_size/num_convs; cascade: num_stages)
       focal_loss: true             # focal loss for the RPN objectness, RoI classifier and image classifier
@@ -27,14 +29,21 @@ Schema (only `backbone` and `peft` are required):
       giou_weight: 1.0             # extra GIoU term added to the RoI box regression loss (all heads)
       roi_sampling_ratio: 4        # RoIAlign sampling_ratio (applies to every head)
       roi_output_size: 7           # RoIAlign output_size
-    train: {epochs: 48, batch_size: 16, lr: 1.0e-4, backbone_lr: null, weight_decay: 0.05,
-            eval_every: 4, workers: 8, seed: 0}
-    data: {root: null, val_fraction: 0.1, limit: null, mosaic: 0.5, copy_paste: 0.5}
+    train: {epochs: 48, stage_a_epochs: 0, stage_a_lr: 2.0e-4, batch_size: 16, lr: 1.0e-4,
+            backbone_lr: null, weight_decay: 0.05, eval_every: 4, workers: 8, seed: 0}
+            # stage_a_epochs: first N epochs freeze the backbone (incl. DoRA) and train heads only at
+            # stage_a_lr; the remaining `epochs` then run the normal recipe with DoRA switched on.
+    data: {root: null, val_fraction: 0.1, limit: null, mosaic: 0.1, copy_paste: 0.5,
+           scale_jitter: [0.8, 1.25], rotation90: true}
           # mosaic / copy_paste: train-time augmentation probabilities (0 disables each)
+          # scale_jitter / rotation90: train-time object-scale protection (rotation90 = 0/90/180/270)
     preprocess: {enabled: false, pseudo_rgb: false, edge: sobel, despeckle: true, log: true,
-                 clip_percentile: 0.5, cache: null, bm3d_sigma: null, bm3d_profile: np, bm3d_threads: 1}
-                 # pseudo_rgb: DINOv3 input (amplitude + despeckled base + Sobel/high-pass edges) -> 3 channels;
-                 # edge: sobel | highpass. Mutually exclusive with `enabled` (plain SARPreprocess).
+                 clip_percentile: 0.5, cache: null, bm3d_sigma: null, bm3d_profile: np, bm3d_threads: 1,
+                 mode: despeckle}
+                 # pseudo_rgb: DINOv3 input -> 3 channels; mode: despeckle (amp+base+edge),
+                 # amp_log_edge (amp+log-amp+edge) or amplitude (amp repeated); edge: sobel | highpass.
+                 # Mutually exclusive with `enabled` (plain SARPreprocess). Filter channels are computed
+                 # after the geometric augmentations whenever pre-processing and training are both on.
     output: {dir: runs, wandb: false, wandb_project: sar-satellite-object-detection, wandb_run_name: null}
 """
 from pathlib import Path
@@ -50,6 +59,9 @@ DEFAULTS = {
     'loss_weights': {},
     'detail_stem': False,
     'fusion_layers': None,
+    'input_adapter': False,
+    'wst_stem': False,
+    'wst_params': {},
     'head': 'standard',
     'head_params': {},
     'focal_loss': False,
@@ -60,6 +72,8 @@ DEFAULTS = {
     'roi_output_size': 7,
     'name': None,
     'epochs': 24,
+    'stage_a_epochs': 0,
+    'stage_a_lr': 2e-4,
     'batch_size': 16,
     'lr': 1e-4,
     'backbone_lr': None,
@@ -72,9 +86,12 @@ DEFAULTS = {
     'limit': None,
     'mosaic': 0.0,
     'copy_paste': 0.0,
+    'scale_jitter': None,
+    'rotation90': False,
     'out': 'runs',
     'preprocess': False,
     'pseudo_rgb': False,
+    'pseudo_rgb_mode': 'despeckle',
     'edge': 'sobel',
     'no_despeckle': False,
     'no_log_transform': False,
@@ -88,9 +105,11 @@ DEFAULTS = {
     'wandb_run_name': None,
 }
 
-_TRAIN_KEYS = ('epochs', 'batch_size', 'lr', 'backbone_lr', 'weight_decay', 'eval_every', 'workers', 'seed')
+_TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'weight_decay',
+               'eval_every', 'workers', 'seed')
 _DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'limit': 'limit',
-              'mosaic': 'mosaic', 'copy_paste': 'copy_paste'}
+              'mosaic': 'mosaic', 'copy_paste': 'copy_paste',
+              'scale_jitter': 'scale_jitter', 'rotation90': 'rotation90'}
 _OUTPUT_KEYS = {'dir': 'out', 'wandb': 'wandb', 'wandb_project': 'wandb_project', 'wandb_run_name': 'wandb_run_name'}
 
 
@@ -121,6 +140,12 @@ def load_config(path):
         config['detail_stem'] = bool(model['detail_stem'])
     if 'fusion_layers' in model:
         config['fusion_layers'] = list(model['fusion_layers']) or None
+    if 'input_adapter' in model:
+        config['input_adapter'] = bool(model['input_adapter'])
+    if 'wst_stem' in model:
+        config['wst_stem'] = bool(model['wst_stem'])
+    if 'wst_params' in model:
+        config['wst_params'] = dict(model['wst_params'] or {})
     if 'head' in model:
         config['head'] = model['head']
     if 'head_params' in model:
@@ -151,6 +176,8 @@ def load_config(path):
         config['pseudo_rgb'] = bool(preprocess['pseudo_rgb'])
     if 'edge' in preprocess:
         config['edge'] = preprocess['edge']
+    if 'mode' in preprocess:
+        config['pseudo_rgb_mode'] = preprocess['mode']
     if 'despeckle' in preprocess:
         config['no_despeckle'] = not preprocess['despeckle']
     if 'log' in preprocess:
