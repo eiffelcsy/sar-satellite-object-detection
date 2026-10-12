@@ -54,15 +54,15 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 
 # One DINOv3 run is roughly 1.5-2 h; the 12 runs together do not fit one 24 h job, so split them over jobs.
 # Base (control; rerun it so every comparison uses the same code):
-srun --gres=gpu:1 python train.py --config configs/dinov3_dora_giou.yaml --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_giou.yaml --data "$DATA" --wandb
 
 # A: one change each versus the base (a6 = Cascade on the warm-started a4; compare it with a4):
-# srun --gres=gpu:1 python train.py --config configs/ablations/a1_input.yaml             --data "$DATA" --wandb
+srun --gres=gpu:1 python train.py --config configs/ablations/a1_input.yaml             --data "$DATA" --wandb
 # srun --gres=gpu:1 python train.py --config configs/ablations/a2_aug.yaml               --data "$DATA" --wandb
 # srun --gres=gpu:1 python train.py --config configs/ablations/a3_wst.yaml               --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/ablations/a4_warmstart.yaml         --data "$DATA" --wandb
+srun --gres=gpu:1 python train.py --config configs/ablations/a4_warmstart.yaml         --data "$DATA" --wandb
 # srun --gres=gpu:1 python train.py --config configs/ablations/a5_fusion.yaml            --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/ablations/a6_warmstart_cascade.yaml --data "$DATA" --wandb
+srun --gres=gpu:1 python train.py --config configs/ablations/a6_warmstart_cascade.yaml --data "$DATA" --wandb
 
 # B: capacity, each on top of a1 and filling the 40 M trainable budget a different way (compare with a1):
 # srun --gres=gpu:1 python train.py --config configs/ablations/b1_full_blocks.yaml  --data "$DATA" --wandb
