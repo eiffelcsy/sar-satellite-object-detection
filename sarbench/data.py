@@ -60,6 +60,28 @@ def _as_image_tensor(arr):
     return tensor.unsqueeze(0) if tensor.ndim == 2 else tensor
 
 
+def preprocess_image(image, file_name, preprocess, cache_dir=None):
+    """Despeckle/normalise one PIL image, reusing an on-disk cache when `cache_dir` is set.
+
+    The first pass pays for the SAR-BM3D cost, later runs are a fast .npy load. The pre-processing callable
+    may return one channel (H, W) or several (C, H, W), e.g. the DINOv3 pseudo-RGB assembly. Shared by the
+    labelled and the images-only datasets so both build the identical network input.
+    """
+    if cache_dir is not None:
+        path = Path(cache_dir) / f'{Path(file_name).stem}__{preprocess.cache_key()}.npy'
+        if path.exists():
+            return _as_image_tensor(np.load(path))
+    arr = preprocess(np.asarray(image, dtype=np.float32) / 255.0)
+    if cache_dir is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # The temp name must end in .npy: np.save appends .npy to any other suffix, so the replace below
+        # would otherwise look for a file that was never written. The pid keeps concurrent workers apart.
+        tmp = path.with_name(f'{path.stem}.{os.getpid()}.tmp.npy')
+        np.save(tmp, arr)
+        tmp.replace(path)  # atomic: a half-written cache file is never visible to another worker
+    return _as_image_tensor(np.ascontiguousarray(arr))
+
+
 def _max_iou(box, boxes):
     """Largest IoU of one XYXY box against a set of XYXY boxes."""
     if len(boxes) == 0:
@@ -177,22 +199,8 @@ class SARMultiTask(Dataset):
         return self.image_dir / Path(file_name).name  # labels.csv may include the images/ prefix
 
     def _preprocessed(self, image, file_name):
-        """Despeckle/normalise the image, reusing an on-disk cache when `cache_dir` is set
-        (the first pass pays for the SAR-BM3D cost, later epochs are a fast .npy load). The pre-processing
-        callable may return one channel (H, W) or several (C, H, W), e.g. the DINOv3 pseudo-RGB assembly."""
-        if self.cache_dir is not None:
-            path = self.cache_dir / f'{Path(file_name).stem}__{self.preprocess.cache_key()}.npy'
-            if path.exists():
-                return _as_image_tensor(np.load(path))
-        arr = self.preprocess(np.asarray(image, dtype=np.float32) / 255.0)
-        if self.cache_dir is not None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            # The temp name must end in .npy: np.save appends .npy to any other suffix, so the replace below
-            # would otherwise look for a file that was never written. The pid keeps concurrent workers apart.
-            tmp = path.with_name(f'{path.stem}.{os.getpid()}.tmp.npy')
-            np.save(tmp, arr)
-            tmp.replace(path)  # atomic: a half-written cache file is never visible to another worker
-        return _as_image_tensor(np.ascontiguousarray(arr))
+        """Despeckle/normalise the image, reusing an on-disk cache when `cache_dir` is set."""
+        return preprocess_image(image, file_name, self.preprocess, self.cache_dir)
 
     def _load_transformed(self, i):
         """Load image `i`, run the base transform (resize/flips/normalise) and return image, boxes, labels.
@@ -232,6 +240,52 @@ def collate(batch):
     """Stack images and labels; targets stay a list because images have different numbers of boxes."""
     images, labels, targets = zip(*batch)
     return torch.stack(images), torch.tensor(labels), list(targets)
+
+
+class SARImages(Dataset):
+    """An images-only split (COCO `images.json`, no annotations or labels) for submission prediction.
+
+    One item is (image [C, size, size], image_id, orig_size (h, w), file_name). The input pipeline is the same
+    as `SARMultiTask` (resize to `size`, normalise, optional SAR pre-processing/cache); only the boxes and the
+    class label are absent, because the unlabelled val/test splits have none and the submission only needs the
+    model's predictions. `file_name` is the key used to match a prediction to its image.
+    """
+
+    def __init__(self, images_json, image_dir=None, size=512, preprocess=None, cache_dir=None):
+        self.images_json = Path(images_json)
+        self.image_dir = Path(image_dir) if image_dir is not None else self.images_json.parent
+        self.size = size
+        self.preprocess = preprocess
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
+        self.images = json.loads(self.images_json.read_text())['images']
+        steps = [v2.ToImage(), v2.Resize((size, size)), v2.ToDtype(torch.float32, scale=True)]
+        if preprocess is None:  # pre-processing already returns a [0, 1] image, so MEAN/STD do not apply
+            steps.append(v2.Normalize([MEAN], [STD]))
+        self.transform = v2.Compose(steps)
+
+    def __len__(self):
+        return len(self.images)
+
+    def _image_path(self, file_name):
+        """The image on disk: try the stored relative path, its basename, then an images/ subdir."""
+        name = Path(file_name).name
+        candidates = [self.image_dir / file_name, self.image_dir / name, self.image_dir / 'images' / name]
+        return next((c for c in candidates if c.exists()), candidates[0])
+
+    def __getitem__(self, i):
+        info = self.images[i]
+        file_name = info['file_name']
+        image = Image.open(self._image_path(file_name)).convert('L')  # PIL: torchvision.io cannot read .bmp
+        if self.preprocess is not None:
+            image = preprocess_image(image, file_name, self.preprocess, self.cache_dir)
+        image = self.transform(image)
+        return image, info['id'], (info['height'], info['width']), file_name
+
+
+def collate_images(batch):
+    """Stack images; ids, original sizes and file names stay lists (they identify each image)."""
+    images, image_ids, orig_sizes, file_names = zip(*batch)
+    return torch.stack(images), list(image_ids), list(orig_sizes), list(file_names)
 
 
 def to_original_xywh(boxes_xyxy, orig_size, size=512):

@@ -119,6 +119,22 @@ TA Zichen ran this code on fully labelled data in another folder layout. For the
 `make_submission.py` has `write_submission` (the function in the briefing video): maps your boxes back to
 original image pixels, writes `submission.zip` for Codabench.
 
+A run also writes the zips itself: `runs/<name>/submission_val.zip` from training (and `submission_test.zip`
+when a labelled test split exists), plus `submission_val.zip` / `submission_test.zip` from `--load` (below).
+For the unlabelled val/test splits (`val/images.json`, `test/images.json`), which have no labels, predict with
+the trained weights and write the zip directly:
+
+```bash
+python train.py --config configs/dinov3_dora_giou.yaml \
+  --load runs/dinov3_dora_giou/model.pt \
+  --predict /path/to/test/images.json --predict-split test --out runs/predict
+# -> runs/predict/dinov3_dora_giou/submission_test.zip
+```
+
+`--load` alone (without `--predict`) evaluates a saved model on the labelled split and writes its submission
+zips; `--predict` requires `--load` and skips metrics, so it needs no labels.
+
+
 ## 3. Baseline Results (for reference)
 
 Test split, %, mean ± std over 3 seeds. Δm reference: ViT + LoRA, mean of its 3 seeds (93.99 / 25.41), so its Δm

@@ -15,11 +15,14 @@ from sarbench.adapters import add_adapters
 from sarbench.backbones import build_backbone
 from sarbench.channels import PseudoRGB
 from sarbench.config import DEFAULTS, load_config
-from sarbench.data import SARMultiTask, collate, split_available, to_original_xywh
+from sarbench.data import (SARImages, SARMultiTask, collate, collate_images, split_available,
+                           to_original_xywh)
 from sarbench.losses import multiclass_focal_loss
 from sarbench.metrics import classification_metrics, detection_metrics
 from sarbench.model import MultiTaskModel
 from sarbench.preprocess import SARPreprocess
+
+from make_submission import write_submission
 
 
 def parse_args(argv=None):
@@ -63,6 +66,15 @@ def parse_args(argv=None):
                    help='train-time probability of pasting objects from another image (0 disables)')
     p.add_argument('--seed', type=int, default=cfg['seed'])
     p.add_argument('--out', type=Path, default=Path(cfg['out']))
+    p.add_argument('--load', type=Path, default=None,
+                   help='load a saved model.pt state_dict, skip training, and only evaluate + write submission zips')
+    p.add_argument('--predict', type=Path, default=None,
+                   help='images.json of an unlabelled split: with --load, predict and write submission_<split>.zip '
+                        '(no metrics; the images have no labels)')
+    p.add_argument('--predict-image-dir', type=Path, default=None,
+                   help='directory holding the --predict images (default: the images.json directory, then its images/)')
+    p.add_argument('--predict-split', default='val',
+                   help='name for the --predict output zip, submission_<predict-split>.zip')
     p.add_argument('--preprocess', action='store_true', default=cfg['preprocess'],
                    help='SAR-BM3D despeckling + dB log transform + percentile clipping before the network')
     p.add_argument('--pseudo-rgb', action='store_true', default=cfg['pseudo_rgb'],
@@ -99,6 +111,8 @@ def parse_args(argv=None):
     args.loss_weights = dict(cfg['loss_weights'])
     if args.init == 'scratch' and args.adapt != 'full':
         p.error('--init scratch is only valid with --adapt full')
+    if args.predict is not None and args.load is None:
+        p.error('--predict needs --load with the trained weights')
     if args.backbone_lr is None:
         args.backbone_lr = args.lr
     return args
@@ -157,6 +171,14 @@ def make_loader(args, split):
                       persistent_workers=train and args.workers > 0)  # training workers live across epochs
 
 
+def make_prediction_loader(args):
+    """Batches of the unlabelled images.json in --predict, using the same input pipeline as training."""
+    dataset = SARImages(args.predict, args.predict_image_dir, preprocess=build_preprocess(args),
+                        cache_dir=args.preprocess_cache)
+    return DataLoader(dataset, args.batch_size, shuffle=False, num_workers=args.workers,
+                      collate_fn=collate_images)
+
+
 def lr_factor(step, warmup, total):
     """Learning-rate multiplier: linear warmup over `warmup` steps, then cosine decay to 0 at step `total`."""
     if step < warmup:
@@ -204,21 +226,53 @@ def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=Non
 
 @torch.no_grad()
 def evaluate(model, loader, gt_json):
-    """Classification and COCO detection metrics on one split, and the detections in COCO result format."""
+    """Classification and COCO detection metrics on one split, the detections in COCO result format, and the
+    per-image (label, raw input-space boxes, 0-indexed classes, scores) records that `write_submission` needs."""
     model.eval()
     labels, predicted, detections, image_ids = [], [], [], []
+    sub_images, sub_preds = [], {}
     for images, y, targets in loader:
         with torch.autocast('cuda', dtype=torch.bfloat16):
             logits, outputs, _ = model(images.cuda())
+        batch_labels = logits.argmax(dim=1).tolist()
         labels += y.tolist()
-        predicted += logits.argmax(dim=1).tolist()
-        for target, out in zip(targets, outputs):
-            image_ids.append(target['image_id'])
+        predicted += batch_labels
+        for target, out, label in zip(targets, outputs, batch_labels):
+            image_id = target['image_id']
+            height, width = target['orig_size']
+            image_ids.append(image_id)
             boxes = to_original_xywh(out['boxes'], target['orig_size']).tolist()
-            detections += [{'image_id': target['image_id'], 'category_id': c, 'bbox': b, 'score': s}
+            detections += [{'image_id': image_id, 'category_id': c, 'bbox': b, 'score': s}
                            for b, c, s in zip(boxes, out['labels'].tolist(), out['scores'].tolist())]
+            # write_submission wants the raw model-input boxes and 0-indexed classes (it adds 1 itself)
+            key = str(image_id)
+            sub_images.append({'id': image_id, 'file_name': key, 'width': width, 'height': height})
+            sub_preds[key] = (label, out['boxes'].tolist(), (out['labels'] - 1).tolist(),
+                              out['scores'].tolist())
     metrics = {**classification_metrics(labels, predicted), **detection_metrics(gt_json, detections, image_ids)}
-    return metrics, detections
+    return metrics, detections, (sub_images, sub_preds)
+
+
+@torch.no_grad()
+def predict(model, loader):
+    """Run the model over an images-only loader and return the (images, preds) pair for `write_submission`.
+
+    No labels or ground truth are involved: the image id and original size come from images.json, and the
+    predicted class, boxes, classes and scores from the model, so this works on the unlabelled val/test splits.
+    """
+    model.eval()
+    sub_images, sub_preds = [], {}
+    for images, image_ids, orig_sizes, file_names in loader:
+        with torch.autocast('cuda', dtype=torch.bfloat16):
+            logits, outputs, _ = model(images.cuda())
+        batch_labels = logits.argmax(dim=1).tolist()
+        for image_id, orig_size, file_name, out, label in zip(image_ids, orig_sizes, file_names, outputs,
+                                                              batch_labels):
+            height, width = int(orig_size[0]), int(orig_size[1])
+            sub_images.append({'id': image_id, 'file_name': file_name, 'width': width, 'height': height})
+            sub_preds[file_name] = (label, out['boxes'].tolist(), (out['labels'] - 1).tolist(),
+                                    out['scores'].tolist())
+    return sub_images, sub_preds
 
 
 def headline(metrics):
@@ -238,10 +292,13 @@ def main():
     if (args.preprocess or args.pseudo_rgb) and args.preprocess_cache is None:
         log('--preprocess/--pseudo-rgb without --preprocess-cache: SAR-BM3D runs every epoch (slow); '
             'pass --preprocess-cache DIR to compute it once', log_file)
-    train_loader, val_loader = make_loader(args, 'train'), make_loader(args, 'val')
-    test_loader = make_loader(args, 'test') if split_available(args.data, 'test') else None
-    if test_loader is None:
-        log('no labelled test split found; skipping test evaluation', log_file)
+    if args.predict is not None:  # submission-only: no labelled split is needed
+        train_loader = val_loader = test_loader = None
+    else:
+        train_loader, val_loader = make_loader(args, 'train'), make_loader(args, 'val')
+        test_loader = make_loader(args, 'test') if split_available(args.data, 'test') else None
+        if test_loader is None:
+            log('no labelled test split found; skipping test evaluation', log_file)
 
     # Model: adapters are created on the CPU, so they are added before .cuda()
     backbone = build_backbone(args.backbone, pretrained=args.init == 'pretrained', **args.backbone_kwargs)
@@ -260,6 +317,36 @@ def main():
     if run is not None:
         run.summary.update({'parameters': parameters, 'trainable_parameters': trainable})
 
+    # Submission-only: predict on an unlabelled images.json and write the zip (no labels, no metrics)
+    if args.predict is not None:
+        model.load_state_dict(torch.load(args.load, map_location='cuda'))
+        log(f'loading weights from {args.load}; predicting on {args.predict}', log_file)
+        sub_images, sub_preds = predict(model, make_prediction_loader(args))
+        out = run_dir / f'submission_{args.predict_split}.zip'
+        write_submission(sub_images, sub_preds, out=out)
+        log(f'wrote {out} ({len(sub_images)} images)', log_file)
+        if run is not None:
+            run.finish()
+        return
+
+    # Inference-only: load saved weights and write submission zips for val (and test when labelled)
+    if args.load is not None:
+        model.load_state_dict(torch.load(args.load, map_location='cuda'))
+        log(f'loaded weights from {args.load}', log_file)
+        val, val_detections, val_sub = evaluate(model, val_loader, val_loader.dataset.instances_json)
+        log(f'val: {headline(val)}', log_file)
+        (run_dir / 'predictions_val.json').write_text(json.dumps(val_detections))
+        write_submission(*val_sub, out=run_dir / 'submission_val.zip')
+        if test_loader is not None:
+            test, test_detections, test_sub = evaluate(model, test_loader, test_loader.dataset.instances_json)
+            log(f'test: {headline(test)}', log_file)
+            (run_dir / 'predictions_test.json').write_text(json.dumps(test_detections))
+            write_submission(*test_sub, out=run_dir / 'submission_test.zip')
+        log(f'wrote submission zip(s) to {run_dir}', log_file)
+        if run is not None:
+            run.finish()
+        return
+
     # Optimizer and schedule: trainable backbone parameters at --backbone-lr, all new modules at --lr
     backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
     head_params = [p for name, p in model.named_parameters() if not name.startswith('backbone.')]
@@ -274,7 +361,7 @@ def main():
         train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file, run, args.loss_weights,
                         args.focal_loss, args.focal_gamma)
         if epoch % args.eval_every == 0 or epoch == args.epochs:
-            val, val_detections = evaluate(model, val_loader, val_loader.dataset.instances_json)
+            val, val_detections, val_sub = evaluate(model, val_loader, val_loader.dataset.instances_json)
             history.append({'epoch': epoch, **val})
             log(f'epoch {epoch} val: {headline(val)}', log_file)
             if run is not None:
@@ -283,10 +370,10 @@ def main():
 
     # Evaluate on test, once (the course val/test labels are withheld, so test may be absent)
     if test_loader is not None:
-        test, test_detections = evaluate(model, test_loader, test_loader.dataset.instances_json)
+        test, test_detections, test_sub = evaluate(model, test_loader, test_loader.dataset.instances_json)
         log(f'test: {headline(test)}', log_file)
     else:
-        test, test_detections = None, None
+        test, test_detections, test_sub = None, None, None
     peak_gb = torch.cuda.max_memory_allocated() / 2**30
     log(f'training {train_hours:.2f} h, peak GPU memory {peak_gb:.1f} GB', log_file)
     if run is not None:
@@ -302,6 +389,9 @@ def main():
     (run_dir / 'predictions_val.json').write_text(json.dumps(val_detections))
     if test_detections is not None:
         (run_dir / 'predictions_test.json').write_text(json.dumps(test_detections))
+    write_submission(*val_sub, out=run_dir / 'submission_val.zip')
+    if test_sub is not None:
+        write_submission(*test_sub, out=run_dir / 'submission_test.zip')
     torch.save(model.state_dict(), run_dir / 'model.pt')
     if run is not None:
         run.finish()
