@@ -73,9 +73,9 @@ class DetRoIHeads(RoIHeads):
         matched_gt = None
         if self.training:
             proposals, matched_idxs, labels, regression_targets = self.select_training_samples(proposals, targets)
-            if self.giou_weight > 0:
-                matched_gt = [t['boxes'][mi.clamp(min=0)].to(proposals[0].dtype)
-                              for t, mi in zip(targets, matched_idxs)]
+            if self.giou_weight > 0:  # an image may have no boxes left after augmentation: no matched GT then
+                matched_gt = [t['boxes'][mi.clamp(min=0)].to(proposals[0].dtype) if len(t['boxes'])
+                              else proposals[0].new_zeros((0, 4)) for t, mi in zip(targets, matched_idxs)]
         box_features = self.box_head(self.box_roi_pool(features, proposals, image_shapes))
         class_logits, box_regression = self.box_predictor(box_features)
         detections, losses = [], {}
@@ -151,7 +151,7 @@ class CascadeRoIHeads(RoIHeads):
         sampled_labels = [l[i] for l, i in zip(labels, inds)]
         sampled_clamped = [c[i] for c, i in zip(clamped, inds)]
         # BoxCoder.encode takes a list of per-image tensors (negative targets are ignored by fastrcnn_loss).
-        matched_gt = [g[cm] for g, cm in zip(gt_boxes, sampled_clamped)]
+        matched_gt = [g[cm] if len(g) else g.new_zeros((0, 4)) for g, cm in zip(gt_boxes, sampled_clamped)]
         regression_targets = self.box_coder.encode(matched_gt, sampled_boxes)
         return sampled_boxes, sampled_labels, regression_targets, matched_gt
 

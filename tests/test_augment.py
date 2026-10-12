@@ -1,7 +1,15 @@
 """Copy-paste and mosaic augmentation helpers (CPU only)."""
 import torch
 
-from sarbench.data import _max_iou, copy_paste, mosaic_tiles
+from sarbench.data import _max_iou, copy_paste, drop_degenerate_boxes, mosaic_tiles
+
+
+def test_drop_degenerate_boxes_removes_zero_area():
+    boxes = torch.tensor([[0., 0., 10., 10.], [5., 5., 5., 20.], [1., 2., 9., 2.], [3., 3., 4., 4.]])
+    labels = torch.tensor([1, 2, 3, 4])
+    kept_boxes, kept_labels = drop_degenerate_boxes(boxes, labels)
+    assert kept_labels.tolist() == [1, 4]  # the line (zero width) and zero height boxes are gone
+    assert (kept_boxes[:, 2] - kept_boxes[:, 0] > 0).all() and (kept_boxes[:, 3] - kept_boxes[:, 1] > 0).all()
 
 
 def test_mosaic_tiles_shape_boxes_and_labels():

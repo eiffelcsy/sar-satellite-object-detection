@@ -118,6 +118,18 @@ def mosaic_tiles(tiles, size):
     return canvas, boxes, labels
 
 
+def drop_degenerate_boxes(boxes, labels):
+    """Drop zero-area boxes: `box_iou`/`generalized_box_iou` return NaN for them, which poisons the training loss.
+
+    Geometric augmentation (a center crop after scale jitter) can clip a box down to a line; such boxes carry no
+    information and must not reach the matcher or the GIoU term.
+    """
+    if len(boxes) == 0:
+        return boxes, labels
+    keep = (boxes[:, 2] - boxes[:, 0] > 0) & (boxes[:, 3] - boxes[:, 1] > 0)
+    return boxes[keep], labels[keep]
+
+
 def copy_paste(image, boxes, labels, donor_image, donor_boxes, donor_labels, max_iou=0.3, max_objects=3):
     """Paste up to `max_objects` objects cropped from a donor image, avoiding overlaps with existing boxes."""
     _, height, width = image.shape
@@ -247,6 +259,8 @@ class SARMultiTask(Dataset):
             donor = self._load_transformed(random.randrange(len(self)))
             image, boxes, labels = copy_paste(image, boxes, labels, donor[0], donor[1], donor[2],
                                               self.copy_paste_max_iou)
+        if self.train:  # zero-area boxes (from the crop) make GIoU/box_iou NaN, so drop them before the model
+            boxes, labels = drop_degenerate_boxes(boxes, labels)
         if self.train and self.preprocess is not None:  # filter channels after geometry (no cache while training)
             image = self._preprocess_tensor(image)
         target = {'boxes': boxes, 'labels': labels, 'image_id': image_id, 'orig_size': orig_size}

@@ -10,5 +10,5 @@ pycocotools==2.0.11
 kymatio>=0.3.0  # wavelet scattering stem (sarbench/model.py WSTStem); import the 2D frontend directly on scipy >= 1.15
 pyyaml>=6.0  # run configs in configs/ (train.py --config)
 transformers>=4.56.0  # DINOv3 ViT backbone (weights are gated on Hugging Face)
-wandb==0.21.3  # optional experiment tracking, enabled with train.py --wandb
+wandb==0.30.0  # optional experiment tracking, enabled with train.py --wandb
 pytest==9.1.1
