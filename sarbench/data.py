@@ -9,6 +9,7 @@ Two folder layouts are supported:
   with image paths relative to root.
 """
 import csv
+import hashlib
 import json
 import os
 import random
@@ -60,7 +61,17 @@ def _as_image_tensor(arr):
     return tensor.unsqueeze(0) if tensor.ndim == 2 else tensor
 
 
-def preprocess_image(image, file_name, preprocess, cache_dir=None):
+def _cache_name(image_path):
+    """A cache-file id unique per image: the stem plus a hash of the resolved path.
+
+    The path hash keeps images with the same stem in different splits (e.g. train/00001 and val/00001)
+    from colliding in one cache directory.
+    """
+    digest = hashlib.md5(str(Path(image_path).resolve()).encode()).hexdigest()[:10]
+    return f'{Path(image_path).stem}_{digest}'
+
+
+def preprocess_image(image, image_path, preprocess, cache_dir=None):
     """Despeckle/normalise one PIL image, reusing an on-disk cache when `cache_dir` is set.
 
     The first pass pays for the SAR-BM3D cost, later runs are a fast .npy load. The pre-processing callable
@@ -68,7 +79,7 @@ def preprocess_image(image, file_name, preprocess, cache_dir=None):
     labelled and the images-only datasets so both build the identical network input.
     """
     if cache_dir is not None:
-        path = Path(cache_dir) / f'{Path(file_name).stem}__{preprocess.cache_key()}.npy'
+        path = Path(cache_dir) / f'{_cache_name(image_path)}__{preprocess.cache_key()}.npy'
         if path.exists():
             return _as_image_tensor(np.load(path))
     arr = preprocess(np.asarray(image, dtype=np.float32) / 255.0)
@@ -223,7 +234,7 @@ class SARMultiTask(Dataset):
 
     def _preprocessed(self, image, file_name):
         """Despeckle/normalise the image, reusing an on-disk cache when `cache_dir` is set."""
-        return preprocess_image(image, file_name, self.preprocess, self.cache_dir)
+        return preprocess_image(image, self._image_path(file_name), self.preprocess, self.cache_dir)
 
     def _preprocess_tensor(self, image):
         """Run the filter pre-processing on an already-augmented [1, H, W] tensor in [0, 1]."""
@@ -310,7 +321,7 @@ class SARImages(Dataset):
         file_name = info['file_name']
         image = Image.open(self._image_path(file_name)).convert('L')  # PIL: torchvision.io cannot read .bmp
         if self.preprocess is not None:
-            image = preprocess_image(image, file_name, self.preprocess, self.cache_dir)
+            image = preprocess_image(image, self._image_path(file_name), self.preprocess, self.cache_dir)
         image = self.transform(image)
         return image, info['id'], (info['height'], info['width']), file_name
 
