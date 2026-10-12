@@ -57,12 +57,12 @@ MODEL=runs/dinov3_dora_giou/model.pt
 
 # Evaluation / submission (no training; reuses the trained checkpoint):
 # 1) Held-out train split (labelled): val metrics + submission_val.zip
-srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
-  --data "$DATA" --out runs/eval_heldout
+# srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
+#   --data "$DATA" --out runs/eval_heldout
 
 # 2) Official val split (unlabelled val/images.json): predictions only -> submission_val.zip
-# srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
-#   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val
+srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
+  --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val
 
 # 3) Official test split (unlabelled test/images.json): predictions only -> submission_test.zip
 # srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \

@@ -75,6 +75,9 @@ def parse_args(argv=None):
                    help='train-time scale jitter range, e.g. --scale-jitter 0.8 1.25 (omit to disable)')
     p.add_argument('--rotation90', action='store_true', default=cfg['rotation90'],
                    help='train-time random 0/90/180/270-degree rotations')
+    p.add_argument('--preprocess-after-aug', dest='preprocess_after_aug', action='store_true',
+                   default=cfg['preprocess_after_aug'],
+                   help='compute filter channels on the augmented pixels (geometrically exact, but not cacheable)')
     p.add_argument('--seed', type=int, default=cfg['seed'])
     p.add_argument('--out', type=Path, default=Path(cfg['out']))
     p.add_argument('--load', type=Path, default=None,
@@ -182,7 +185,8 @@ def make_loader(args, split):
                            val_fraction=args.val_fraction, seed=args.seed,
                            preprocess=build_preprocess(args), cache_dir=args.preprocess_cache,
                            mosaic=args.mosaic, copy_paste=args.copy_paste,
-                           scale_jitter=args.scale_jitter, rotation90=args.rotation90)
+                           scale_jitter=args.scale_jitter, rotation90=args.rotation90,
+                           preprocess_after_aug=args.preprocess_after_aug)
     return DataLoader(dataset, args.batch_size, shuffle=train, num_workers=args.workers, collate_fn=collate,
                       persistent_workers=train and args.workers > 0)  # training workers live across epochs
 

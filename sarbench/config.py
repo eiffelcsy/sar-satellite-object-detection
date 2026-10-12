@@ -34,9 +34,11 @@ Schema (only `backbone` and `peft` are required):
             # stage_a_epochs: first N epochs freeze the backbone (incl. DoRA) and train heads only at
             # stage_a_lr; the remaining `epochs` then run the normal recipe with DoRA switched on.
     data: {root: null, val_fraction: 0.1, limit: null, mosaic: 0.1, copy_paste: 0.5,
-           scale_jitter: [0.8, 1.25], rotation90: true}
+           scale_jitter: [0.8, 1.25], rotation90: true, preprocess_after_aug: false}
           # mosaic / copy_paste: train-time augmentation probabilities (0 disables each)
           # scale_jitter / rotation90: train-time object-scale protection (rotation90 = 0/90/180/270)
+          # preprocess_after_aug: false (default) filters before augmentation and caches; true filters the
+          # augmented pixels (geometrically exact, but BM3D reruns every sample and cannot be cached)
     preprocess: {enabled: false, pseudo_rgb: false, edge: sobel, despeckle: true, log: true,
                  clip_percentile: 0.5, cache: null, bm3d_sigma: null, bm3d_profile: np, bm3d_threads: 1,
                  mode: despeckle}
@@ -88,6 +90,7 @@ DEFAULTS = {
     'copy_paste': 0.0,
     'scale_jitter': None,
     'rotation90': False,
+    'preprocess_after_aug': False,
     'out': 'runs',
     'preprocess': False,
     'pseudo_rgb': False,
@@ -109,7 +112,8 @@ _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'ba
                'eval_every', 'workers', 'seed')
 _DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'limit': 'limit',
               'mosaic': 'mosaic', 'copy_paste': 'copy_paste',
-              'scale_jitter': 'scale_jitter', 'rotation90': 'rotation90'}
+              'scale_jitter': 'scale_jitter', 'rotation90': 'rotation90',
+              'preprocess_after_aug': 'preprocess_after_aug'}
 _OUTPUT_KEYS = {'dir': 'out', 'wandb': 'wandb', 'wandb_project': 'wandb_project', 'wandb_run_name': 'wandb_run_name'}
 
 

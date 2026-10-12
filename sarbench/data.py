@@ -158,10 +158,11 @@ class SARMultiTask(Dataset):
 
     def __init__(self, root, split, train=False, size=512, limit=None, val_fraction=0.1, seed=0,
                  preprocess=None, cache_dir=None, mosaic=0.0, copy_paste=0.0, copy_paste_max_iou=0.3,
-                 scale_jitter=None, rotation90=False):
+                 scale_jitter=None, rotation90=False, preprocess_after_aug=False):
         self.root = Path(root)
         self.train = train
         self.size = size
+        self.preprocess_after_aug = preprocess_after_aug  # False (default): filter before augmentation and cache
         self.mosaic = mosaic  # probability of building a 2x2 mosaic from four images (train only)
         self.copy_paste = copy_paste  # probability of pasting objects from another image (train only)
         self.copy_paste_max_iou = copy_paste_max_iou
@@ -242,7 +243,8 @@ class SARMultiTask(Dataset):
         boxes = tv_tensors.BoundingBoxes([a['bbox'] for a in anns], format='XYWH', canvas_size=orig_size,
                                          dtype=torch.float32)  # integer boxes would be truncated by Resize
         image = Image.open(self._image_path(row['file_name'])).convert('L')  # PIL: torchvision.io cannot read .bmp
-        if self.preprocess is not None and not self.train:  # eval: cached; train computes filters after geometry
+        # Eval always caches; training caches too unless filters are computed after the geometry.
+        if self.preprocess is not None and (not self.train or not self.preprocess_after_aug):
             image = self._preprocessed(image, row['file_name'])
         image, boxes = self.transform(image, boxes)
         boxes = boxes.as_subclass(torch.Tensor).float()
@@ -261,8 +263,8 @@ class SARMultiTask(Dataset):
                                               self.copy_paste_max_iou)
         if self.train:  # zero-area boxes (from the crop) make GIoU/box_iou NaN, so drop them before the model
             boxes, labels = drop_degenerate_boxes(boxes, labels)
-        if self.train and self.preprocess is not None:  # filter channels after geometry (no cache while training)
-            image = self._preprocess_tensor(image)
+        if self.train and self.preprocess is not None and self.preprocess_after_aug:
+            image = self._preprocess_tensor(image)  # filter channels after geometry (no cache while training)
         target = {'boxes': boxes, 'labels': labels, 'image_id': image_id, 'orig_size': orig_size}
         return image, self.rows[i]['label'], target
 
