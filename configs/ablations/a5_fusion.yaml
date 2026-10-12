@@ -1,0 +1,5 @@
+# A5: dinov3_dora_giou + learnable fusion of ViT blocks 5, 8 and 11 before the neck (3 parameters).
+base: ../dinov3_dora_giou.yaml
+name: giou_a5_fusion
+model:
+  fusion_layers: [5, 8, 11]

@@ -1,6 +1,6 @@
 """Train one model jointly for classification and detection, then score it on val and test.
-Examples: python train.py --config configs/vit_lora.yaml
-          python train.py --config configs/dinov3_lora.yaml"""
+Examples: python train.py --config configs/dinov3_dora_giou.yaml
+          python train.py --config configs/ablations/b1_full_blocks.yaml"""
 import argparse
 import json
 import math
@@ -11,16 +11,12 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from sarbench.adapters import add_adapters
-from sarbench.backbones import build_backbone
 from sarbench.channels import PseudoRGB
 from sarbench.config import DEFAULTS, load_config
 from sarbench.data import (SARImages, SARMultiTask, collate, collate_images, split_available,
                            to_original_xywh)
-from sarbench.losses import multiclass_focal_loss
 from sarbench.metrics import classification_metrics, detection_metrics
-from sarbench.model import MultiTaskModel
-from sarbench.preprocess import SARPreprocess
+from sarbench.model import MAX_TOTAL_PARAMETERS, MAX_TRAINABLE_PARAMETERS, build_model, parameter_counts
 
 from make_submission import write_submission
 
@@ -35,12 +31,9 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config', type=Path, default=known.config,
                    help='YAML run config (see configs/); explicit CLI flags override its values')
-    p.add_argument('--name', default=cfg['name'], help='run name (default: <backbone>_<init>_<adapt>)')
+    p.add_argument('--name', default=cfg['name'], help='run name (default: dinov3_dora)')
     p.add_argument('--data', type=Path, default=Path(cfg['data']) if cfg['data']
                    else Path(__file__).resolve().parents[1] / 'dataset' / 'SARFact-Course-20K')
-    p.add_argument('--backbone', default=cfg['backbone'], help='backbone name from the registry (e.g. vit, terramind, dinov3)')
-    p.add_argument('--init', choices=['pretrained', 'scratch'], default=cfg['init'])
-    p.add_argument('--adapt', choices=['full', 'lora', 'dora', 'moelora'], default=cfg['adapt'])
     p.add_argument('--detail-stem', action='store_true', default=cfg['detail_stem'],
                    help='add a conv stem on the input to give the P2 level real stride-4 detail')
     p.add_argument('--fusion-layers', nargs='+', type=int, default=cfg['fusion_layers'],
@@ -49,8 +42,6 @@ def parse_args(argv=None):
                    help='ImageNet norm + learnable 1x1 conv (no-op init) + unfrozen DINOv3 patch embedding')
     p.add_argument('--wst-stem', action='store_true', default=cfg['wst_stem'],
                    help='add wavelet scattering (J=2, L=8 -> 81 ch at stride 4) detail to the neck P2 level')
-    p.add_argument('--head', choices=['standard', 'deform', 'cascade'], default=cfg['head'],
-                   help='RoI detection head: torchvision (standard), Deformable-Conv, or Cascade R-CNN')
     p.add_argument('--epochs', type=int, default=cfg['epochs'])
     p.add_argument('--stage-a-epochs', type=int, default=cfg['stage_a_epochs'],
                    help='freeze the backbone (incl. DoRA) for the first N epochs and train the heads only')
@@ -58,7 +49,9 @@ def parse_args(argv=None):
     p.add_argument('--batch-size', type=int, default=cfg['batch_size'])
     p.add_argument('--lr', type=float, default=cfg['lr'])
     p.add_argument('--backbone-lr', type=float, default=cfg['backbone_lr'],
-                   help='for the trainable backbone parameters (default: --lr)')
+                   help='for the new backbone parameters: DoRA and Convpass adapters (default: --lr)')
+    p.add_argument('--unfrozen-lr', type=float, default=cfg['unfrozen_lr'],
+                   help='for pretrained backbone weights made trainable (patch embedding, peft.full_blocks)')
     p.add_argument('--weight-decay', type=float, default=cfg['weight_decay'])
     p.add_argument('--eval-every', type=int, default=cfg['eval_every'],
                    help='validate every N epochs, and after the last one')
@@ -71,13 +64,12 @@ def parse_args(argv=None):
                    help='train-time probability of combining 4 images into a 2x2 mosaic (0 disables)')
     p.add_argument('--copy-paste', dest='copy_paste', type=float, default=cfg['copy_paste'],
                    help='train-time probability of pasting objects from another image (0 disables)')
+    p.add_argument('--copy-paste-margin', type=int, default=cfg['copy_paste_margin'],
+                   help='pixels of context pasted around each copy-pasted object (shadow, smearing, wakes)')
     p.add_argument('--scale-jitter', nargs=2, type=float, default=cfg['scale_jitter'],
-                   help='train-time scale jitter range, e.g. --scale-jitter 0.8 1.25 (omit to disable)')
+                   help='train-time scale jitter range, e.g. --scale-jitter 0.9 1.1 (omit to disable)')
     p.add_argument('--rotation90', action='store_true', default=cfg['rotation90'],
                    help='train-time random 0/90/180/270-degree rotations')
-    p.add_argument('--preprocess-after-aug', dest='preprocess_after_aug', action='store_true',
-                   default=cfg['preprocess_after_aug'],
-                   help='compute filter channels on the augmented pixels (geometrically exact, but not cacheable)')
     p.add_argument('--seed', type=int, default=cfg['seed'])
     p.add_argument('--out', type=Path, default=Path(cfg['out']))
     p.add_argument('--load', type=Path, default=None,
@@ -89,8 +81,6 @@ def parse_args(argv=None):
                    help='directory holding the --predict images (default: the images.json directory, then its images/)')
     p.add_argument('--predict-split', default='val',
                    help='name for the --predict output zip, submission_<predict-split>.zip')
-    p.add_argument('--preprocess', action='store_true', default=cfg['preprocess'],
-                   help='SAR-BM3D despeckling + dB log transform + percentile clipping before the network')
     p.add_argument('--pseudo-rgb', action='store_true', default=cfg['pseudo_rgb'],
                    help='DINOv3 input: 1-channel SAR -> 3 channels (amplitude, despeckled base, edge map)')
     p.add_argument('--pseudo-rgb-mode', choices=['despeckle', 'amp_log_edge', 'amplitude'],
@@ -99,14 +89,12 @@ def parse_args(argv=None):
     p.add_argument('--edge', choices=['sobel', 'highpass'], default=cfg['edge'],
                    help='with --pseudo-rgb: the channel-3 high-frequency map (default: sobel)')
     p.add_argument('--no-despeckle', action='store_true', default=cfg['no_despeckle'],
-                   help='with --preprocess/--pseudo-rgb: skip SAR-BM3D despeckling')
-    p.add_argument('--no-log-transform', action='store_true', default=cfg['no_log_transform'],
-                   help='with --preprocess: skip the dB transform')
+                   help='with --pseudo-rgb: skip SAR-BM3D despeckling')
     p.add_argument('--clip-percentile', type=float, default=cfg['clip_percentile'],
-                   help='with --preprocess: %% of brightest pixels clipped before scaling to [0, 1]')
+                   help='with --pseudo-rgb: %% of brightest pixels clipped before scaling to [0, 1]')
     p.add_argument('--preprocess-cache', type=Path,
                    default=Path(cfg['preprocess_cache']) if cfg['preprocess_cache'] else None,
-                   help='with --preprocess: cache pre-processed images here (first pass fills it)')
+                   help='with --pseudo-rgb: cache pre-processed images here (first pass fills it)')
     p.add_argument('--bm3d-sigma', type=float, default=cfg['bm3d_sigma'],
                    help='log-speckle std for SAR-BM3D (default: estimated per image)')
     p.add_argument('--bm3d-profile', default=cfg['bm3d_profile'],
@@ -116,19 +104,13 @@ def parse_args(argv=None):
                    help='log loss/metric curves to Weights & Biases')
     p.add_argument('--wandb-project', default=cfg['wandb_project'])
     p.add_argument('--wandb-run-name', default=cfg['wandb_run_name'],
-                   help='defaults to <backbone>_<init>_<adapt>')
+                   help='defaults to the run name')
     args = p.parse_args(argv)
-    # Backbone/PEFT parameters come from the config; drop them if the CLI swapped in another backbone/method.
-    args.backbone_kwargs = dict(cfg['backbone_kwargs']) if args.backbone == cfg['backbone'] else {}
-    args.peft_kwargs = dict(cfg['peft_kwargs']) if args.adapt == cfg['adapt'] else {}
-    args.peft_targets = list(cfg['peft_targets']) if (args.adapt == cfg['adapt'] and cfg['peft_targets']) else None
-    for key in ('focal_loss', 'focal_gamma', 'focal_alpha', 'giou_weight', 'roi_sampling_ratio', 'roi_output_size'):
+    # Backbone, adapter and loss options come from the config only.
+    for key in ('pretrained', 'backbone_kwargs', 'peft_kwargs', 'peft_targets', 'rank_overrides', 'full_blocks',
+                'conv_adapters', 'giou_weight', 'roi_sampling_ratio', 'roi_output_size', 'wst_params',
+                'loss_weights', 'head', 'head_params'):
         setattr(args, key, cfg[key])
-    args.head_params = dict(cfg['head_params'])
-    args.wst_params = dict(cfg['wst_params'])
-    args.loss_weights = dict(cfg['loss_weights'])
-    if args.init == 'scratch' and args.adapt != 'full':
-        p.error('--init scratch is only valid with --adapt full')
     if args.predict is not None and args.load is None:
         p.error('--predict needs --load with the trained weights')
     if args.backbone_lr is None:
@@ -143,8 +125,8 @@ def log(message, file):
 
 
 def run_name(args):
-    """The config's run name, or <backbone>_<init>_<adapt> when it is absent."""
-    return args.name or f'{args.backbone}_{args.init}_{args.adapt}'
+    """The config's run name, or dinov3_dora when it is absent."""
+    return args.name or 'dinov3_dora'
 
 
 def start_wandb(args, run_dir):
@@ -163,19 +145,12 @@ def start_wandb(args, run_dir):
 
 
 def build_preprocess(args):
-    """The image pre-processing, or None when both --preprocess and --pseudo-rgb are off.
-
-    `--pseudo-rgb` builds the three DINOv3 channels; `--preprocess` is the SAR-BM3D + dB pipeline.
-    """
-    if args.pseudo_rgb:
-        return PseudoRGB(despeckle=not args.no_despeckle, edge=args.edge, mode=args.pseudo_rgb_mode,
-                         clip_percentile=args.clip_percentile, sigma=args.bm3d_sigma,
-                         profile=args.bm3d_profile, threads=args.bm3d_threads)
-    if not args.preprocess:
+    """The pseudo-RGB channel assembly, or None (the gray image is repeated to RGB) when --pseudo-rgb is off."""
+    if not args.pseudo_rgb:
         return None
-    return SARPreprocess(despeckle=not args.no_despeckle, log=not args.no_log_transform,
-                         clip_percentile=args.clip_percentile, sigma=args.bm3d_sigma,
-                         profile=args.bm3d_profile, threads=args.bm3d_threads)
+    return PseudoRGB(despeckle=not args.no_despeckle, edge=args.edge, mode=args.pseudo_rgb_mode,
+                     clip_percentile=args.clip_percentile, sigma=args.bm3d_sigma,
+                     profile=args.bm3d_profile, threads=args.bm3d_threads)
 
 
 def make_loader(args, split):
@@ -185,8 +160,8 @@ def make_loader(args, split):
                            val_fraction=args.val_fraction, seed=args.seed,
                            preprocess=build_preprocess(args), cache_dir=args.preprocess_cache,
                            mosaic=args.mosaic, copy_paste=args.copy_paste,
-                           scale_jitter=args.scale_jitter, rotation90=args.rotation90,
-                           preprocess_after_aug=args.preprocess_after_aug)
+                           copy_paste_margin=args.copy_paste_margin,
+                           scale_jitter=args.scale_jitter, rotation90=args.rotation90)
     return DataLoader(dataset, args.batch_size, shuffle=train, num_workers=args.workers, collate_fn=collate,
                       persistent_workers=train and args.workers > 0)  # training workers live across epochs
 
@@ -212,8 +187,7 @@ def weighted_total(losses, loss_weights):
     return sum(weights.get(name, 1.0) * value for name, value in losses.items())
 
 
-def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=None, loss_weights=None,
-                    focal_loss=False, focal_gamma=2.0):
+def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=None, loss_weights=None):
     """One pass over the training set; the loss is classification plus the detector losses, weighted per term."""
     model.train()
     start, seen = time.time(), 0
@@ -221,11 +195,7 @@ def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=Non
         targets = [{'boxes': t['boxes'].cuda(), 'labels': t['labels'].cuda()} for t in targets]
         with torch.autocast('cuda', dtype=torch.bfloat16):  # bf16 has fp32's range: no loss scaling needed
             logits, _, det_losses = model(images.cuda(), targets)
-            if focal_loss:  # focal-weighted cross-entropy on the image classifier
-                classification = multiclass_focal_loss(logits, labels.cuda(), gamma=focal_gamma)
-            else:
-                classification = F.cross_entropy(logits, labels.cuda())
-            losses = {'classification': classification, **det_losses}
+            losses = {'classification': F.cross_entropy(logits, labels.cuda()), **det_losses}
         loss = weighted_total(losses, loss_weights)
         optimizer.zero_grad()
         loss.backward()
@@ -245,17 +215,22 @@ def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=Non
 
 
 def fit(model, train_loader, val_loader, epochs, optimizer, schedule, args, log_file, run, history, start_epoch=1):
-    """Train `epochs` epochs, validating every --eval-every and after the last one; appends to `history`."""
+    """Train `epochs` epochs, validating every --eval-every and after the last one; appends to `history`.
+
+    Returns the last validation's (detections, submission records), which the caller saves.
+    """
+    val_detections = val_sub = None
     for offset in range(epochs):
         epoch = start_epoch + offset
-        train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file, run, args.loss_weights,
-                        args.focal_loss, args.focal_gamma)
+        train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file, run, args.loss_weights)
         if epoch % args.eval_every == 0 or offset == epochs - 1:
             val, val_detections, val_sub = evaluate(model, val_loader, val_loader.dataset.instances_json)
             history.append({'epoch': epoch, **val})
             log(f'epoch {epoch} val: {headline(val)}', log_file)
             if run is not None:
-                run.log({f'val/{k}': v for k, v in val.items()}, step=epoch * len(train_loader))
+                run.log({f'val/{k}': v for k, v in val.items() if not isinstance(v, (dict, list))},
+                        step=epoch * len(train_loader))
+    return val_detections, val_sub
 
 
 @torch.no_grad()
@@ -310,12 +285,17 @@ def predict(model, loader):
 
 
 def headline(metrics):
-    return ' '.join(f'{k} {metrics[k]:.4f}' for k in ('accuracy', 'macro_f1', 'balanced_accuracy', 'mAP', 'AP50'))
+    return ' '.join(f'{k} {metrics[k]:.4f}' for k in ('accuracy', 'macro_f1', 'balanced_accuracy', 'mAP', 'AP50',
+                                                      'AP75', 'AP_small', 'AP_medium', 'AP_large'))
 
 
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
+    # TF32 for fp32 matmuls/convs (the RPN and RoI heads): importing terratorch used to switch this on implicitly,
+    # so it is kept explicitly to leave speed and numerics unchanged.
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     run_dir = args.out / run_name(args)
     run_dir.mkdir(parents=True, exist_ok=True)
     log_file = open(run_dir / 'log.txt', 'w')
@@ -323,8 +303,8 @@ def main():
     run = start_wandb(args, run_dir)
 
     # Data
-    if (args.preprocess or args.pseudo_rgb) and args.preprocess_cache is None:
-        log('--preprocess/--pseudo-rgb without --preprocess-cache: SAR-BM3D runs every epoch (slow); '
+    if args.pseudo_rgb and args.preprocess_cache is None:
+        log('--pseudo-rgb without --preprocess-cache: SAR-BM3D runs every epoch (slow); '
             'pass --preprocess-cache DIR to compute it once', log_file)
     if args.predict is not None:  # submission-only: no labelled split is needed
         train_loader = val_loader = test_loader = None
@@ -335,20 +315,15 @@ def main():
             log('no labelled test split found; skipping test evaluation', log_file)
 
     # Model: adapters are created on the CPU, so they are added before .cuda()
-    backbone = build_backbone(args.backbone, pretrained=args.init == 'pretrained', **args.backbone_kwargs)
-    if args.pseudo_rgb and backbone.in_chans != 3:
-        raise SystemExit(f'--pseudo-rgb builds 3 channels but backbone {args.backbone!r} expects '
-                         f'{backbone.in_chans}; use a 3-channel backbone (e.g. dinov3).')
-    add_adapters(backbone, args.adapt, targets=args.peft_targets, **args.peft_kwargs)  # 'full' is a no-op
-    model = MultiTaskModel(backbone, task_routing=args.adapt == 'moelora', detail_stem=args.detail_stem,
-                           fusion_layers=args.fusion_layers, head=args.head, head_params=args.head_params,
-                           focal_loss=args.focal_loss, focal_gamma=args.focal_gamma, focal_alpha=args.focal_alpha,
-                           giou_weight=args.giou_weight, roi_sampling_ratio=args.roi_sampling_ratio,
-                           roi_output_size=args.roi_output_size, input_adapter=args.input_adapter,
-                           wst_stem=args.wst_stem, wst_params=args.wst_params).cuda()
-    parameters = sum(p.numel() for p in model.parameters())
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    log(f'parameters: {parameters:,} total, {trainable:,} trainable', log_file)
+    model, pretrained_ids = build_model(args)
+    counts = parameter_counts(model, pretrained_ids)
+    parameters, trainable = counts['total'], counts['trainable']
+    log(f'parameters: {parameters:,} total, {trainable:,} trainable (heads {counts["heads"]:,}, new backbone '
+        f'{counts["backbone_new"]:,}, unfrozen pretrained {counts["backbone_unfrozen"]:,})', log_file)
+    if parameters > MAX_TOTAL_PARAMETERS or trainable > MAX_TRAINABLE_PARAMETERS:
+        raise SystemExit(f'over the parameter budget: {parameters:,} total (max {MAX_TOTAL_PARAMETERS:,}), '
+                         f'{trainable:,} trainable (max {MAX_TRAINABLE_PARAMETERS:,})')
+    model = model.cuda()
     if run is not None:
         run.summary.update({'parameters': parameters, 'trainable_parameters': trainable})
 
@@ -382,9 +357,15 @@ def main():
             run.finish()
         return
 
-    # Stage A: freeze the backbone (including DoRA) and train only the neck, RPN, RoI and class heads.
+    # Three parameter groups: new backbone parameters (DoRA, Convpass) at --backbone-lr, pretrained weights made
+    # trainable (patch embedding, full_blocks) gently at --unfrozen-lr, and every new module outside the backbone
+    # (neck, RPN, RoI head, classifier, stems, input adapter) at --lr.
     backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
+    new_backbone = [p for p in backbone_params if id(p) not in pretrained_ids]
+    unfrozen = [p for p in backbone_params if id(p) in pretrained_ids]
     head_params = [p for name, p in model.named_parameters() if not name.startswith('backbone.')]
+
+    # Stage A: freeze the backbone (including DoRA) and train only the neck, RPN, RoI and class heads.
     history, start = [], time.time()
     if args.stage_a_epochs:
         log(f'stage A: {args.stage_a_epochs} epochs, backbone frozen, lr {args.stage_a_lr}', log_file)
@@ -394,17 +375,18 @@ def main():
         schedule_a = torch.optim.lr_scheduler.LambdaLR(
             optimizer_a, lambda step: lr_factor(step, len(train_loader), args.stage_a_epochs * len(train_loader)))
         fit(model, train_loader, val_loader, args.stage_a_epochs, optimizer_a, schedule_a, args, log_file, run,
-            history)
+            history)  # stage A's validations go into the history; the final ones come from stage B
         for p in backbone_params:  # switch DoRA/backbone back on for stage B
             p.requires_grad_(True)
 
     # Stage B (and the only stage when stage_a_epochs is 0): trainable backbone at --backbone-lr, heads at --lr.
-    optimizer = torch.optim.AdamW([{'params': backbone_params, 'lr': args.backbone_lr}, {'params': head_params}],
-                                  lr=args.lr, weight_decay=args.weight_decay)
+    groups = [{'params': new_backbone, 'lr': args.backbone_lr}, {'params': unfrozen, 'lr': args.unfrozen_lr},
+              {'params': head_params}]  # the heads stay last: train_one_epoch logs param_groups[-1]'s lr
+    optimizer = torch.optim.AdamW([g for g in groups if g['params']], lr=args.lr, weight_decay=args.weight_decay)
     warmup, total = len(train_loader), args.epochs * len(train_loader)  # one epoch of warmup
     schedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: lr_factor(step, warmup, total))
-    fit(model, train_loader, val_loader, args.epochs, optimizer, schedule, args, log_file, run, history,
-        start_epoch=args.stage_a_epochs + 1)
+    val_detections, val_sub = fit(model, train_loader, val_loader, args.epochs, optimizer, schedule, args,
+                                  log_file, run, history, start_epoch=args.stage_a_epochs + 1)
     train_hours = (time.time() - start) / 3600
 
     # Evaluate on test, once (the course val/test labels are withheld, so test may be absent)
@@ -417,11 +399,12 @@ def main():
     log(f'training {train_hours:.2f} h, peak GPU memory {peak_gb:.1f} GB', log_file)
     if run is not None:
         if test is not None:
-            run.log({f'test/{k}': v for k, v in test.items()})
+            run.log({f'test/{k}': v for k, v in test.items() if not isinstance(v, (dict, list))})
         run.summary.update({'train_hours': train_hours, 'peak_gpu_memory_gb': peak_gb})
 
     # Save
     summary = {'args': vars(args), 'parameters': parameters, 'trainable_parameters': trainable,
+               'parameter_breakdown': counts,
                'train_hours': train_hours, 'peak_gpu_memory_gb': peak_gb,
                'val_history': history, 'val': history[-1], 'test': test}
     (run_dir / 'metrics.json').write_text(json.dumps(summary, indent=2, default=str))

@@ -52,32 +52,21 @@ source .venv/bin/activate
 # Submit your job to the cluster.
 DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 
-# Reference / baseline runs (uncomment the ones you want; one DINOv3 run is roughly 1.5-2 h):
-# srun --gres=gpu:1 python train.py --config configs/vit_moelora.yaml --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_moelora.yaml --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora.yaml --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_splus_dora.yaml --data "$DATA" --wandb
+# One DINOv3 run is roughly 1.5-2 h; the 12 runs together do not fit one 24 h job, so split them over jobs.
+# Base (control; rerun it so every comparison uses the same code):
+srun --gres=gpu:1 python train.py --config configs/dinov3_dora_giou.yaml --data "$DATA" --wandb
 
-# Head / backbone ablations versus configs/dinov3_dora.yaml (uncomment to run):
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora.yaml --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_deform.yaml --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_cascade.yaml --data "$DATA" --wandb
+# A: one change each versus the base (a6 = Cascade on the warm-started a4; compare it with a4):
+# srun --gres=gpu:1 python train.py --config configs/ablations/a1_input.yaml             --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/ablations/a2_aug.yaml               --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/ablations/a3_wst.yaml               --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/ablations/a4_warmstart.yaml         --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/ablations/a5_fusion.yaml            --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/ablations/a6_warmstart_cascade.yaml --data "$DATA" --wandb
 
-# Head comparison with all new losses (GIoU + focal) + RoIAlign 4 + fusion (standard / deform / cascade):
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_giou_focal.yaml        --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_deform_giou_focal.yaml --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_cascade_giou_focal.yaml --data "$DATA" --wandb
-
-# Loss-term ablation (GIoU / focal): baseline + the three loss variants, run sequentially:
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora.yaml --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_giou.yaml --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_focal.yaml --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_giou_focal.yaml --data "$DATA" --wandb
-
-# Input/model-gap runs (input adapter + WST + scale protection + two-stage), then the Cascade retry:
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_v2.yaml         --data "$DATA" --wandb
-# srun --gres=gpu:1 python train.py --config configs/dinov3_dora_cascade_v2.yaml --data "$DATA" --wandb
-
-# ViT-input ablation (plain amplitude repeated vs amplitude/log-amplitude/edge):
-srun --gres=gpu:1 python train.py --config configs/dinov3_dora_v2_amp.yaml    --data "$DATA" --wandb
-srun --gres=gpu:1 python train.py --config configs/dinov3_dora_v2_logamp.yaml --data "$DATA" --wandb
+# B: capacity, each on top of a1 and filling the 40 M trainable budget a different way (compare with a1):
+# srun --gres=gpu:1 python train.py --config configs/ablations/b1_full_blocks.yaml  --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/ablations/b2_rank_early.yaml   --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/ablations/b3_rank_uniform.yaml --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/ablations/b4_convpass.yaml     --data "$DATA" --wandb
+# srun --gres=gpu:1 python train.py --config configs/ablations/b5_hybrid.yaml       --data "$DATA" --wandb

@@ -1,0 +1,6 @@
+# B1 (capacity, surgical fine-tuning): A1 + DINOv3 blocks 0 and 1 trained entirely (no DoRA there) at
+# train.unfrozen_lr. Unfreezing adds trainable parameters only (the total is unchanged). Fills the 40 M budget.
+base: a1_input.yaml
+name: giou_b1_full_blocks
+peft:
+  full_blocks: [0, 1]

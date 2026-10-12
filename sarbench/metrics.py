@@ -41,6 +41,10 @@ def detection_metrics(gt_json, predictions, image_ids):
         'mAP': float(ev.stats[0]),
         'AP50': float(ev.stats[1]),
         'AP75': float(ev.stats[2]),
+        # COCO area ranges in original pixels: small < 32^2, medium 32^2-96^2, large > 96^2 (-1: no such boxes)
+        'AP_small': float(ev.stats[3]),
+        'AP_medium': float(ev.stats[4]),
+        'AP_large': float(ev.stats[5]),
         'per_class_AP': {gt.cats[c]['name']: float(precision[:, :, k].mean())  # -1: no boxes of that class
                          for k, c in enumerate(ev.params.catIds)},
     }

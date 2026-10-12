@@ -14,7 +14,7 @@ image (9 classes) and **detect** its objects.
    - [1.4 Small Objects](#14-small-objects)
 2. [Quick Start](#2-quick-start)
    - [2.1 Install](#21-install)
-   - [2.2 Train Baseline](#22-train-baseline)
+   - [2.2 Train](#22-train)
    - [2.3 Use Course Data](#23-use-course-data)
    - [2.4 Make Submission](#24-make-submission)
 3. [Baseline Results (for reference)](#3-baseline-results-for-reference)
@@ -46,16 +46,16 @@ image (9 classes) and **detect** its objects.
 - 9 classes: aircraft, airport, bridge, car, harbor, oil tank, playground, ship, wind turbine.
 - Data, formats, release dates: [dataset card](https://huggingface.co/datasets/doem1997/cs701-sar-course-data).
   Rules: [Codabench](https://www.codabench.org/competitions/18271).
-- Limits: one model; at most 130 M parameters in total (frozen ones count; this code: 106-107 M) and at most 40 M
-  trainable (heads included: LoRA 21.0 M; full fine-tuning and from scratch, 106 M, are over); each image in once at
+- Limits: one model; at most 130 M parameters in total (frozen ones count; this code: 107-125 M) and at most 40 M
+  trainable (heads included: the base 25.6 M, the capacity ablations up to 39.5 M); each image in once at
   ≤ 512 × 512 px; no ensembles, no test-time augmentation. Your report states parameters (total, trainable) and
   compute; full list on Codabench (Terms).
 
 ### 1.3 Metric
 
 - Classification: macro-F1. Detection: COCO mAP.
-- Ranking: **Δm**, mean relative change of macro-F1 and mAP vs a reference model (ViT + LoRA, the example command
-  in 2.2; mean of 3 seeds):
+- Ranking: **Δm**, mean relative change of macro-F1 and mAP vs a reference model (the course's ViT-B/16 + LoRA,
+  section 3; mean of 3 seeds):
   `Δm = 100% × ½ [(F1 − F1_ref) / F1_ref + (mAP − mAP_ref) / mAP_ref]`
 - Δm = 0: as good as the reference. Δm > 0: better. ViT full fine-tuning: about +13 (over the trainable budget: an
   upper bound).
@@ -75,35 +75,42 @@ conda create -n cs701bench python=3.12 -y && conda activate cs701bench
 pip install -r requirements.txt   # CUDA 12.8 builds of torch 2.9.0 / torchvision 0.24.0
 ```
 
-### 2.2 Train Baseline
+### 2.2 Train
 
 ```bash
-python train.py --config configs/vit_lora.yaml   # the Δm reference; one run, about 50 min
-bash run_all.sh                                  # all eight reference runs, about 7 h
+python train.py --config configs/dinov3_dora_giou.yaml   # the current best recipe (the base)
+bash run_all.sh                                          # the base and every ablation in configs/ablations/
 ```
 
-The backbone, the PEFT method and the training options are chosen in a YAML config under `configs/` (schema in
-`sarbench/config.py`); the command line stays available for one-off overrides, e.g.
-`python train.py --config configs/vit_lora.yaml --epochs 2 --limit 64`.
+The run is configured by a YAML file under `configs/` (schema in `sarbench/config.py`); the command line stays
+available for one-off overrides, e.g. `python train.py --config configs/dinov3_dora_giou.yaml --epochs 2 --limit 64`.
+An ablation config names its parent with `base:` and lists only what it changes.
 
-The best DINOv3 recipe is `configs/dinov3_dora.yaml`: DINOv3 ViT-B/16 + pseudo-RGB input + **DoRA** (attn+mlp) +
-a real-detail **P2 conv stem** + **mosaic/copy-paste** augmentation, 48 epochs.
+**Base: `configs/dinov3_dora_giou.yaml`.** DINOv3 ViT-B/16 + pseudo-RGB input (amplitude, SAR-BM3D despeckled,
+Sobel edge) + **DoRA** r = 32 on attention and MLP + a real-detail **P2 conv stem** + a **GIoU** box term +
+mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 
-- Reference configs: `vit_{full,lora,moelora}`, `terramind_{full,lora,moelora}`, `vit_scratch`,
-  `terramind_scratch`. `python train.py --config configs/<name>.yaml` (`python train.py -h`).
-- DINOv3: `configs/dinov3_{dora,moelora,lora,full}.yaml` use the DINOv3 ViT-B/16 backbone with a pseudo-RGB
-  input (normalized amplitude + despeckled base + Sobel edge map). The `_dora` and `_moelora` configs share every
-  other hyper-parameter, so they form a clean PEFT ablation. Accept the (gated) licence on the model page and
-  `huggingface-cli login` once first.
-- `configs/dinov3_splus_dora.yaml` is the backbone-size ablation: the smaller distilled DINOv3 **ViT-S+/16**
-  (`facebook/dinov3-vits16plus-pretrain-lvd1689m`, ~29 M) with the same recipe as `dinov3_dora`.
-- `configs/dinov3_dora_{deform,cascade}.yaml` each add the Deformable-Conv RoI head or Cascade R-CNN on top of
-  `dinov3_dora.yaml`, both with multi-layer ViT fusion (`model.fusion_layers: [5, 8, 11]`).
-- `configs/dinov3_dora_giou_focal.yaml` adds detection-focused losses: a GIoU box term, focal loss (RPN, RoI and
-  image classification) and finer RoIAlign. These apply to every head (`model.giou_weight`, `model.focal_loss`).
-- `full` and `scratch` train 106 M parameters: over the 40 M budget, for reference only.
-- Pretrained weights download from Hugging Face on first use (ViT 0.4 GB, TerraMind 1.5 GB, DINOv3 ~0.35 GB).
-- Times for one RTX PRO 6000 Blackwell GPU. Memory: [docs/DETAILS.md](docs/DETAILS.md#time-and-memory).
+**Ablations (`configs/ablations/`)**, each one change, with its exact parameter count:
+
+| config | change | parent | total (M) | trainable (M) |
+|---|---|---|---:|---:|
+| `a1_input` | ImageNet norm + learnable 1x1 conv + unfrozen patch embedding | base | 111.27 | 26.20 |
+| `a2_aug` | exact 90° rotations, scale jitter 0.9-1.1, 3 px copy-paste context | base | 111.27 | 25.61 |
+| `a3_wst` | wavelet scattering (MSFA's filter input) added to P2 | base | 111.89 | 26.23 |
+| `a4_warmstart` | 10 head-only epochs before the 48 (MSFA's model gap) | base | 111.27 | 25.61 |
+| `a5_fusion` | learnable fusion of ViT blocks 5, 8, 11 | base | 111.27 | 25.61 |
+| `a6_warmstart_cascade` | Cascade R-CNN (3 x 256-wide heads, IoU 0.4/0.5/0.6) | a4 | 107.20 | 21.54 |
+| `b1_full_blocks` | blocks 0-1 trained entirely | a1 | 110.38 | 39.48 |
+| `b2_rank_early` | DoRA rank 192 in blocks 0-5 | a1 | 124.55 | 39.48 |
+| `b3_rank_uniform` | DoRA rank 112 in every block | a1 | 124.55 | 39.48 |
+| `b4_convpass` | 256-wide Convpass adapter after every block | a1 | 123.09 | 38.02 |
+| `b5_hybrid` | block 0 entirely + rank 96 in blocks 1-5 + Convpass in blocks 0-5 | a1 | 117.32 | 39.34 |
+
+The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
+of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.
+
+- Accept the (gated) DINOv3 licence on the model page and `huggingface-cli login` once first (~0.35 GB download).
+- Memory and time: [docs/DETAILS.md](docs/DETAILS.md#time-and-memory).
 
 ### 2.3 Use Course Data
 
@@ -176,19 +183,20 @@ Accuracy and AP50: [docs/DETAILS.md](docs/DETAILS.md#results-in-full).
 
 ```
 train.py              entry: train + evaluate one configuration
-configs/              one YAML per run (backbone + PEFT method + options)
-run_all.sh            the eight reference runs (calls train.py with configs)
+configs/              the base recipe; configs/ablations/ one-change ablations of it (`base:` inheritance)
+run_all.sh            the base and every ablation, in sequence
 make_submission.py    write_submission(): predictions -> submission.zip
 sarbench/             the code behind train.py
 ├── config.py         load a YAML run config into train.py arguments
-├── data.py           images + boxes at 512 × 512, flips, mosaic, copy-paste
+├── data.py           images + boxes at 512 × 512, flips, rotations, scale jitter, mosaic, copy-paste
 ├── channels.py       pseudo-RGB assembly for the DINOv3 input (amplitude + despeckled + edge)
-├── backbones.py      backbone registry: ViT (ImageNet-21k), TerraMind-1.0-base, DINOv3
-├── adapters.py       PEFT registry: LoRA, DoRA, MoE-LoRA on a frozen backbone
-├── heads.py          alternative RoI heads: Deformable-Conv, Cascade R-CNN
-├── model.py          backbone + class head + ViTDet pyramid (+ P2 stem, multi-layer fusion) + head
-└── metrics.py        accuracy, macro-F1, COCO box AP
-tests/                checks of sarbench/ (python -m pytest tests)
+├── preprocess.py     SAR-BM3D despeckling and percentile clipping (used by channels.py)
+├── backbones.py      DINOv3 ViT (Hugging Face transformers)
+├── adapters.py       DoRA + per-block capacity: rank overrides, fully trained blocks, Convpass adapters
+├── heads.py          RoI heads with a GIoU term: Faster R-CNN and Cascade R-CNN
+├── model.py          backbone + class head + ViTDet pyramid (+ P2 stem, WST stem, fusion) + head; build_model
+└── metrics.py        accuracy, macro-F1, COCO box AP (incl. AP small / medium / large)
+tests/                checks of sarbench/ (python -m pytest tests; SARBENCH_TEST_DINOV3=1 for the DINOv3 ones)
 docs/DETAILS.md       model, training protocol, design notes, time and memory
 ```
 

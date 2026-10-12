@@ -1,0 +1,10 @@
+# B5 (capacity, hybrid): A1 + block 0 trained entirely, DoRA rank 96 in blocks 1-5, and 128-wide Convpass adapters
+# after blocks 0-5: low-level weights, early-block rank and spatial mixing together, within the budget.
+base: a1_input.yaml
+name: giou_b5_hybrid
+peft:
+  full_blocks: [0]
+  rank_overrides: {1: 96, 2: 96, 3: 96, 4: 96, 5: 96}
+  conv_adapters:
+    layers: [0, 1, 2, 3, 4, 5]
+    dim: 128

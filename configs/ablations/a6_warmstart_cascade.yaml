@@ -1,0 +1,15 @@
+# A6: A4 (warm-started heads) + Cascade R-CNN. Compare against A4, not the base: the question is whether Cascade
+# pays off once its heads start from a trained state (MSFA: Cascade +2.8 mAP with a pretrained detector).
+# Three per-stage 256-wide heads (cheaper than one 1024-wide head), IoU thresholds 0.4/0.5/0.6 for ~16 px objects,
+# stage weights summing to 1 so the RoI loss keeps the single-stage magnitude. GIoU stays on.
+base: a4_warmstart.yaml
+name: giou_a6_warmstart_cascade
+model:
+  head: cascade
+  head_params:
+    num_stages: 3
+    share_head: false
+    hidden_dim: 256
+    fg_iou_thresholds: [0.4, 0.5, 0.6]
+    bg_iou_threshold: 0.4
+    stage_loss_weights: [0.5, 0.25, 0.25]

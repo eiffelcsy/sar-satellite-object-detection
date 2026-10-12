@@ -1,42 +1,19 @@
-"""PEFT adapters (LoRA, DoRA, MoE-LoRA) for the attention layers of a frozen backbone, behind a registry.
+"""Backbone adaptation: DoRA on the frozen DINOv3, plus the per-block capacity options.
 
-Each backbone lists the attention projections to wrap via `adapter_targets()` (see backbones.py), so the same
-adapter works for a fused-qkv ViT and a separate q/k/v/o ViT. The method and its hyper-parameters come from the
-YAML configs (`peft.method` / `peft.params`).
+`adapt_backbone` freezes the backbone and then, per block:
+    - `full_blocks`: the block trains entirely (no DoRA there; its pretrained weights are unfrozen);
+    - every other block: its selected projections (`targets`: attn q/k/v/o, mlp up/down) are wrapped in DoRA, at
+      `rank` or the block's entry in `rank_overrides` (alpha / rank is kept, so the update scale is unchanged);
+    - `conv_layers`: a Convpass adapter after the block, the only option that mixes neighbouring patches.
+
+Unfreezing an existing block adds trainable parameters only; DoRA and Convpass add new parameters, which count
+towards the total budget too.
 """
+import torch
 import torch.nn.functional as F
 from torch import nn
 
-ADAPTERS = {}
 
-
-def register_adapter(name):
-    """Register an adapter class under `name`, for add_adapters() and the YAML configs."""
-
-    def decorator(cls):
-        ADAPTERS[name] = cls
-        return cls
-
-    return decorator
-
-
-@register_adapter('lora')
-class LoRA(nn.Module):
-    """y = W x + (alpha / r) * B A x, where W is the wrapped layer (frozen by add_adapters)."""
-
-    def __init__(self, base: nn.Linear, rank=16, alpha=32):
-        super().__init__()
-        self.base = base
-        self.down = nn.Linear(base.in_features, rank, bias=False)  # A
-        self.up = nn.Linear(rank, base.out_features, bias=False)  # B
-        nn.init.zeros_(self.up.weight)  # B = 0: training starts from exactly the pretrained layer
-        self.scale = alpha / rank
-
-    def forward(self, x):
-        return self.base(x) + self.scale * self.up(self.down(x))
-
-
-@register_adapter('dora')
 class DoRA(nn.Module):
     """Weight-decomposed LoRA (Liu et al., 2024): W' = m * (W + (alpha / r) B A) / ||W + (alpha / r) B A||_c.
 
@@ -59,51 +36,60 @@ class DoRA(nn.Module):
         return F.linear(x, weight, self.base.bias)
 
 
-@register_adapter('moelora')
-class MoELoRA(nn.Module):
-    """y = W x + (alpha / r) * sum_e g_e(x) B_e A_e x, with gates g(x) = softmax(router[task](x)) per token.
+class ConvAdapter(nn.Module):
+    """Convpass-style adapter (Jie & Deng, 2022): patch tokens += up(GELU(conv3x3(GELU(down(tokens))))).
 
-    The experts' A_e are stacked in `down` and their B_e side by side in `up`, so gating each
-    expert's r hidden units and applying `up` sums the experts.
+    DoRA updates act on each 16 px token independently; the 3x3 conv over the token grid gives the backbone the
+    local spatial filtering that speckle and tiny objects need. `up` starts at zero, so the adapter is a no-op at
+    init. Prefix (CLS / register) tokens pass through unchanged.
     """
 
-    def __init__(self, base: nn.Linear, experts=4, rank=4, alpha=8, tasks=2):
+    def __init__(self, dim=768, hidden=128, num_prefix_tokens=0):
         super().__init__()
-        self.base = base
-        self.down = nn.Linear(base.in_features, experts * rank, bias=False)  # A_1 ... A_E
-        self.up = nn.Linear(experts * rank, base.out_features, bias=False)  # B_1 ... B_E
+        self.prefix = num_prefix_tokens
+        self.down = nn.Linear(dim, hidden)
+        self.conv = nn.Conv2d(hidden, hidden, 3, padding=1)
+        self.up = nn.Linear(hidden, dim)
         nn.init.zeros_(self.up.weight)
-        self.routers = nn.ModuleList(nn.Linear(base.in_features, experts, bias=False) for _ in range(tasks))
-        self.rank = rank
-        self.scale = alpha / rank
-        self.task = 0  # which router to use; see set_task
+        nn.init.zeros_(self.up.bias)
 
-    def forward(self, x):
-        gates = self.routers[self.task](x).softmax(dim=-1)
-        gates = gates.repeat_interleave(self.rank, dim=-1)  # expert e's gate on each of its r hidden units
-        return self.base(x) + self.scale * self.up(self.down(x) * gates)
+    def forward(self, tokens):
+        prefix, patches = tokens[:, :self.prefix], tokens[:, self.prefix:]
+        side = int(round(patches.shape[1] ** 0.5))  # square inputs: 512 px -> 32 x 32 tokens
+        hidden = F.gelu(self.down(patches)).transpose(1, 2).unflatten(2, (side, side))
+        hidden = F.gelu(self.conv(hidden)).flatten(2).transpose(1, 2)
+        return torch.cat([prefix, patches + self.up(hidden)], dim=1)
 
 
-def add_adapters(backbone, kind, targets=None, **params):
-    """Freeze the backbone, then wrap the projections selected by `backbone.adapter_targets(targets)`.
+class AdaptedBlock(nn.Module):
+    """A transformer block followed by a ConvAdapter on its output; forwards the block's own arguments (RoPE)."""
 
-    kind: 'full' (no adapter, the backbone keeps training), 'lora' or 'moelora'. `targets` is the list of
-    backbone-specific module groups to adapt (e.g. ['attn', 'mlp']; a new backbone documents its groups in
-    `adapter_targets`). `params` are forwarded to the adapter constructor (rank, alpha, ...).
-    """
-    if kind == 'full':
-        return
-    if kind not in ADAPTERS:
-        raise ValueError(f"unknown adapter '{kind}'; available: full, {sorted(ADAPTERS)}")
-    adapter = ADAPTERS[kind]
+    def __init__(self, block, adapter):
+        super().__init__()
+        self.block = block
+        self.adapter = adapter
+
+    def forward(self, hidden_states, *args, **kwargs):
+        return self.adapter(self.block(hidden_states, *args, **kwargs))
+
+
+def adapt_backbone(backbone, targets=('attn', 'mlp'), rank=32, alpha=32, rank_overrides=None, full_blocks=(),
+                   conv_layers=(), conv_dim=128):
+    """Freeze `backbone`, then apply the per-block options described in the module docstring (in place)."""
+    blocks = len(backbone.blocks)
+    full_blocks = {i % blocks for i in full_blocks}
+    conv_layers = sorted({i % blocks for i in conv_layers})
+    rank_overrides = {int(i) % blocks: int(r) for i, r in (rank_overrides or {}).items()}
+    if full_blocks & set(rank_overrides):
+        raise ValueError('a block cannot be both fully trained (full_blocks) and DoRA-adapted (rank_overrides)')
     backbone.requires_grad_(False)
-    pairs = backbone.adapter_targets(targets) if targets is not None else backbone.adapter_targets()
-    for parent, name in pairs:
-        setattr(parent, name, adapter(getattr(parent, name), **params))
-
-
-def set_task(module, task):
-    """Route every MoE-LoRA inside `module` through the router of `task` (0 = classification, 1 = detection)."""
-    for layer in module.modules():
-        if isinstance(layer, MoELoRA):
-            layer.task = task
+    for index, parent, name in backbone.adapter_targets(targets):
+        if index in full_blocks:
+            continue
+        block_rank = rank_overrides.get(index, rank)
+        setattr(parent, name, DoRA(getattr(parent, name), rank=block_rank, alpha=alpha * block_rank / rank))
+    for index in full_blocks:
+        backbone.blocks[index].requires_grad_(True)
+    for index in conv_layers:  # after DoRA, so adapter_targets still sees the plain blocks
+        adapter = ConvAdapter(backbone.embed_dim, conv_dim, backbone.num_prefix_tokens)
+        backbone.blocks[index] = AdaptedBlock(backbone.blocks[index], adapter)

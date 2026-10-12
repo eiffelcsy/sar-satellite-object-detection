@@ -1,4 +1,4 @@
-"""SAR image pre-processing: SAR-BM3D despeckling and intensity normalisation.
+"""SAR image pre-processing helpers for the pseudo-RGB channels: SAR-BM3D despeckling and percentile clipping.
 
 It follows the SAR-BM3D idea (Parrilli et al., "A Nonlocal SAR Image Denoising Algorithm
 Based on LLMMSE Wavelet Shrinkage", IEEE TGRS 2012): multiplicative speckle is turned
@@ -59,11 +59,6 @@ def sar_bm3d_despeckle(img, sigma=None, profile=PROFILE, threads=THREADS):
     return np.clip(np.exp(filtered), 0.0, 1.0).astype(np.float32)
 
 
-def log_transform(img, floor=1.0 / 255.0):
-    """Logarithmic (dB) transform: I_db = 10 * log10(I). Returns dB values <= 0."""
-    return (10.0 * np.log10(np.maximum(np.asarray(img, dtype=np.float32), floor))).astype(np.float32)
-
-
 def sigma_clip(img, percentile=0.5):
     """Clip the brightest `percentile`% of an image to the (100 - percentile)th percentile,
     then scale linearly to [0, 1]. Robust to a few hyper-bright target pixels."""
@@ -72,35 +67,3 @@ def sigma_clip(img, percentile=0.5):
     if hi <= lo:
         return np.zeros_like(img)
     return np.clip((img - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
-
-
-class SARPreprocess:
-    """Compose despeckling, the dB transform and percentile clipping into one callable.
-
-    The order is fixed and matters: despeckle the intensity image, compress its dynamic
-    range with the log transform, then clip and rescale to [0, 1] for the network.
-    """
-
-    def __init__(self, despeckle=True, log=True, clip_percentile=0.5, sigma=None,
-                 profile=PROFILE, threads=THREADS):
-        self.despeckle = despeckle
-        self.log = log
-        self.clip_percentile = clip_percentile
-        self.sigma = sigma
-        self.profile = profile
-        self.threads = threads
-
-    def cache_key(self):
-        """Stable name for the configuration, used to key the optional on-disk cache."""
-        return (f'd{int(self.despeckle)}_l{int(self.log)}_c{self.clip_percentile}'
-                f'_s{self.sigma}_p{self.profile}_t{self.threads}')
-
-    def __call__(self, img):
-        img = np.asarray(img, dtype=np.float32)
-        if self.despeckle:
-            img = sar_bm3d_despeckle(img, sigma=self.sigma, profile=self.profile, threads=self.threads)
-        if self.log:
-            img = log_transform(img)
-        if self.clip_percentile is not None:
-            img = sigma_clip(img, self.clip_percentile)
-        return img

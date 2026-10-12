@@ -1,12 +1,12 @@
-"""sarbench/model.py on real images: outputs and losses, fp32 detection heads under bf16 autocast, one backbone pass
-per task with MoE-LoRA, and an overfit check (a pretrained ViT fits 16 training images)."""
+"""sarbench/model.py on real images (GPU): outputs and losses, fp32 detection heads under bf16 autocast, and an
+overfit check (the base recipe's DINOv3 + DoRA fits 16 training images). DINOv3 is gated on Hugging Face."""
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 
-from sarbench.adapters import MoELoRA, add_adapters
-from sarbench.backbones import build_backbone
+from sarbench.adapters import adapt_backbone
+from sarbench.backbones import DINOv3
 from sarbench.data import SARMultiTask, collate, to_original_xywh
 from sarbench.metrics import detection_metrics
 from sarbench.model import MultiTaskModel
@@ -28,7 +28,7 @@ def forward(model, images, targets=None):
 
 
 def test_training_forward_returns_logits_and_the_four_losses():
-    model = MultiTaskModel(build_backbone('vit', pretrained=False), task_routing=False).cuda().train()
+    model = MultiTaskModel(DINOv3(pretrained=False)).cuda().train()
     images, _, targets = first_train_images(2)
     logits, detections, losses = forward(model, images, targets)
     assert logits.shape == (2, 9) and detections == []
@@ -37,7 +37,7 @@ def test_training_forward_returns_logits_and_the_four_losses():
 
 
 def test_detection_heads_run_in_fp32_and_boxes_are_not_quantized():
-    model = MultiTaskModel(build_backbone('vit', pretrained=False), task_routing=False).cuda().eval()
+    model = MultiTaskModel(DINOv3(pretrained=False)).cuda().eval()
     dtypes = set()  # of the RPN's and the box head's outputs: bf16 here would snap boxes to a 2 px grid near 512
     model.rpn.head.register_forward_hook(lambda module, inputs, out: dtypes.update(t.dtype for t in out[0] + out[1]))
     model.roi_heads.box_predictor.register_forward_hook(lambda module, inputs, out: dtypes.update(t.dtype for t in out))
@@ -50,24 +50,15 @@ def test_detection_heads_run_in_fp32_and_boxes_are_not_quantized():
     assert (boxes != boxes.bfloat16().float()).any()  # not every coordinate is on the bf16 grid
 
 
-def test_moelora_runs_the_backbone_once_per_task():
-    backbone = build_backbone('vit', pretrained=False)
-    add_adapters(backbone, 'moelora')
-    model = MultiTaskModel(backbone, task_routing=True).cuda().eval()
-    moelora = next(m for m in model.modules() if isinstance(m, MoELoRA))
-    tasks = []  # the routers' task at every backbone call
-    model.backbone.register_forward_pre_hook(lambda module, inputs: tasks.append(moelora.task))
-    with torch.no_grad():
-        forward(model, first_train_images(2)[0])
-    assert tasks == [0, 1]  # classification, then detection
-
-
-def test_pretrained_vit_overfits_16_training_images():
+def test_dora_overfits_16_training_images():
     torch.manual_seed(0)
     images, labels, targets = first_train_images(16)
-    model = MultiTaskModel(build_backbone('vit', pretrained=True), task_routing=False).cuda().train()
+    backbone = DINOv3(pretrained=True)
+    adapt_backbone(backbone)
+    model = MultiTaskModel(backbone, detail_stem=True, giou_weight=1.0).cuda().train()
     heads = [p for name, p in model.named_parameters() if not name.startswith('backbone.')]
-    optimizer = torch.optim.AdamW([{'params': model.backbone.parameters(), 'lr': 2e-5}, {'params': heads}], lr=1e-4)
+    optimizer = torch.optim.AdamW([{'params': [p for p in model.backbone.parameters() if p.requires_grad]},
+                                   {'params': heads}], lr=1e-4)
     for _ in range(200):
         with torch.autocast('cuda', dtype=torch.bfloat16):
             logits, _, losses = model(images, targets)

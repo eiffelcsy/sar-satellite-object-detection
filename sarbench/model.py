@@ -1,7 +1,9 @@
 """The multi-task model: one shared ViT backbone feeds a classification head and a Faster R-CNN detector.
 
 Configurable pieces (`model.*` in the YAML): `detail_stem` (real stride-4 detail for P2), `fusion_layers`
-(learnable fusion of several ViT blocks before the neck) and `head` (`standard` | `deform` | `cascade` RoI head).
+(learnable fusion of several ViT blocks before the neck), `input_adapter` (ImageNet norm + learnable 1x1 conv +
+unfrozen patch embedding), `wst_stem` (wavelet scattering detail for P2), `giou_weight` (GIoU box term) and
+`head` (`standard` | `cascade` RoI head).
 """
 from collections import OrderedDict
 
@@ -14,8 +16,13 @@ from torchvision.models.detection.image_list import ImageList
 from torchvision.models.detection.rpn import RegionProposalNetwork, RPNHead
 from torchvision.ops import MultiScaleRoIAlign
 
-from .adapters import set_task
-from .heads import CascadeRoIHeads, DeformConvBoxHead, DetRoIHeads, FocalRPN
+from .adapters import adapt_backbone
+from .backbones import DINOv3
+from .heads import CascadeRoIHeads, DetRoIHeads
+
+# Competition limits (Codabench terms): every parameter counts towards the total, frozen ones included.
+MAX_TOTAL_PARAMETERS = 130_000_000
+MAX_TRAINABLE_PARAMETERS = 40_000_000
 
 
 class SimpleFeaturePyramid(nn.Module):
@@ -129,24 +136,18 @@ class LayerFusion(nn.Module):
 class MultiTaskModel(nn.Module):
     """backbone tokens -> classification logits (mean token -> LayerNorm -> Linear) and Faster R-CNN detections."""
 
-    def __init__(self, backbone, task_routing: bool, num_classes=9, detail_stem=False,
-                 fusion_layers=None, head='standard', head_params=None, focal_loss=False, focal_gamma=2.0,
-                 focal_alpha=0.25, giou_weight=0.0, roi_sampling_ratio=2, roi_output_size=7,
-                 input_adapter=False, wst_stem=False, wst_params=None):
+    def __init__(self, backbone, num_classes=9, detail_stem=False, fusion_layers=None, giou_weight=0.0,
+                 roi_sampling_ratio=2, roi_output_size=7, input_adapter=False, wst_stem=False, wst_params=None,
+                 head='standard', head_params=None):
         super().__init__()
         self.backbone = backbone
-        self.task_routing = task_routing  # MoE-LoRA: the backbone runs once per task, with that task's routers
         self.cls_head = nn.Sequential(nn.LayerNorm(backbone.embed_dim), nn.Linear(backbone.embed_dim, num_classes))
         self.neck = SimpleFeaturePyramid(backbone.embed_dim)
         self.detail_stem = ConvStem(backbone.in_chans) if detail_stem else None  # real detail for P2
         self.input_adapter = InputAdapter(backbone.in_chans) if input_adapter else None
         self.wst_stem = WSTStem(**(wst_params or {})) if wst_stem else None
-        if input_adapter and hasattr(backbone, 'unfreeze_patch_embed'):  # PEFT froze it; re-enable it here
+        if input_adapter and hasattr(backbone, 'unfreeze_patch_embed'):  # adapt_backbone froze it; re-enable it
             backbone.unfreeze_patch_embed()
-        # Detection-loss / RoI options shared by every head.
-        self.focal_loss, self.focal_gamma, self.focal_alpha = focal_loss, focal_gamma, focal_alpha
-        self.giou_weight = giou_weight
-        self.roi_sampling_ratio, self.roi_output_size = roi_sampling_ratio, roi_output_size
         # Multi-layer fusion: normalize negative indices, register hooks in execution order.
         self.fusion_layers = self.fusion = None
         if fusion_layers:
@@ -156,49 +157,42 @@ class MultiTaskModel(nn.Module):
         # Small objects (median ~16 px at 512 px, 99 % below ~240 px): two anchor scales per octave, from 8 px at
         # stride 4 up to 181 px at stride 64, times 3 aspect ratios = 6 anchors per location.
         anchors = AnchorGenerator(((8, 11), (16, 23), (32, 45), (64, 91), (128, 181)), ((0.5, 1.0, 2.0),) * 5)
-        rpn_class = FocalRPN if focal_loss else RegionProposalNetwork
-        self.rpn = rpn_class(
+        self.rpn = RegionProposalNetwork(
             anchors, RPNHead(256, 6), fg_iou_thresh=0.7, bg_iou_thresh=0.3, batch_size_per_image=256,
             positive_fraction=0.5, pre_nms_top_n=dict(training=2000, testing=2000),
-            post_nms_top_n=dict(training=2000, testing=2000), nms_thresh=0.7,
-            **({'focal_gamma': focal_gamma, 'focal_alpha': focal_alpha} if focal_loss else {}))
-        self.roi_heads = self._build_roi_heads(num_classes, head, head_params or {})
+            post_nms_top_n=dict(training=2000, testing=2000), nms_thresh=0.7)
+        roi_pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=roi_output_size,
+                                      sampling_ratio=roi_sampling_ratio)
+        self.roi_heads = self._build_roi_heads(roi_pool, roi_output_size ** 2, num_classes, head,
+                                               head_params or {}, giou_weight)
 
-    def _build_roi_heads(self, num_classes, head, params):
-        """The RoI head ablation: torchvision's head (with focal/GIoU), a Deformable-Conv head, or Cascade.
-
-        `hidden_dim` (default 1024) sets the box-head width for every variant.
-        """
-        roi_pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=self.roi_output_size,
-                                      sampling_ratio=self.roi_sampling_ratio)
+    @staticmethod
+    def _build_roi_heads(roi_pool, cells, num_classes, head, params, giou_weight):
+        """`standard`: torchvision's 2-layer MLP head (hidden 1024). `cascade`: Cascade R-CNN with
+        `head_params` num_stages (3), share_head (true), hidden_dim (1024), fg_iou_thresholds (0.5/0.6/...),
+        bg_iou_threshold (0.5) and stage_loss_weights (all 1.0)."""
         hidden = params.get('hidden_dim', 1024)
-        loss_opts = dict(focal_loss=self.focal_loss, focal_gamma=self.focal_gamma, giou_weight=self.giou_weight)
-        common = dict(fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=512, positive_fraction=0.25,
-                      bbox_reg_weights=None, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100)
         if head == 'standard':
-            return DetRoIHeads(roi_pool, TwoMLPHead(256 * 7 * 7, hidden),
-                               FastRCNNPredictor(hidden, num_classes + 1), **common, **loss_opts)
-        if head == 'deform':
-            keys = ('in_channels', 'kernel_size', 'num_convs')
-            return DetRoIHeads(roi_pool, DeformConvBoxHead(out_channels=hidden,
-                                                           **{k: params[k] for k in keys if k in params}),
-                               FastRCNNPredictor(hidden, num_classes + 1), **common, **loss_opts)
+            return DetRoIHeads(
+                roi_pool, TwoMLPHead(256 * cells, hidden), FastRCNNPredictor(hidden, num_classes + 1),
+                fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=512, positive_fraction=0.25,
+                bbox_reg_weights=None, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100,
+                giou_weight=giou_weight)
         if head == 'cascade':
             stages = params.get('num_stages', 3)
-            # A per-stage head at hidden 1024 costs ~14 M each; the head is shared by default. A smaller
-            # hidden_dim lets you afford a full per-stage cascade within the 40 M trainable budget.
-            box_heads = [TwoMLPHead(256 * 7 * 7, hidden)
+            # A per-stage head at hidden 1024 costs ~14 M each; hidden 256 per stage costs less than one 1024 head.
+            box_heads = [TwoMLPHead(256 * cells, hidden)
                          for _ in range(1 if params.get('share_head', True) else stages)]
             predictors = [FastRCNNPredictor(hidden, num_classes + 1) for _ in range(stages)]
             thresholds = tuple(params.get('fg_iou_thresholds', ())) \
                 or tuple(round(0.5 + 0.1 * i, 2) for i in range(stages))
             return CascadeRoIHeads(
                 roi_pool, box_heads, predictors, fg_iou_thresholds=thresholds,
-                bg_iou_threshold=params.get('bg_iou_threshold', 0.5),
-                batch_size_per_image=512, positive_fraction=0.25, bbox_reg_weights=None,
-                score_thresh=0.05, nms_thresh=0.5, detections_per_img=100,
-                stage_loss_weights=params.get('stage_loss_weights'), **loss_opts)
-        raise ValueError(f"unknown head '{head}'; available: standard, deform, cascade")
+                bg_iou_threshold=params.get('bg_iou_threshold', 0.5), batch_size_per_image=512,
+                positive_fraction=0.25, bbox_reg_weights=None, score_thresh=0.05, nms_thresh=0.5,
+                detections_per_img=100, stage_loss_weights=params.get('stage_loss_weights'),
+                giou_weight=giou_weight)
+        raise ValueError(f"unknown head '{head}'; available: standard, cascade")
 
     def _backbone_tokens(self, images):
         """Run the backbone; with fusion, return the learnable weighted sum of the selected blocks' tokens."""
@@ -219,13 +213,9 @@ class MultiTaskModel(nn.Module):
     def forward(self, images, targets=None):
         """images [B, C, H, W], targets: per-image {'boxes' XYXY, 'labels' 1..9} (training only) ->
         (logits [B, num_classes], per-image detections (eval mode), the detection losses (training mode))."""
-        set_task(self.backbone, 0)  # 0 = classification, 1 = detection; a no-op without MoE-LoRA
         backbone_images = self.input_adapter(images) if self.input_adapter is not None else images
         tokens = self._backbone_tokens(backbone_images)
         logits = self.cls_head(tokens.mean(dim=1))
-        if self.task_routing:
-            set_task(self.backbone, 1)
-            tokens = self._backbone_tokens(backbone_images)
         h, w = images.shape[-2] // 16, images.shape[-1] // 16  # one token per 16 x 16 patch
         features = self.neck(tokens.transpose(1, 2).unflatten(2, (h, w)))  # tokens as a [B, 768, h, w] map
         if self.detail_stem is not None:  # add genuine stride-4 detail (from the pixels) to the upsampled P2
@@ -240,3 +230,32 @@ class MultiTaskModel(nn.Module):
             proposals, rpn_losses = self.rpn(image_list, features, targets)
             detections, roi_losses = self.roi_heads(features, proposals, image_list.image_sizes, targets)
         return logits, detections, {**rpn_losses, **roi_losses}
+
+
+def build_model(args):
+    """DINOv3 + DoRA (+ the per-block capacity options) + heads, on the CPU. Returns (model, ids of pretrained
+    backbone parameters), so the optimizer can give unfrozen pretrained weights their own learning rate."""
+    backbone = DINOv3(pretrained=args.pretrained, **args.backbone_kwargs)
+    pretrained_ids = {id(p) for p in backbone.parameters()}
+    conv = args.conv_adapters or {}
+    adapt_backbone(backbone, targets=args.peft_targets, rank=args.peft_kwargs.get('rank', 32),
+                   alpha=args.peft_kwargs.get('alpha', 32), rank_overrides=args.rank_overrides,
+                   full_blocks=args.full_blocks, conv_layers=conv.get('layers', ()), conv_dim=conv.get('dim', 128))
+    model = MultiTaskModel(backbone, detail_stem=args.detail_stem, fusion_layers=args.fusion_layers,
+                           giou_weight=args.giou_weight, roi_sampling_ratio=args.roi_sampling_ratio,
+                           roi_output_size=args.roi_output_size, input_adapter=args.input_adapter,
+                           wst_stem=args.wst_stem, wst_params=args.wst_params, head=args.head,
+                           head_params=args.head_params)
+    return model, pretrained_ids
+
+
+def parameter_counts(model, pretrained_ids):
+    """Total and trainable parameters, plus the trainable breakdown: heads / new backbone / unfrozen pretrained."""
+    backbone = [p for p in model.backbone.parameters() if p.requires_grad]
+    return {
+        'total': sum(p.numel() for p in model.parameters()),
+        'trainable': sum(p.numel() for p in model.parameters() if p.requires_grad),
+        'heads': sum(p.numel() for n, p in model.named_parameters() if p.requires_grad and not n.startswith('backbone.')),
+        'backbone_new': sum(p.numel() for p in backbone if id(p) not in pretrained_ids),
+        'backbone_unfrozen': sum(p.numel() for p in backbone if id(p) in pretrained_ids),
+    }

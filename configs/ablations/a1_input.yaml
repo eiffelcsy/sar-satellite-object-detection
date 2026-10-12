@@ -1,0 +1,6 @@
+# A1 (input gap): dinov3_dora_giou + ImageNet normalization + a learnable 1x1 conv (no-op init) + the DINOv3 patch
+# embedding unfrozen at train.unfrozen_lr (2e-5). +0.59 M trainable, +12 total. Every b* capacity run builds on it.
+base: ../dinov3_dora_giou.yaml
+name: giou_a1_input
+model:
+  input_adapter: true

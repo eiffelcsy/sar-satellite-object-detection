@@ -1,0 +1,8 @@
+# A2 (augmentation): dinov3_dora_giou + exact 0/90/180/270 rotations, gentle scale jitter (0.9-1.1; pads when
+# shrinking, keeps boxes when enlarging) and 3 px of context around copy-pasted objects. Mosaic stays at 0.3.
+base: ../dinov3_dora_giou.yaml
+name: giou_a2_aug
+data:
+  rotation90: true
+  scale_jitter: [0.9, 1.1]
+  copy_paste_margin: 3

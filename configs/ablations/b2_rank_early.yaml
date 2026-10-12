@@ -1,0 +1,6 @@
+# B2 (capacity, early DoRA rank): A1 + DoRA rank 192 (instead of 32) in blocks 0-5; blocks 6-11 stay at 32.
+# alpha / rank is kept at 1. Matched to B1's trainable budget.
+base: a1_input.yaml
+name: giou_b2_rank_early
+peft:
+  rank_overrides: {0: 192, 1: 192, 2: 192, 3: 192, 4: 192, 5: 192}

@@ -1,0 +1,6 @@
+# A3 (MSFA filter input): dinov3_dora_giou + wavelet scattering (J=2, L=8 -> 81 channels at stride 4) projected and
+# added to P2. ~0.6 M new parameters. Needs kymatio.
+base: ../dinov3_dora_giou.yaml
+name: giou_a3_wst
+model:
+  wst_stem: true

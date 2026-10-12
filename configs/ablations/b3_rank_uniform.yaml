@@ -1,0 +1,8 @@
+# B3 (capacity, uniform DoRA rank): A1 + DoRA rank 112 in every block. Matched to B1/B2's trainable budget, so
+# B2 vs B3 asks whether the extra rank belongs in the early blocks.
+base: a1_input.yaml
+name: giou_b3_rank_uniform
+peft:
+  params:
+    rank: 112
+    alpha: 112

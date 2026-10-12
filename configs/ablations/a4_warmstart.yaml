@@ -1,0 +1,7 @@
+# A4 (MSFA model gap): dinov3_dora_giou + 10 head-only epochs (backbone and DoRA frozen, lr 2e-4) before the usual
+# 48 epochs. Note: 58 epochs of compute in total, so compare against the base with that in mind.
+base: ../dinov3_dora_giou.yaml
+name: giou_a4_warmstart
+train:
+  stage_a_epochs: 10
+  stage_a_lr: 2.0e-4

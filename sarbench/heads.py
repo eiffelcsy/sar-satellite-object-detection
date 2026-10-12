@@ -1,73 +1,22 @@
-"""Detection heads and RPN with optional focal loss / GIoU box loss, shared by every model.
-
-`DeformConvBoxHead` and `CascadeRoIHeads` are the ablation heads; `DetRoIHeads` is torchvision's RoI head plus
-focal classification and an extra GIoU term; `FocalRPN` is the RPN with a focal objectness loss. All return the
-same `(per-image detections, loss dict)` interface as torchvision, so the rest of the pipeline is unchanged.
+"""RoI heads with an optional GIoU box-regression term: torchvision's Faster R-CNN head (`DetRoIHeads`) and
+Cascade R-CNN (`CascadeRoIHeads`). Both return the same `(per-image detections, loss dict)` interface as
+torchvision, so the rest of the pipeline is unchanged.
 """
 import torch
-import torch.nn.functional as F
 from torch import nn
 from torchvision.models.detection._utils import BalancedPositiveNegativeSampler, Matcher
 from torchvision.models.detection.roi_heads import RoIHeads
-from torchvision.models.detection.rpn import RegionProposalNetwork
-from torchvision.ops import DeformConv2d, box_iou, clip_boxes_to_image
+from torchvision.ops import box_iou, clip_boxes_to_image
 
-from .losses import binary_focal_loss_with_logits
 from .losses import fastrcnn_loss as roi_loss
 
 
-class DeformConvBoxHead(nn.Module):
-    """RoI box head using deformable convolutions (Dai et al., 2017) on the pooled 256 x 7 x 7 features.
-
-    Small objects land in few, misaligned RoI cells; the learned offsets sample the feature map around the true
-    object shape instead of a fixed grid. The output dim matches `FastRCNNPredictor`.
-    """
-
-    def __init__(self, in_channels=256, out_channels=1024, kernel_size=3, num_convs=2):
-        super().__init__()
-        self.blocks = nn.ModuleList()
-        for _ in range(num_convs):
-            self.blocks.append(nn.ModuleDict({
-                'conv': nn.Conv2d(in_channels, in_channels, kernel_size, padding=kernel_size // 2),
-                'offset': nn.Conv2d(in_channels, 2 * kernel_size * kernel_size, kernel_size,
-                                    padding=kernel_size // 2),
-                'dcn': DeformConv2d(in_channels, in_channels, kernel_size, padding=kernel_size // 2)}))
-        self.fc = nn.Linear(in_channels * 7 * 7, out_channels)
-
-    def forward(self, x):
-        for block in self.blocks:
-            x = F.relu(block['dcn'](F.relu(block['conv'](x)), block['offset'](x)))
-        return F.relu(self.fc(x.flatten(1)))
-
-
-class FocalRPN(RegionProposalNetwork):
-    """RegionProposalNetwork whose objectness loss is a sigmoid focal loss (the box loss is unchanged)."""
-
-    def __init__(self, *args, focal_gamma=2.0, focal_alpha=0.25, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.focal_gamma, self.focal_alpha = focal_gamma, focal_alpha
-
-    def compute_loss(self, objectness, pred_bbox_deltas, labels, regression_targets):
-        sampled_pos, sampled_neg = self.fg_bg_sampler(labels)
-        sampled_pos = torch.where(torch.cat(sampled_pos, dim=0))[0]
-        sampled_neg = torch.where(torch.cat(sampled_neg, dim=0))[0]
-        sampled_inds = torch.cat([sampled_pos, sampled_neg], dim=0)
-        objectness = objectness.flatten()
-        labels = torch.cat(labels, dim=0)
-        regression_targets = torch.cat(regression_targets, dim=0)
-        box_loss = F.smooth_l1_loss(pred_bbox_deltas[sampled_pos], regression_targets[sampled_pos],
-                                    beta=1 / 9, reduction='sum') / sampled_inds.numel()
-        objectness_loss = binary_focal_loss_with_logits(objectness[sampled_inds], labels[sampled_inds],
-                                                        self.focal_gamma, self.focal_alpha, reduction='mean')
-        return objectness_loss, box_loss
-
-
 class DetRoIHeads(RoIHeads):
-    """torchvision's RoI head with optional focal classification and an additional GIoU box-regression term."""
+    """torchvision's RoI head with an additional GIoU box-regression term (`giou_weight`, 0 disables it)."""
 
-    def __init__(self, *args, focal_loss=False, focal_gamma=2.0, giou_weight=0.0, **kwargs):
+    def __init__(self, *args, giou_weight=0.0, **kwargs):
         super().__init__(*args, **kwargs)
-        self.focal_loss, self.focal_gamma, self.giou_weight = focal_loss, focal_gamma, giou_weight
+        self.giou_weight = giou_weight
 
     def forward(self, features, proposals, image_shapes, targets=None):
         matched_gt = None
@@ -82,7 +31,6 @@ class DetRoIHeads(RoIHeads):
         if self.training:
             loss_classifier, loss_box_reg = roi_loss(class_logits, box_regression, labels, regression_targets,
                                                      proposals, matched_gt, self.box_coder,
-                                                     focal=self.focal_loss, focal_gamma=self.focal_gamma,
                                                      giou_weight=self.giou_weight)
             losses = {'loss_classifier': loss_classifier, 'loss_box_reg': loss_box_reg}
         else:
@@ -102,7 +50,7 @@ class CascadeRoIHeads(RoIHeads):
     def __init__(self, box_roi_pool, box_heads, box_predictors, fg_iou_thresholds=(0.5, 0.6, 0.7),
                  bg_iou_threshold=0.5, batch_size_per_image=512, positive_fraction=0.25, bbox_reg_weights=None,
                  score_thresh=0.05, nms_thresh=0.5, detections_per_img=100, stage_loss_weights=None,
-                 focal_loss=False, focal_gamma=2.0, giou_weight=0.0):
+                 giou_weight=0.0):
         # Matcher requires low <= high, so the background threshold must not exceed the smallest fg threshold.
         bg_iou_threshold = min(bg_iou_threshold, min(fg_iou_thresholds))
         # The base RoIHeads supplies the box coder, the RoI pool and post-processing shared by all stages.
@@ -116,7 +64,7 @@ class CascadeRoIHeads(RoIHeads):
         self.cascade_samplers = [
             BalancedPositiveNegativeSampler(batch_size_per_image, positive_fraction) for _ in fg_iou_thresholds]
         self.stage_loss_weights = list(stage_loss_weights) if stage_loss_weights else [1.0] * len(box_predictors)
-        self.focal_loss, self.focal_gamma, self.giou_weight = focal_loss, focal_gamma, giou_weight
+        self.giou_weight = giou_weight
 
     def _refined_boxes(self, box_regression, class_logits, boxes, image_shapes):
         """Decode one box per proposal (highest-scoring foreground class) for the next cascade stage.
@@ -173,7 +121,6 @@ class CascadeRoIHeads(RoIHeads):
             if self.training:
                 loss_classifier, loss_box_reg = roi_loss(class_logits, box_regression, labels,
                                                          regression_targets, boxes, matched_gt, self.box_coder,
-                                                         focal=self.focal_loss, focal_gamma=self.focal_gamma,
                                                          giou_weight=self.giou_weight)
                 weight = self.stage_loss_weights[stage]
                 losses['loss_classifier'] = losses.get('loss_classifier', 0.) + weight * loss_classifier

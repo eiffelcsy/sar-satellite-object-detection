@@ -5,127 +5,92 @@ Back to the [README](../README.md).
 ## Model
 
 ```
-image [B,C,512,512] -> backbone -> tokens [B,1024,768]   (32 x 32 patches of 16 px; C=1 or 3)
+image [B,3,512,512] (pseudo-RGB) -> (input adapter) -> DINOv3 ViT-B/16 + DoRA -> tokens [B,1024,768]
   classification: mean over tokens -> LayerNorm -> Linear(768, 9)
   detection:      tokens (+ optional multi-layer fusion) as a [B,768,32,32] map
                   -> SimpleFeaturePyramid (strides 4 to 64, 256 channels)
-                  (+ optional conv stem that adds real stride-4 detail to P2)
-                  -> RegionProposalNetwork + RoI head (Faster R-CNN, Deformable-Conv, or Cascade R-CNN)
+                  (+ conv stem and/or WST stem adding real stride-4 detail to P2)
+                  -> RegionProposalNetwork + RoI head (Faster R-CNN, or Cascade R-CNN), GIoU box term
 loss = cross-entropy + the detection losses, each scaled by its config `loss` weight
 ```
 
-![The reference model](reference_model.png)
+The base recipe is `configs/dinov3_dora_giou.yaml`; every option below is off there unless stated.
 
-**Multi-layer fusion** (`model.fusion_layers: [5, 8, 11]`). The neck normally sees only the final ViT block's
-tokens. `sarbench/model.py` registers forward hooks on the listed blocks, drops their prefix tokens and combines
-them with a learnable softmax weighting (`LayerFusion`, initialized to the last block, so it starts from the
-standard single-layer behaviour). Earlier blocks carry the lower-level detail the last block has abstracted away,
-which helps small objects. Cost: one weight per block.
+**Backbone.** DINOv3 ViT-B/16 (`facebook/dinov3-vitb16-pretrain-lvd1689m`, 86 M, gated on Hugging Face) through
+`transformers`. 1 CLS + 4 register tokens are dropped from the output; RoPE, so no position embedding to resample.
 
-**Detection head** (`model.head`; ablation configs `configs/dinov3_dora_{deform,cascade}.yaml`, which also enable
-multi-layer fusion):
+**Adaptation (`peft`, `sarbench/adapters.py`).** The backbone is frozen and then, per block:
 
-- `standard`: torchvision Faster R-CNN's 2-layer MLP box head.
-- `deform`: `sarbench/heads.py` `DeformConvBoxHead` — deformable convolutions (Dai et al. 2017) on the pooled
-  7x7 RoI features, so the head samples around the true object shape instead of a fixed grid (+~1.4 M).
-- `cascade`: `CascadeRoIHeads` — S RoI stages (default 3) with rising IoU thresholds, each decoding boxes that
-  are re-pooled and refined by the next. Per-stage losses are summed into `loss_classifier` / `loss_box_reg`.
-  `head_params` controls: `num_stages`, `fg_iou_thresholds` (default 0.5/0.6/0.7; lower them for tiny objects),
-  `stage_loss_weights` (default all 1.0), `share_head` (default `true`; a per-stage head at hidden 1024 adds
-  ~28 M) and `hidden_dim` (default 1024; **hidden 256 with `share_head: false` gives a full per-stage cascade
-  that costs less than one 1024 head**). At inference, intermediate stages pass *all* refined proposals to the
-  next stage (no NMS/score threshold) so small-object recall is preserved; only the last stage post-processes.
+- DoRA (Liu et al. 2024) on `peft.targets` (`attn`: q/k/v/o_proj, `mlp`: up/down_proj):
+  `W' = m * (W + (alpha / r) B A) / ||W + (alpha / r) B A||_c`, with `m` initialized to `||W||_c`, so it is a no-op
+  at init. Base: r = 32, alpha = 32 on attention and MLP of all 12 blocks (5.39 M).
+- `rank_overrides: {block: rank}` changes the rank of single blocks; alpha / rank is kept, so the update scale is
+  unchanged. Per block, DoRA costs 13,824 parameters per unit of rank plus 6,912 for the magnitudes.
+- `full_blocks: [...]` trains those blocks entirely instead (7.09 M each, no DoRA there). Unfreezing adds trainable
+  parameters but not total ones.
+- `conv_adapters: {layers: [...], dim: d}` adds a Convpass adapter (Jie & Deng 2022) after those blocks:
+  `patch tokens += up(GELU(conv3x3(GELU(down(tokens)))))`, zero-initialized. DoRA acts on each token separately;
+  this is the only option that mixes neighbouring patches inside the backbone (1,536 d + 9 d^2 per block).
 
-  **Heads in practice.** On this dataset the plain head won: Deformable-Conv was marginally worse (within seed
-  noise), and Cascade traded mAP/AP50/AP75 for clearly better macro-F1/accuracy — the detection head's gradients
-  shape the shared backbone, so it indirectly changes the classifier. The lower thresholds / per-stage heads /
-  loss re-weighting above are the fair retry; the `dinov3_dora` config remains the best detector overall.
+**Input adapter** (`model.input_adapter`). DINOv3 was pretrained on ImageNet-normalized RGB; the pseudo-RGB
+channels are in [0, 1]. The adapter applies the ImageNet mean/std, then a learnable 1x1 conv initialized to the
+identity, and unfreezes the patch embedding (0.59 M) so the first layer can learn the SAR channels.
 
-**Detection losses** (`model.*`, applied to every head; enable with `configs/dinov3_dora_giou_focal.yaml`):
+**Learning rates.** Three AdamW groups: the heads and every new module outside the backbone at `train.lr` (1e-4),
+new backbone parameters (DoRA, Convpass) at `train.backbone_lr` (default `lr`), and pretrained weights made
+trainable (patch embedding, `full_blocks`) at `train.unfrozen_lr` (2e-5, the course's full fine-tuning rate).
 
-- `giou_weight` (default 0): adds a GIoU term to the RoI box-regression loss (on the decoded positive boxes vs
-  their matched GT), which targets localization / AP75.
-- `focal_loss` + `focal_gamma`/`focal_alpha` (default off): focal loss replaces the RPN objectness (binary
-  sigmoid focal), the RoI classifier and the image classifier. gamma = 0 is exactly the previous loss.
-- `roi_sampling_ratio` / `roi_output_size` (default 2 / 7): the single shared `MultiScaleRoIAlign`, so it affects
-  all heads — finer sampling (e.g. 4) helps tiny RoIs.
-- The RPN now keeps the top **2000** proposals after NMS at both training and testing (`model.py`).
+**Budget.** `train.py` logs total / trainable parameters (with the heads / new backbone / unfrozen split) and
+refuses to train over 130 M total or 40 M trainable. `tests/test_config.py` checks every config.
 
-**P2 stem** (`model.detail_stem: true`). The single-scale ViT sees only 16 px patches, so the neck's stride-4
-level is upsampled and carries no genuine high-frequency content. `sarbench/model.py` adds a small conv stem
-(two stride-2 convs on the 512 px input) whose stride-4 output is added to P2, which is what tiny SAR objects
-need. It costs ~0.1 M parameters.
+**P2 stem** (`model.detail_stem`, on in the base). The ViT sees only 16 px patches, so the neck's stride-4 level is
+upsampled. A small conv stem (two stride-2 convs on the 512 px input, ~0.1 M) adds real stride-4 detail to P2.
 
-**Loss weights** (`loss` in the config). The epoch loss is the sum of the terms, each multiplied by its config
-weight (default 1.0), in `train.py`. The per-term values logged in parentheses are always raw:
-`classification` (the multi-task class head, cross-entropy), `loss_objectness`, `loss_rpn_box_reg`,
-`loss_classifier` and `loss_box_reg` (RoI box regression). E.g. `loss: {loss_box_reg: 2.0}` leans on the boxes.
+**WST stem** (`model.wst_stem`). MSFA's best filter: a wavelet scattering transform (kymatio, J = 2, L = 8, 81
+channels at stride 4, P2's resolution) on the first input channel, projected to 256 channels and added to P2
+(~0.6 M).
 
-**Augmentation** (`data.mosaic`, `data.copy_paste`, train split only). Both operate on the 512 px canvas after
-the base transform, so evaluation and box mapping are unaffected:
+**Multi-layer fusion** (`model.fusion_layers: [5, 8, 11]`). Forward hooks capture those blocks' tokens; a learnable
+softmax weighting (initialized to the last block) combines them before the neck. Cost: one weight per block.
 
-- **mosaic** — combine four images into a 2×2 grid (each resized to 256 px), scaling/clipping their boxes;
-- **copy-paste** — crop up to 3 objects from a donor image and paste them where they do not overlap existing
-  boxes (IoU < 0.3).
+**RoI head** (`model.head`). `standard`: torchvision's 2-layer MLP box head (hidden 1024, 13.9 M). `cascade`:
+Cascade R-CNN, S stages (`head_params.num_stages`, default 3) with rising IoU thresholds
+(`fg_iou_thresholds`), per-stage or shared box heads (`share_head`, `hidden_dim`) and `stage_loss_weights`; at
+inference intermediate stages pass every refined proposal on, so small-object recall is kept. Earlier Cascade
+runs lost mAP to the standard head, but none isolated it on warm-started heads, which is what
+`a6_warmstart_cascade` tests (against `a4_warmstart`).
 
-`configs/dinov3_dora.yaml` uses `mosaic: 0.3`, `copy_paste: 0.5`.
+**GIoU** (`model.giou_weight`, 1.0 in the base): an extra GIoU term on the decoded positive boxes vs their matched GT,
+added to the RoI box loss (localization / AP75). `model.roi_sampling_ratio` / `roi_output_size` (2 / 7) set the
+RoIAlign. The RPN keeps the top 2000 proposals after NMS in training and testing.
 
-**Backbones** (set in the config's `backbone.name`):
+**Loss weights** (`loss`). The epoch loss is the sum of the terms, each multiplied by its config weight (default
+1.0): `classification`, `loss_objectness`, `loss_rpn_box_reg`, `loss_classifier`, `loss_box_reg`. The base uses
+`loss_box_reg: 2.0` and `loss_rpn_box_reg: 1.5`. The logged per-term values are raw.
 
-- `vit`: timm's `vit_base_patch16_224.augreg_in21k` (ImageNet-21k).
-- `terramind`: TerraMind-1.0-base (IBM/ESA), an Earth-observation model, through its Sentinel-1 GRD input.
-- `dinov3`: DINOv3 ViT (Meta) through HuggingFace transformers; the default checkpoint is
-  `facebook/dinov3-vitb16-pretrain-lvd1689m` (~86 M). The configuration is set in `configs/dinov3_*.yaml`;
-  `model_name` can be swapped for `facebook/dinov3-vits16plus-pretrain-lvd1689m` (distilled ViT-S+/16, ~29 M;
-  the backbone-size ablation, `configs/dinov3_splus_dora.yaml`), `facebook/dinov3-vits16-pretrain-lvd1689m`
-  (ViT-S/16) or `facebook/dinov3-vitl16-pretrain-sat493m` (satellite, ~303 M, over the parameter budget).
-  DINOv3 weights are gated: accept the licence and `huggingface-cli login`.
-  `hidden_size` is read from the checkpoint, so a smaller ViT-S+ automatically shrinks the neck, class head and
-  adapter dimensions.
-  Adapting DINOv3 uses its separate `q_proj` / `k_proj` / `v_proj` (the "qkv_proj") and `o_proj` ("out_proj")
-  attention layers plus the `up_proj` / `down_proj` MLP layers (fc1/fc2), selected by the config's
-  `peft.targets: [attn, mlp]`. `configs/dinov3_lora.yaml` uses r = 32, alpha = 32.
+**Augmentation** (`data.*`, train split only, all after the resize to 512 px; the pseudo-RGB channels are computed
+and cached before any augmentation):
 
-**Pseudo-RGB input (`preprocess.pseudo_rgb`, DINOv3 configs).** Instead of repeating the gray channel to the
-three channels DINOv3 expects, `sarbench/channels.py` assembles three complementary [0, 1] representations:
+- flips (always), `rotation90` (an exact `torch.rot90` of the pixels and boxes),
+- `scale_jitter: [lo, hi]` — shrinking pads the border (nothing is lost), enlarging crops the window that keeps the
+  most boxes and drops boxes left with less than half of their area,
+- `mosaic` (probability; four images at 256 px in a 2x2 grid) and `copy_paste` (probability; up to 3 donor objects
+  pasted where they overlap nothing, IoU < 0.3) with `copy_paste_margin` px of context around each object.
 
-1. normalized amplitude — the intensity image with its dynamic range stretched (`sigma_clip`);
-2. despeckled base — SAR-BM3D, or a Gaussian blur when `despeckle: false`;
-3. edge map — the Sobel gradient magnitude of the base (or a Gaussian high-pass with `edge: highpass`).
+The base uses `mosaic: 0.3`, `copy_paste: 0.5`, no rotation, jitter or margin.
 
-The assembly is an ordinary pre-processing callable, so `--preprocess-cache` caches the SAR-BM3D pass across
-epochs; `configs/dinov3_*.yaml` set `cache: preprocess_cache`. Adding `pseudo_rgb` with a non-3-channel
-backbone (e.g. the ViT) is rejected at startup. With `pseudo_rgb: false` DINOv3 falls back to repeating the
-single gray channel to RGB.
+**Pseudo-RGB input (`preprocess.pseudo_rgb`, on in the base).** `sarbench/channels.py` builds three [0, 1] channels:
+`mode: despeckle` (base) = amplitude (`sigma_clip`), SAR-BM3D despeckled base, Sobel edge of the base;
+`amp_log_edge` = amplitude, log-amplitude, edge of the amplitude; `amplitude` = amplitude three times.
+`preprocess.cache` caches the result (the SAR-BM3D pass is slow).
 
-**Adaptation** (set in the config's `peft.method`):
+**Two-stage training** (`train.stage_a_epochs`, `stage_a_lr`). The first N epochs freeze the whole backbone and
+train only the heads at `stage_a_lr`, so the random heads do not push noisy gradients into DoRA (MSFA's "model
+gap"); the usual `epochs` follow with a fresh optimizer and schedule.
 
-- `full`: every backbone weight trains.
-- `lora`: the backbone is frozen; the selected projections get `y = W x + (alpha / r) B A x`, with r = 16 and
-  alpha = 32 for ViT/TerraMind (0.88 M trainable backbone parameters for the ViT).
-- `dora`: weight-decomposed LoRA (Liu et al. 2024), `W' = m * (W + (alpha / r) B A) / ||W + (alpha / r) B A||_c`
-  with a learnable per-output magnitude `m` (initialized to `||W||_c`, so it is an exact no-op at init). Same
-  A/B as LoRA plus the magnitude; usually a small accuracy gain at the same budget.
-- `moelora`: as `lora`, but the rank-16 update is split into 4 experts of rank 4 (alpha = 8, so alpha / r = 2
-  as in `lora`), mixed per token by a softmax router. Each task has its own router (1.03 M trainable backbone
-  parameters for the ViT).
-- `peft.targets` (optional): which module groups a backbone exposes for adaptation. ViT/TerraMind have only
-  `attn` (their `qkv`/`proj`); DINOv3 supports `attn` (q/k/v/o_proj) and `mlp` (up/down_proj, fc1/fc2).
-  `configs/dinov3_lora.yaml` sets `[attn, mlp]`; without it, only attention is adapted.
+## Training protocol
 
-Both registries are plain dicts (`sarbench/backbones.py`, `sarbench/adapters.py`): add a new backbone with
-`@register_backbone('name')` (exposing `embed_dim`, `blocks`, `adapter_targets()` and a token forward) or a
-new PEFT method with `@register_adapter('name')`, then select it from a YAML config. `adapter_targets()` makes
-the adapters independent of the attention layout (fused qkv vs. separate q/k/v/o).
-
-Every run also trains the 20.1 M parameters of the heads (neck, RPN, RoI heads, classifier), so
-`trainable_parameters` in `metrics.json` is the backbone count + 20.1 M.
-
-## Training protocol (the same for all eight runs)
-
-- AdamW, weight decay 0.05, batch size 16, bf16 autocast, 24 epochs.
-- Learning rate 1e-4; the backbone of the two pretrained `full` runs uses 2e-5 (`--backbone-lr 2e-5`, as in
-  `run_all.sh`), so a pretrained backbone is fine-tuned gently.
+- AdamW, weight decay 0.05, batch size 16, bf16 autocast, 48 epochs (base).
 - One epoch of linear warmup, then cosine decay to 0, updated every iteration.
 - Validation every 4 epochs and after the last one; test once, at the end. The reported model is the
   last-epoch model: there is no checkpoint selection.
@@ -136,33 +101,27 @@ Every run also trains the 20.1 M parameters of the heads (neck, RPN, RoI heads, 
 - **512 px input.** Every image is resized to 512 x 512 (non-square images are stretched): 1,024 tokens.
   Objects are small (median box 15.9 px at 512 px), so the smallest anchors are 8 px, on the stride-4 level.
   Predicted boxes are mapped back to original pixels before COCO scoring.
-- **Normalization.** Images are read as one gray channel. Both backbones get the same mean and std
-  (0.2526, 0.2133), computed over the 9,392 train images at 512 px. DINOv3 with pseudo-RGB instead receives
-  its three [0, 1] channels directly, without this gray-level normalization.
+- **Normalization.** Without pseudo-RGB, the gray image is normalized with the train mean and std (0.2526, 0.2133)
+  and repeated to RGB. With pseudo-RGB the three [0, 1] channels go in directly, or through the input adapter.
 - **Precision rule.** Backbone, neck and classification head run in bf16; the RPN and RoI heads run in fp32.
   torchvision's box coder casts anchors to the dtype of the regression output, and bf16 numbers between 256
-  and 512 are 2 px apart: too coarse for objects of 6-15 px. Importing terratorch (`sarbench/backbones.py` does, for
-  every run) switches fp32 matrix multiplications on the GPU to TF32; box coordinates are decoded
-  elementwise in fp32 and are unaffected.
-- **MoE-LoRA runs the backbone twice.** Its routers are task-specific, so the two tasks see different
-  features and every forward pass runs the backbone once per task.
-- **TerraMind domain gap.** TerraMind was pretrained on Sentinel-1 GRD backscatter in dB (polarizations VV
-  and VH, 10 m pixels). Our images are 8-bit gray display images, mostly at a higher resolution; the gray
-  channel is fed as both VV and VH. The gap is part of the benchmark and is not corrected in code.
+  and 512 are 2 px apart: too coarse for objects of 6-15 px. `train.py` enables TF32 for fp32 matmuls and
+  convolutions (importing terratorch used to do this implicitly); box coordinates are decoded elementwise in
+  fp32 and are unaffected.
 
 ## Time and memory
 
-On one RTX PRO 6000 Blackwell GPU, a run alone takes about 50 min (LoRA about 47 min, MoE-LoRA about 1 h);
-all eight in sequence take about 7 h. A run keeps about 11-17 GiB of GPU memory in use; TerraMind with
-MoE-LoRA needs the most and does not fit on a 16 GB card. A smaller `--batch-size` saves memory but changes
-the protocol.
+One DINOv3 run takes roughly 1.5-2 h on one L40S (about 50 min on an RTX PRO 6000 Blackwell). A run keeps about
+11-17 GiB of GPU memory in use; the capacity ablations add optimizer state for up to 14 M more parameters, and
+the Convpass and high-rank DoRA runs add activations. A smaller `--batch-size` saves memory but changes the
+protocol.
 
 ## What a run writes
 
-`runs/<name>/`, where `<name>` is the config's `name` (default `<backbone>_<init>_<adapt>`):
+`runs/<name>/`, where `<name>` is the config's `name` (default `dinov3_dora`):
 
 - `log.txt`: training progress and the val and test scores.
-- `metrics.json`: arguments, parameter counts, `train_hours` (wall time of the epoch loop, including the
+- `metrics.json`: arguments, parameter counts (and their breakdown), `train_hours` (wall time of the epoch loop, including the
   periodic validation; it grows if the GPU is shared), `peak_gpu_memory_gb` (`torch.cuda.max_memory_allocated`
   in GiB; the process needs about 2.5 GiB more), every validation result, and the final val and test metrics.
 - `predictions_val.json`, `predictions_test.json`: detections in COCO result format, in original pixels.
@@ -171,14 +130,18 @@ the protocol.
 ## Checks
 
 ```bash
-bash run_all.sh --limit 64 --epochs 1 --out runs/smoke   # all eight configurations on 64 images per split, a few minutes
-python -m pytest tests                                   # the tests (need a GPU)
+bash run_all.sh --limit 64 --epochs 1 --out runs/smoke   # every configuration on 64 images per split
+python -m pytest tests                                   # CPU tests; GPU and dataset tests where available
+SARBENCH_TEST_DINOV3=1 python -m pytest tests            # + the real DINOv3 checks (no-op adapters, budgets)
 ```
 
-`test_data.py`, `test_metrics.py` and `test_model.py` read the data in TA Zichen's layout (see the README),
-so they need the same adaptation as the code; `test_backbones.py` and `test_adapters.py` need no data.
+`test_data.py`, `test_metrics.py` and `test_model.py` read the data in TA Zichen's layout (see the README) and
+need a GPU; the other tests run on the CPU without data.
 
-## Results in full
+## Results in full (course reference runs)
+
+The course's reference runs (ViT and TerraMind; their code is no longer in this repository). They define the
+Δm reference: ViT-B/16 + LoRA.
 
 Scores in %, mean ± sample standard deviation over seeds 0, 1 and 2, last-epoch model. Accuracy and macro-F1
 for classification; COCO mAP (AP@[.50:.95]) and AP50 for detection. The seeds differ by a few tenths of a

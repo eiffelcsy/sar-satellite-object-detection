@@ -129,11 +129,67 @@ def mosaic_tiles(tiles, size):
     return canvas, boxes, labels
 
 
+def _inside_fraction(boxes, left, top, size):
+    """Fraction of each box's area inside the `size` x `size` window whose top-left corner is (left, top)."""
+    x1 = boxes[:, 0].clamp(min=left, max=left + size)
+    y1 = boxes[:, 1].clamp(min=top, max=top + size)
+    x2 = boxes[:, 2].clamp(min=left, max=left + size)
+    y2 = boxes[:, 3].clamp(min=top, max=top + size)
+    inter = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
+    area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    return inter / area.clamp(min=1e-6)
+
+
+def scale_jitter(image, boxes, labels, scale_range=(0.9, 1.1), size=512, min_inside=0.5):
+    """Resize by a scale near 1.0: shrinking pads the border (nothing is lost), enlarging crops.
+
+    On enlargement the crop window is the candidate that keeps the most boxes; a box left less than
+    `min_inside` of its area in the window is dropped rather than truncated.
+    """
+    scale = random.uniform(*scale_range)
+    extent = max(1, int(round(size * scale)))
+    if extent == size:
+        return image, boxes, labels
+    resized = F.interpolate(image.unsqueeze(0), size=(extent, extent), mode='bilinear', align_corners=False)[0]
+    boxes = boxes * scale
+    if extent < size:  # shrink: pad back to `size`, keeping every box and pixel
+        pad = (size - extent) // 2
+        canvas = image.new_zeros(image.shape)
+        canvas[:, pad:pad + extent, pad:pad + extent] = resized
+        return canvas, boxes + boxes.new_tensor([pad, pad, pad, pad]), labels
+    offsets = {(0, 0), (extent - size, extent - size)}
+    if len(boxes):  # candidate windows anchored on the boxes' centre and corners
+        cx = ((boxes[:, 0] + boxes[:, 2]) / 2).mean().item()
+        cy = ((boxes[:, 1] + boxes[:, 3]) / 2).mean().item()
+        offsets.add((int(cx - size / 2), int(cy - size / 2)))
+        for x1, y1, x2, y2 in boxes.tolist():
+            offsets |= {(int(x1), int(y1)), (int(x2) - size, int(y2) - size)}
+    candidates = [(min(max(x, 0), extent - size), min(max(y, 0), extent - size)) for x, y in offsets]
+    left, top = max(candidates, key=lambda o: _inside_fraction(boxes, o[0], o[1], size).ge(min_inside).sum())
+    keep = _inside_fraction(boxes, left, top, size) >= min_inside
+    cropped = resized[:, top:top + size, left:left + size]
+    moved = (boxes[keep] - boxes.new_tensor([left, top, left, top])).clamp(min=0, max=size)
+    return cropped, moved, labels[keep]
+
+
+def rotate90(image, boxes, k):
+    """Rotate a square [C, S, S] image and its XYXY boxes by k x 90 degrees (counter-clockwise), exactly.
+
+    torch.rot90 moves pixel (x, y) to (y, S - 1 - x), so a box edge at x maps to S - x: no interpolation and no
+    sub-pixel drift, unlike an affine rotation about the image centre.
+    """
+    size = image.shape[-1]
+    for _ in range(k % 4):
+        image = torch.rot90(image, 1, dims=(1, 2))
+        boxes = torch.stack([boxes[:, 1], size - boxes[:, 2], boxes[:, 3], size - boxes[:, 0]], dim=1)
+    return image, boxes
+
+
 def drop_degenerate_boxes(boxes, labels):
     """Drop zero-area boxes: `box_iou`/`generalized_box_iou` return NaN for them, which poisons the training loss.
 
-    Geometric augmentation (a center crop after scale jitter) can clip a box down to a line; such boxes carry no
-    information and must not reach the matcher or the GIoU term.
+    A geometric augmentation (crop or resize) can clip a box down to a line; such boxes carry no information and
+    must not reach the matcher or the GIoU term.
     """
     if len(boxes) == 0:
         return boxes, labels
@@ -141,19 +197,27 @@ def drop_degenerate_boxes(boxes, labels):
     return boxes[keep], labels[keep]
 
 
-def copy_paste(image, boxes, labels, donor_image, donor_boxes, donor_labels, max_iou=0.3, max_objects=3):
-    """Paste up to `max_objects` objects cropped from a donor image, avoiding overlaps with existing boxes."""
+def copy_paste(image, boxes, labels, donor_image, donor_boxes, donor_labels, max_iou=0.3, max_objects=3,
+               margin=0):
+    """Paste up to `max_objects` objects cropped from a donor image, avoiding overlaps with existing boxes.
+
+    The crop takes a `margin`-pixel border around the box, so the object's SAR signature (shadow, smearing,
+    wakes) is not cut off; the pasted box itself still hugs the object.
+    """
     _, height, width = image.shape
     for j in torch.randperm(len(donor_boxes))[:max_objects]:
         x1, y1, x2, y2 = donor_boxes[j].round().long().tolist()
         x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
-        crop = donor_image[:, y1:y2, x1:x2]
-        ch, cw = crop.shape[1], crop.shape[2]
-        if ch < 2 or cw < 2:
+        if x2 - x1 < 2 or y2 - y1 < 2:
             continue
+        cx1, cy1 = max(0, x1 - margin), max(0, y1 - margin)
+        cx2, cy2 = min(width, x2 + margin), min(height, y2 + margin)
+        crop = donor_image[:, cy1:cy2, cx1:cx2]
+        ch, cw = crop.shape[1], crop.shape[2]
         px = int(torch.randint(0, width - cw + 1, (1,))) if width > cw else 0
         py = int(torch.randint(0, height - ch + 1, (1,))) if height > ch else 0
-        new_box = boxes.new_tensor([px, py, px + cw, py + ch])
+        new_box = boxes.new_tensor([px + (x1 - cx1), py + (y1 - cy1),
+                                    px + (x2 - cx1), py + (y2 - cy1)])
         if _max_iou(new_box, boxes) > max_iou:
             continue
         image[:, py:py + ch, px:px + cw] = crop
@@ -169,14 +233,16 @@ class SARMultiTask(Dataset):
 
     def __init__(self, root, split, train=False, size=512, limit=None, val_fraction=0.1, seed=0,
                  preprocess=None, cache_dir=None, mosaic=0.0, copy_paste=0.0, copy_paste_max_iou=0.3,
-                 scale_jitter=None, rotation90=False, preprocess_after_aug=False):
+                 copy_paste_margin=0, scale_jitter=None, rotation90=False):
         self.root = Path(root)
         self.train = train
         self.size = size
-        self.preprocess_after_aug = preprocess_after_aug  # False (default): filter before augmentation and cache
         self.mosaic = mosaic  # probability of building a 2x2 mosaic from four images (train only)
         self.copy_paste = copy_paste  # probability of pasting objects from another image (train only)
         self.copy_paste_max_iou = copy_paste_max_iou
+        self.copy_paste_margin = copy_paste_margin  # px of context pasted around each object
+        self.rotation90 = rotation90  # random 0/90/180/270-degree rotation (train only)
+        self.scale_jitter = scale_jitter  # (lo, hi) scale range applied after the resize, or None/False
         self.image_dir = None
         train_dir = _course_train_dir(self.root) if split in ('train', 'val') else None
         if train_dir is not None:  # course data: hold out part of train for local validation
@@ -201,23 +267,14 @@ class SARMultiTask(Dataset):
         for ann in coco['annotations']:
             self.annotations[ann['image_id']].append(ann)
         flips = [v2.RandomHorizontalFlip(), v2.RandomVerticalFlip()] if train else []
-        if train and scale_jitter:  # 0.8-1.25 scale jitter: protects small-object scale better than a halving mosaic
-            resize = [v2.ScaleJitter((size, size), scale_range=tuple(scale_jitter)), v2.CenterCrop((size, size))]
-        else:
-            resize = [v2.Resize((size, size))]  # stretches non-square images; boxes are scaled with the pixels
-        rotations = []
-        if train and rotation90:  # 0/90/180/270, free for SAR (no canonical orientation)
-            rotations = [v2.RandomChoice([v2.RandomRotation((d, d)) for d in (0, 90, 180, 270)])]
         steps = [
             v2.ToImage(),
             v2.ConvertBoundingBoxFormat('XYXY'),  # COCO [x, y, w, h] -> [x1, y1, x2, y2]
-            *resize,
-            *rotations,
+            v2.Resize((size, size)),  # stretches non-square images; boxes are scaled with the pixels
             *flips,  # overhead imagery has no canonical "up"
             v2.ToDtype(torch.float32, scale=True),
         ]
         # Pre-processing already returns a [0, 1] image, so the raw-pixel MEAN/STD no longer apply.
-        # With pre-processing the geometry stops here; the filter channels are computed after augmentation.
         if preprocess is None:
             steps.append(v2.Normalize([MEAN], [STD]))
         self.transform = v2.Compose(steps)
@@ -236,11 +293,6 @@ class SARMultiTask(Dataset):
         """Despeckle/normalise the image, reusing an on-disk cache when `cache_dir` is set."""
         return preprocess_image(image, self._image_path(file_name), self.preprocess, self.cache_dir)
 
-    def _preprocess_tensor(self, image):
-        """Run the filter pre-processing on an already-augmented [1, H, W] tensor in [0, 1]."""
-        arr = image[0].numpy() if image.shape[0] == 1 else image.numpy()
-        return _as_image_tensor(self.preprocess(arr))
-
     def _load_transformed(self, i):
         """Load image `i`, run the base transform (resize/flips/normalise) and return image, boxes, labels.
 
@@ -254,12 +306,15 @@ class SARMultiTask(Dataset):
         boxes = tv_tensors.BoundingBoxes([a['bbox'] for a in anns], format='XYWH', canvas_size=orig_size,
                                          dtype=torch.float32)  # integer boxes would be truncated by Resize
         image = Image.open(self._image_path(row['file_name'])).convert('L')  # PIL: torchvision.io cannot read .bmp
-        # Eval always caches; training caches too unless filters are computed after the geometry.
-        if self.preprocess is not None and (not self.train or not self.preprocess_after_aug):
+        if self.preprocess is not None:  # filter channels are computed (and cached) before any augmentation
             image = self._preprocessed(image, row['file_name'])
         image, boxes = self.transform(image, boxes)
         boxes = boxes.as_subclass(torch.Tensor).float()
         labels = torch.tensor([a['category_id'] for a in anns])
+        if self.train and self.rotation90:  # 0/90/180/270, free for SAR (flips already break the look direction)
+            image, boxes = rotate90(image, boxes, random.randrange(4))
+        if self.train and self.scale_jitter:  # gentle, centred on 1.0; pads when shrinking, crops when enlarging
+            image, boxes, labels = scale_jitter(image, boxes, labels, tuple(self.scale_jitter), self.size)
         return image, boxes, labels, info['id'], orig_size
 
     def __getitem__(self, i):
@@ -271,11 +326,9 @@ class SARMultiTask(Dataset):
         if self.train and self.copy_paste and random.random() < self.copy_paste:  # paste donor objects
             donor = self._load_transformed(random.randrange(len(self)))
             image, boxes, labels = copy_paste(image, boxes, labels, donor[0], donor[1], donor[2],
-                                              self.copy_paste_max_iou)
+                                              self.copy_paste_max_iou, margin=self.copy_paste_margin)
         if self.train:  # zero-area boxes (from the crop) make GIoU/box_iou NaN, so drop them before the model
             boxes, labels = drop_degenerate_boxes(boxes, labels)
-        if self.train and self.preprocess is not None and self.preprocess_after_aug:
-            image = self._preprocess_tensor(image)  # filter channels after geometry (no cache while training)
         target = {'boxes': boxes, 'labels': labels, 'image_id': image_id, 'orig_size': orig_size}
         return image, self.rows[i]['label'], target
 
