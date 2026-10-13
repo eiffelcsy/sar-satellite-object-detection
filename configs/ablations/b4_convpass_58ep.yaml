@@ -1,0 +1,6 @@
+# Control: B4 trained for 58 epochs (no warm start), the same compute as C1a/C1b. C1a - this = the warm start's
+# own effect; this - b4_convpass = the effect of 10 more epochs.
+base: b4_convpass.yaml
+name: giou_b4_convpass_58ep
+train:
+  epochs: 58

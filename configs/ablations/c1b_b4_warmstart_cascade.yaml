@@ -1,0 +1,13 @@
+# C1b: C1a + A6's Cascade R-CNN head (three per-stage 256-wide heads, IoU 0.4/0.5/0.6, stage weights 0.5/0.25/0.25,
+# GIoU on). A6 lost to A4 on the local held-out split but won on the Codabench val split: compare with C1a on both.
+base: c1a_b4_warmstart.yaml
+name: giou_c1b_b4_warmstart_cascade
+model:
+  head: cascade
+  head_params:
+    num_stages: 3
+    share_head: false
+    hidden_dim: 256
+    fg_iou_thresholds: [0.4, 0.5, 0.6]
+    bg_iou_threshold: 0.4
+    stage_loss_weights: [0.5, 0.25, 0.25]

@@ -1,0 +1,12 @@
+# C2: B3 and B4 mixed. A1 + DoRA rank 64 (alpha 64, so alpha / rank stays 1) in every block + a 192-wide Convpass
+# adapter after every block: wider per-token updates and spatial mixing together, within the 40 M budget.
+# 48 epochs, no warm start: compare with b3_rank_uniform and b4_convpass.
+base: a1_input.yaml
+name: giou_c2_rank64_convpass192
+peft:
+  params:
+    rank: 64
+    alpha: 64
+  conv_adapters:
+    layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    dim: 192

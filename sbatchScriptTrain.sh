@@ -67,6 +67,15 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # B: capacity, each on top of a1 and filling the 40 M trainable budget a different way (compare with a1):
 # srun --gres=gpu:1 python train.py --config configs/ablations/b1_full_blocks.yaml  --data "$DATA" --wandb --workers 4
 # srun --gres=gpu:1 python train.py --config configs/ablations/b2_rank_early.yaml   --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/b3_rank_uniform.yaml --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/b4_convpass.yaml     --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/b3_rank_uniform.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/b4_convpass.yaml     --data "$DATA" --wandb --workers 4
 # srun --gres=gpu:1 python train.py --config configs/ablations/b5_hybrid.yaml       --data "$DATA" --wandb --workers 4
+
+# C: combinations of the winners (b4 Convpass; a4 warm start vs a6 warm start + Cascade) and their control.
+# Same --workers 4 as the a*/b* runs. Read them as: c1a vs b4_convpass_58ep = the warm start's own effect (same 58
+# epochs); c1b vs c1a = Cascade on top (check both the local held-out and Codabench val); c2 vs b3 / b4 = mixing
+# DoRA rank and Convpass. Roughly 2-2.5 h each (58-epoch runs the longest), ~9-10 h for all four in sequence.
+srun --gres=gpu:1 python train.py --config configs/ablations/c1a_b4_warmstart.yaml         --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/c1b_b4_warmstart_cascade.yaml --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/b4_convpass_58ep.yaml         --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/c2_rank64_convpass192.yaml    --data "$DATA" --wandb --workers 4

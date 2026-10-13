@@ -1,0 +1,7 @@
+# C1a: B4 (Convpass after every block) + A4's warm start (10 head-only epochs, backbone frozen, lr 2e-4, then the
+# usual 48). 58 epochs in total: compare with b4_convpass_58ep (same epochs, no warm start), not with b4.
+base: b4_convpass.yaml
+name: giou_c1a_b4_warmstart
+train:
+  stage_a_epochs: 10
+  stage_a_lr: 2.0e-4
