@@ -52,8 +52,8 @@ source .venv/bin/activate
 # Submit your job to the cluster.
 ROOT=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data
 DATA="$ROOT/train"
-CONFIG=configs/dinov3_dora.yaml
-MODEL=runs/dinov3_dora/model.pt
+CONFIG=configs/ablations/a4_warmstart.yaml
+MODEL=runs/giou_a4_warmstart/model.pt
 
 # Evaluation / submission (no training; reuses the trained checkpoint):
 # 1) Held-out train split (labelled): val metrics + submission_val.zip
@@ -62,7 +62,7 @@ MODEL=runs/dinov3_dora/model.pt
 
 # 2) Official val split (unlabelled val/images.json): predictions only -> submission_val.zip
 srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
-  --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val \
+  --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
   --preprocess-cache preprocess_cache/val
 
 # 3) Official test split (unlabelled test/images.json): predictions only -> submission_test.zip
