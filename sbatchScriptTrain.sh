@@ -75,7 +75,13 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # Same --workers 4 as the a*/b* runs. Read them as: c1a vs b4_convpass_58ep = the warm start's own effect (same 58
 # epochs); c1b vs c1a = Cascade on top (check both the local held-out and Codabench val); c2 vs b3 / b4 = mixing
 # DoRA rank and Convpass. Roughly 2-2.5 h each (58-epoch runs the longest), ~9-10 h for all four in sequence.
-srun --gres=gpu:1 python train.py --config configs/ablations/c1a_b4_warmstart.yaml         --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/c1b_b4_warmstart_cascade.yaml --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/b4_convpass_58ep.yaml         --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/c2_rank64_convpass192.yaml    --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/c1a_b4_warmstart.yaml         --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/c1b_b4_warmstart_cascade.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/b4_convpass_58ep.yaml         --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/c2_rank64_convpass192.yaml    --data "$DATA" --wandb --workers 4
+
+# D: longer training of the best model (b4_convpass_58ep: Codabench 19.16), with and without the WST stem.
+# Compare b4_convpass_72ep with b4_convpass_58ep (does a longer schedule keep paying?) and b4_wst_72ep with
+# b4_convpass_72ep (does WST complement Convpass?). Roughly 3 h each, ~6 h for both in sequence.
+srun --gres=gpu:1 python train.py --config configs/ablations/b4_convpass_72ep.yaml --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/b4_wst_72ep.yaml      --data "$DATA" --wandb --workers 4

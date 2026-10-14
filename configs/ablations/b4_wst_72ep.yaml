@@ -1,0 +1,7 @@
+# B4 at 72 epochs + A3's wavelet scattering stem (J=2, L=8 -> 81 channels at stride 4, added to P2; +0.6 M).
+# Convpass mixes patches inside the backbone at stride 16; WST adds noise-robust detail at stride 4, where the
+# smallest objects are detected. Compare with b4_convpass_72ep. Needs kymatio.
+base: b4_convpass_72ep.yaml
+name: giou_b4_wst_72ep
+model:
+  wst_stem: true

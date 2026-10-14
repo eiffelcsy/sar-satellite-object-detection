@@ -109,6 +109,8 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `c1a_b4_warmstart` | b4 + 10 head-only epochs (a4) | b4 | 123.09 | 38.02 |
 | `c1b_b4_warmstart_cascade` | c1a + Cascade R-CNN (a6) | c1a | 119.01 | 33.94 |
 | `c2_rank64_convpass192` | DoRA rank 64 + 192-wide Convpass in every block | a1 | 124.12 | 39.05 |
+| `b4_convpass_72ep` | b4 trained 72 epochs | b4 | 123.09 | 38.02 |
+| `b4_wst_72ep` | b4_convpass_72ep + WST stem (a3) | b4_72ep | 123.70 | 38.63 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.

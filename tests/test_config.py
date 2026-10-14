@@ -44,6 +44,8 @@ def test_base_is_the_dora_giou_recipe():
     ('c1a_b4_warmstart', 'b4_convpass', {'stage_a_epochs'}),
     ('c1b_b4_warmstart_cascade', 'c1a_b4_warmstart', {'head', 'head_params'}),
     ('c2_rank64_convpass192', 'a1_input', {'peft_kwargs', 'conv_adapters'}),
+    ('b4_convpass_72ep', 'b4_convpass', {'epochs'}),
+    ('b4_wst_72ep', 'b4_convpass_72ep', {'wst_stem'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'

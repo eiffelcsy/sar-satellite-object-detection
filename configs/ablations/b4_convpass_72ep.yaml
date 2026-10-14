@@ -1,0 +1,6 @@
+# B4 trained for 72 epochs (no warm start). 48 -> 58 epochs gave +1.7 mAP locally and the best Codabench score
+# (19.16); this tests whether a longer cosine schedule keeps paying. Compare with b4_convpass_58ep.
+base: b4_convpass.yaml
+name: giou_b4_convpass_72ep
+train:
+  epochs: 72
