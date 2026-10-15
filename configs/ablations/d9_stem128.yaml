@@ -1,0 +1,9 @@
+# D9 (detector): a stronger stride-4 pixel path. The P2 conv stem (the only pixel-level input to the level that
+# detects the smallest objects) widened from 64 to 128 channels, plus one extra 3x3 conv at stride 4 (~0.1 M -> ~1 M).
+# Compare with b4_convpass_72ep.
+base: b4_convpass_72ep.yaml
+name: giou_d9_stem128
+model:
+  detail_stem_params:
+    channels: 128
+    extra_convs: 1

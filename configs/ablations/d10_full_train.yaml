@@ -1,0 +1,7 @@
+# D10 (final model): train on all of train (val_fraction 0, ~11% more images), no held-out validation. A template:
+# point `base` at the winning recipe once the d* results are in (now: b4_convpass_72ep). The run writes model.pt
+# only; make the Codabench zips with --load ... --predict val/images.json (see README 2.4).
+base: b4_convpass_72ep.yaml
+name: giou_d10_full_train
+data:
+  val_fraction: 0

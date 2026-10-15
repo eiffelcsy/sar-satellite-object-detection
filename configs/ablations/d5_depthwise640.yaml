@@ -1,0 +1,9 @@
+# D5 (Convpass variant): depthwise 3x3 conv instead of the dense one (which is 60% of each adapter), so the bottleneck
+# widens from 256 to 640 for about the same parameters. Wider per-token adaptation, near-free spatial mixing.
+# Compare with b4_convpass_72ep.
+base: b4_convpass_72ep.yaml
+name: giou_d5_depthwise640
+peft:
+  conv_adapters:
+    kernel: depthwise
+    dim: 640

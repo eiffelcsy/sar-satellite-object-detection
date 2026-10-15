@@ -17,7 +17,9 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
       targets: [attn, mlp]         # q/k/v/o_proj and up/down_proj of every block
       rank_overrides: {0: 192}     # per-block DoRA rank (alpha / rank is kept)
       full_blocks: [0, 1]          # blocks trained entirely (no DoRA there), at train.unfrozen_lr
-      conv_adapters: {layers: [0, 1, 2, 3], dim: 128}   # Convpass adapters after these blocks
+      conv_adapters: {layers: [0, 1, 2, 3], dim: 128, kernel: dense, placement: sequential}
+                                   # Convpass adapters on these blocks; kernel dense | depthwise | multiscale,
+                                   # placement sequential (after the block) | parallel (beside it)
     loss:                          # optional per-term weights on top of the summed loss (default 1.0 each)
       classification: 1.0
       loss_box_reg: 2.0            # Faster R-CNN RoI box loss (loss_rpn_box_reg for the RPN)
@@ -31,13 +33,24 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
       roi_output_size: 7           # RoIAlign output_size
       head: cascade                # standard (default) | cascade RoI head
       head_params: {num_stages: 3, share_head: false, hidden_dim: 256, fg_iou_thresholds: [0.4, 0.5, 0.6]}
+                                   # both heads: box_head mlp (default) | conv (+ num_convs, conv_dim, reduce)
+      detail_stem_params: {channels: 64, extra_convs: 0}   # P2 conv stem width / extra stride-4 3x3 convs
+      rpn_fg_iou_thresh: 0.7       # RPN anchor positive / negative IoU thresholds
+      rpn_bg_iou_thresh: 0.3
+      score_thresh: 0.05           # inference post-processing only (sweep it with sweep_postprocess.py)
+      nms_thresh: 0.5
+      detections_per_img: 100
     train: {epochs: 48, stage_a_epochs: 0, stage_a_lr: 2.0e-4, batch_size: 16, lr: 1.0e-4,
-            backbone_lr: null, unfrozen_lr: 2.0e-5, weight_decay: 0.05, eval_every: 4, workers: 8, seed: 0}
+            backbone_lr: null, unfrozen_lr: 2.0e-5, ema_decay: 0.0, weight_decay: 0.05, eval_every: 4,
+            workers: 8, seed: 0}
             # lr: heads; backbone_lr: new backbone parameters (DoRA, Convpass; default lr);
             # unfrozen_lr: pretrained weights made trainable (patch embedding, full_blocks).
             # stage_a_epochs: first N epochs freeze the backbone and train the heads only at stage_a_lr.
+            # ema_decay: > 0 keeps an exponential moving average of the trainable weights (e.g. 0.9998), used for
+            # validation and saved as model.pt.
     data: {root: null, val_fraction: 0.1, limit: null, mosaic: 0.0, copy_paste: 0.0, copy_paste_margin: 0,
            scale_jitter: null, rotation90: false}
+          # val_fraction: 0 trains on all of train (no held-out validation; for the final model)
     preprocess: {pseudo_rgb: false, mode: despeckle, edge: sobel, despeckle: true, clip_percentile: 0.5,
                  cache: null, bm3d_sigma: null, bm3d_profile: np, bm3d_threads: 1}
                  # pseudo_rgb: 1-channel SAR -> 3 channels; mode: despeckle (amp+base+edge),
@@ -66,6 +79,12 @@ DEFAULTS = {
     'roi_output_size': 7,
     'head': 'standard',
     'head_params': {},
+    'detail_stem_params': {},
+    'rpn_fg_iou_thresh': 0.7,
+    'rpn_bg_iou_thresh': 0.3,
+    'score_thresh': 0.05,
+    'nms_thresh': 0.5,
+    'detections_per_img': 100,
     'name': None,
     'epochs': 24,
     'stage_a_epochs': 0,
@@ -74,6 +93,7 @@ DEFAULTS = {
     'lr': 1e-4,
     'backbone_lr': None,
     'unfrozen_lr': 2e-5,
+    'ema_decay': 0.0,
     'weight_decay': 0.05,
     'eval_every': 4,
     'workers': 8,
@@ -102,9 +122,10 @@ DEFAULTS = {
 }
 
 _MODEL_KEYS = ('detail_stem', 'fusion_layers', 'input_adapter', 'wst_stem', 'wst_params', 'giou_weight',
-               'roi_sampling_ratio', 'roi_output_size', 'head', 'head_params')
+               'roi_sampling_ratio', 'roi_output_size', 'head', 'head_params', 'detail_stem_params',
+               'rpn_fg_iou_thresh', 'rpn_bg_iou_thresh', 'score_thresh', 'nms_thresh', 'detections_per_img')
 _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'unfrozen_lr',
-               'weight_decay', 'eval_every', 'workers', 'seed')
+               'ema_decay', 'weight_decay', 'eval_every', 'workers', 'seed')
 _DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'limit': 'limit', 'mosaic': 'mosaic',
               'copy_paste': 'copy_paste', 'copy_paste_margin': 'copy_paste_margin',
               'scale_jitter': 'scale_jitter', 'rotation90': 'rotation90'}

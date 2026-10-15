@@ -18,7 +18,7 @@ from torchvision.ops import MultiScaleRoIAlign
 
 from .adapters import adapt_backbone
 from .backbones import DINOv3
-from .heads import CascadeRoIHeads, DetRoIHeads
+from .heads import CascadeRoIHeads, ConvFCBoxHead, DetRoIHeads
 
 # Competition limits (Codabench terms): every parameter counts towards the total, frozen ones included.
 MAX_TOTAL_PARAMETERS = 130_000_000
@@ -53,16 +53,21 @@ class ConvStem(nn.Module):
 
     The single-scale ViT only sees 16 px patches, so the neck's stride-4 level is upsampled and has no genuine
     high-frequency content. The stem reads the 512 px input directly and produces stride-4 features that are
-    added to P2, which is what tiny SAR objects need.
+    added to P2, which is what tiny SAR objects need. `channels` sets its width (the second conv has twice as
+    many); `extra_convs` adds that many 3x3 convs at stride 4 (on `out_channels`) for a deeper stride-4 path.
     """
 
-    def __init__(self, in_chans=3, channels=64, out_channels=256):
+    def __init__(self, in_chans=3, channels=64, out_channels=256, extra_convs=0):
         super().__init__()
-        self.stem = nn.Sequential(
+        layers = [
             nn.Conv2d(in_chans, channels, 3, stride=2, padding=1, bias=False), nn.GroupNorm(8, channels), nn.GELU(),
             nn.Conv2d(channels, channels * 2, 3, stride=2, padding=1, bias=False),
             nn.GroupNorm(8, channels * 2), nn.GELU(),
-            nn.Conv2d(channels * 2, out_channels, 1, bias=False), nn.GroupNorm(32, out_channels))
+            nn.Conv2d(channels * 2, out_channels, 1, bias=False), nn.GroupNorm(32, out_channels)]
+        for _ in range(extra_convs):  # appended, so checkpoints without extra convs keep their layer indices
+            layers += [nn.GELU(), nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
+                       nn.GroupNorm(32, out_channels)]
+        self.stem = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.stem(x)
@@ -138,12 +143,13 @@ class MultiTaskModel(nn.Module):
 
     def __init__(self, backbone, num_classes=9, detail_stem=False, fusion_layers=None, giou_weight=0.0,
                  roi_sampling_ratio=2, roi_output_size=7, input_adapter=False, wst_stem=False, wst_params=None,
-                 head='standard', head_params=None):
+                 head='standard', head_params=None, detail_stem_params=None, rpn_fg_iou_thresh=0.7,
+                 rpn_bg_iou_thresh=0.3, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100):
         super().__init__()
         self.backbone = backbone
         self.cls_head = nn.Sequential(nn.LayerNorm(backbone.embed_dim), nn.Linear(backbone.embed_dim, num_classes))
         self.neck = SimpleFeaturePyramid(backbone.embed_dim)
-        self.detail_stem = ConvStem(backbone.in_chans) if detail_stem else None  # real detail for P2
+        self.detail_stem = ConvStem(backbone.in_chans, **(detail_stem_params or {})) if detail_stem else None
         self.input_adapter = InputAdapter(backbone.in_chans) if input_adapter else None
         self.wst_stem = WSTStem(**(wst_params or {})) if wst_stem else None
         if input_adapter and hasattr(backbone, 'unfreeze_patch_embed'):  # adapt_backbone froze it; re-enable it
@@ -155,43 +161,58 @@ class MultiTaskModel(nn.Module):
             self.fusion_layers = sorted(i % blocks for i in fusion_layers)
             self.fusion = LayerFusion(len(self.fusion_layers))
         # Small objects (median ~16 px at 512 px, 99 % below ~240 px): two anchor scales per octave, from 8 px at
-        # stride 4 up to 181 px at stride 64, times 3 aspect ratios = 6 anchors per location.
+        # stride 4 up to 181 px at stride 64, times 3 aspect ratios = 6 anchors per location. An anchor is an RPN
+        # positive at IoU >= rpn_fg_iou_thresh (a few px of offset push a 6-15 px box below 0.7; every GT still keeps
+        # its best anchor) and a negative below rpn_bg_iou_thresh.
         anchors = AnchorGenerator(((8, 11), (16, 23), (32, 45), (64, 91), (128, 181)), ((0.5, 1.0, 2.0),) * 5)
         self.rpn = RegionProposalNetwork(
-            anchors, RPNHead(256, 6), fg_iou_thresh=0.7, bg_iou_thresh=0.3, batch_size_per_image=256,
+            anchors, RPNHead(256, 6), fg_iou_thresh=rpn_fg_iou_thresh, bg_iou_thresh=rpn_bg_iou_thresh,
+            batch_size_per_image=256,
             positive_fraction=0.5, pre_nms_top_n=dict(training=2000, testing=2000),
             post_nms_top_n=dict(training=2000, testing=2000), nms_thresh=0.7)
         roi_pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=roi_output_size,
                                       sampling_ratio=roi_sampling_ratio)
-        self.roi_heads = self._build_roi_heads(roi_pool, roi_output_size ** 2, num_classes, head,
-                                               head_params or {}, giou_weight)
+        self.roi_heads = self._build_roi_heads(roi_pool, roi_output_size, num_classes, head, head_params or {},
+                                               giou_weight, score_thresh, nms_thresh, detections_per_img)
 
     @staticmethod
-    def _build_roi_heads(roi_pool, cells, num_classes, head, params, giou_weight):
-        """`standard`: torchvision's 2-layer MLP head (hidden 1024). `cascade`: Cascade R-CNN with
-        `head_params` num_stages (3), share_head (true), hidden_dim (1024), fg_iou_thresholds (0.5/0.6/...),
-        bg_iou_threshold (0.5) and stage_loss_weights (all 1.0)."""
+    def _build_roi_heads(roi_pool, resolution, num_classes, head, params, giou_weight, score_thresh, nms_thresh,
+                         detections_per_img):
+        """`standard`: one Faster R-CNN RoI head. `cascade`: Cascade R-CNN with `head_params` num_stages (3),
+        share_head (true), fg_iou_thresholds (0.5/0.6/...), bg_iou_threshold (0.5) and stage_loss_weights (1.0).
+
+        Both take `head_params` box_head: `mlp` (torchvision's two fc layers of width hidden_dim, default 1024) or
+        `conv` (ConvFCBoxHead: num_convs 3x3 convs, a 1x1 down to `reduce` channels, one fc of width hidden_dim).
+        score_thresh / nms_thresh / detections_per_img are the inference post-processing (no effect on training).
+        """
         hidden = params.get('hidden_dim', 1024)
+        post = dict(score_thresh=score_thresh, nms_thresh=nms_thresh, detections_per_img=detections_per_img)
+
+        def box_head():
+            if params.get('box_head', 'mlp') == 'mlp':
+                return TwoMLPHead(256 * resolution ** 2, hidden)
+            if params['box_head'] == 'conv':
+                keys = ('num_convs', 'conv_dim', 'reduce')
+                return ConvFCBoxHead(256, resolution, fc_dim=hidden, **{k: params[k] for k in keys if k in params})
+            raise ValueError(f"unknown box_head '{params['box_head']}'; available: mlp, conv")
+
         if head == 'standard':
             return DetRoIHeads(
-                roi_pool, TwoMLPHead(256 * cells, hidden), FastRCNNPredictor(hidden, num_classes + 1),
+                roi_pool, box_head(), FastRCNNPredictor(hidden, num_classes + 1),
                 fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=512, positive_fraction=0.25,
-                bbox_reg_weights=None, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100,
-                giou_weight=giou_weight)
+                bbox_reg_weights=None, giou_weight=giou_weight, **post)
         if head == 'cascade':
             stages = params.get('num_stages', 3)
             # A per-stage head at hidden 1024 costs ~14 M each; hidden 256 per stage costs less than one 1024 head.
-            box_heads = [TwoMLPHead(256 * cells, hidden)
-                         for _ in range(1 if params.get('share_head', True) else stages)]
+            box_heads = [box_head() for _ in range(1 if params.get('share_head', True) else stages)]
             predictors = [FastRCNNPredictor(hidden, num_classes + 1) for _ in range(stages)]
             thresholds = tuple(params.get('fg_iou_thresholds', ())) \
                 or tuple(round(0.5 + 0.1 * i, 2) for i in range(stages))
             return CascadeRoIHeads(
                 roi_pool, box_heads, predictors, fg_iou_thresholds=thresholds,
                 bg_iou_threshold=params.get('bg_iou_threshold', 0.5), batch_size_per_image=512,
-                positive_fraction=0.25, bbox_reg_weights=None, score_thresh=0.05, nms_thresh=0.5,
-                detections_per_img=100, stage_loss_weights=params.get('stage_loss_weights'),
-                giou_weight=giou_weight)
+                positive_fraction=0.25, bbox_reg_weights=None, stage_loss_weights=params.get('stage_loss_weights'),
+                giou_weight=giou_weight, **post)
         raise ValueError(f"unknown head '{head}'; available: standard, cascade")
 
     def _backbone_tokens(self, images):
@@ -240,12 +261,16 @@ def build_model(args):
     conv = args.conv_adapters or {}
     adapt_backbone(backbone, targets=args.peft_targets, rank=args.peft_kwargs.get('rank', 32),
                    alpha=args.peft_kwargs.get('alpha', 32), rank_overrides=args.rank_overrides,
-                   full_blocks=args.full_blocks, conv_layers=conv.get('layers', ()), conv_dim=conv.get('dim', 128))
+                   full_blocks=args.full_blocks, conv_layers=conv.get('layers', ()), conv_dim=conv.get('dim', 128),
+                   conv_kernel=conv.get('kernel', 'dense'), conv_placement=conv.get('placement', 'sequential'))
     model = MultiTaskModel(backbone, detail_stem=args.detail_stem, fusion_layers=args.fusion_layers,
                            giou_weight=args.giou_weight, roi_sampling_ratio=args.roi_sampling_ratio,
                            roi_output_size=args.roi_output_size, input_adapter=args.input_adapter,
                            wst_stem=args.wst_stem, wst_params=args.wst_params, head=args.head,
-                           head_params=args.head_params)
+                           head_params=args.head_params, detail_stem_params=args.detail_stem_params,
+                           rpn_fg_iou_thresh=args.rpn_fg_iou_thresh, rpn_bg_iou_thresh=args.rpn_bg_iou_thresh,
+                           score_thresh=args.score_thresh, nms_thresh=args.nms_thresh,
+                           detections_per_img=args.detections_per_img)
     return model, pretrained_ids
 
 

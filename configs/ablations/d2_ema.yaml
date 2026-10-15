@@ -1,0 +1,7 @@
+# D2 (schedule): b4_convpass_72ep + an exponential moving average of the trainable weights (decay 0.9998, a ~5,000
+# step / ~10 epoch window), used for validation and saved as model.pt. One model, no extra parameters; confirm with
+# the Codabench terms that weight averaging is not counted as an ensemble. Compare with b4_convpass_72ep.
+base: b4_convpass_72ep.yaml
+name: giou_d2_ema
+train:
+  ema_decay: 0.9998

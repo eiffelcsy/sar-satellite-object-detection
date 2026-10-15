@@ -1,0 +1,6 @@
+# D8 (detector): RPN anchor positive IoU 0.7 -> 0.6. A few px of offset push a 6-15 px box below 0.7, so tiny objects
+# get few positive anchors (each GT still keeps its single best anchor). Compare with b4_convpass_72ep.
+base: b4_convpass_72ep.yaml
+name: giou_d8_rpn06
+model:
+  rpn_fg_iou_thresh: 0.6

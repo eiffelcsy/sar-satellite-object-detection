@@ -83,5 +83,24 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # D: longer training of the best model (b4_convpass_58ep: Codabench 19.16), with and without the WST stem.
 # Compare b4_convpass_72ep with b4_convpass_58ep (does a longer schedule keep paying?) and b4_wst_72ep with
 # b4_convpass_72ep (does WST complement Convpass?). Roughly 3 h each, ~6 h for both in sequence.
-srun --gres=gpu:1 python train.py --config configs/ablations/b4_convpass_72ep.yaml --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/b4_wst_72ep.yaml      --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/b4_convpass_72ep.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/b4_wst_72ep.yaml      --data "$DATA" --wandb --workers 4
+
+# E: one change each versus the current best, b4_convpass_72ep (Codabench 21.80). ~3 h per 72-epoch run (d1 ~4 h):
+# the nine runs (~28 h) exceed one 24 h job, so submit batch 1, then comment it out and uncomment batch 2.
+# Before (or alongside) these, run the post-processing sweep in sbatchScriptEval.sh on the existing 72-epoch model.
+# Batch 1 (schedule + head reallocation, ~16 h):
+srun --gres=gpu:1 python train.py --config configs/ablations/d1_96ep.yaml           --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/d2_ema.yaml            --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/d3_head512_cp352.yaml  --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/d4_convhead_cp352.yaml --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/d5_depthwise640.yaml   --data "$DATA" --wandb --workers 4
+# Batch 2 (Convpass variants + detector, ~12 h):
+# srun --gres=gpu:1 python train.py --config configs/ablations/d6_multiscale.yaml     --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d7_parallel.yaml       --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d8_rpn06.yaml          --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d9_stem128.yaml        --data "$DATA" --wandb --workers 4
+
+# F: the final model, after the d* results: point configs/ablations/d10_full_train.yaml's `base` at the winning
+# recipe, train on all of train (no held-out metrics), then make the Codabench zips with sbatchScriptEval.sh 2) / 3).
+# srun --gres=gpu:1 python train.py --config configs/ablations/d10_full_train.yaml    --data "$DATA" --wandb --workers 4

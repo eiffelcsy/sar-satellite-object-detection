@@ -1,0 +1,6 @@
+# D1 (schedule): the current best, b4_convpass_72ep, trained 96 epochs. 48 -> 58 -> 72 epochs kept paying (Codabench
+# 19.16 -> 21.80); check the held-out mAP curve for a peak before the end (overfitting). Compare with b4_convpass_72ep.
+base: b4_convpass_72ep.yaml
+name: giou_d1_96ep
+train:
+  epochs: 96

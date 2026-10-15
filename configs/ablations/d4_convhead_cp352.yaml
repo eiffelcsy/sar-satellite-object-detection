@@ -1,0 +1,14 @@
+# D4 (reallocation): replace the 2-fc box head (13.9 M) with a conv head: four 3x3 convs on the 7x7 RoI (keeping its
+# spatial layout, better for localization), a 1x1 down to 64 channels, one fc of 1024 (5.6 M). The freed ~8.3 M
+# goes to 352-wide Convpass adapters (from 256), as in d3. Compare with b4_convpass_72ep and d3.
+base: b4_convpass_72ep.yaml
+name: giou_d4_convhead_cp352
+model:
+  head_params:
+    box_head: conv
+    num_convs: 4
+    conv_dim: 256
+    reduce: 64
+peft:
+  conv_adapters:
+    dim: 352

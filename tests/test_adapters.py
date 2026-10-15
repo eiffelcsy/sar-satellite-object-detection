@@ -122,3 +122,40 @@ def test_conv_adapters_wrap_blocks_forward_their_arguments_and_start_as_noops():
     assert isinstance(backbone.blocks[0].block.attention.q_proj, DoRA)  # DoRA was applied before wrapping
     torch.testing.assert_close(backbone.double()(x), before, atol=1e-4, rtol=1e-4)  # 4 DoRA blocks of epsilon
     assert backbone.blocks[0].adapter.conv.weight.requires_grad
+
+
+@pytest.mark.parametrize('kernel', ['dense', 'depthwise', 'multiscale'])
+def test_convpass_kernels_start_as_noops_and_keep_the_token_shape(kernel):
+    adapter = ConvAdapter(dim=16, hidden=8, num_prefix_tokens=1, kernel=kernel).double()
+    x = tokens()
+    torch.testing.assert_close(adapter(x), x)
+    nn.init.normal_(adapter.up.weight, std=0.1)
+    assert adapter(x).shape == x.shape
+
+
+def test_depthwise_and_multiscale_convpass_parameter_counts():
+    dense = ConvAdapter(dim=16, hidden=8, kernel='dense').conv.weight.numel()
+    assert ConvAdapter(dim=16, hidden=8, kernel='depthwise').conv.weight.numel() == 8 * 9  # one 3x3 per channel
+    multi = ConvAdapter(dim=16, hidden=8, kernel='multiscale')
+    assert multi.conv.weight.numel() + multi.conv_dilated.weight.numel() == dense  # same budget as dense
+    assert multi.conv_dilated.dilation == (2, 2)
+
+
+def test_parallel_placement_reads_the_block_input():
+    block = _Block().double()
+    adapter = ConvAdapter(dim=16, hidden=8, num_prefix_tokens=1, norm=True).double()
+    nn.init.normal_(adapter.up.weight, std=0.1)
+    wrapped = AdaptedBlock(block, adapter, placement='parallel')
+    x = tokens()
+    expected = adapter(block(x), source=x)
+    torch.testing.assert_close(wrapped(x), expected)
+    assert not torch.allclose(wrapped(x), adapter(block(x)))  # differs from the sequential placement
+
+
+def test_adapt_backbone_passes_the_convpass_options():
+    backbone = _Backbone()
+    adapt_backbone(backbone, rank=4, alpha=4, conv_layers=[1], conv_dim=8, conv_kernel='depthwise',
+                   conv_placement='parallel')
+    block = backbone.blocks[1]
+    assert block.placement == 'parallel' and block.adapter.kernel == 'depthwise'
+    assert block.adapter.norm is not None  # the parallel adapter normalizes the block input

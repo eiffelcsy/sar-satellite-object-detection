@@ -1,0 +1,8 @@
+# D7 (Convpass variant): parallel placement, as in the Convpass paper: y = block(x) + adapter(LayerNorm(x)), the
+# adapter beside attention and MLP instead of after the block (+1.5 k LayerNorm parameters per block).
+# Compare with b4_convpass_72ep.
+base: b4_convpass_72ep.yaml
+name: giou_d7_parallel
+peft:
+  conv_adapters:
+    placement: parallel

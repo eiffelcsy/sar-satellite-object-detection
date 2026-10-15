@@ -9,6 +9,7 @@
 #                      trainable budget a different way (compare with a1)
 #   c1a/c1b, c2        combinations of the winners; b4_convpass_58ep is the 58-epoch control for c1a/c1b
 #   b4_*_72ep          longer training of the best model, with and without the WST stem
+#   d1-d9              one change each versus b4_convpass_72ep (d10_full_train, the final model, is run separately)
 set -e
 for config in \
   configs/dinov3_dora_giou.yaml \
@@ -18,6 +19,9 @@ for config in \
   configs/ablations/b4_convpass.yaml configs/ablations/b5_hybrid.yaml \
   configs/ablations/c1a_b4_warmstart.yaml configs/ablations/c1b_b4_warmstart_cascade.yaml \
   configs/ablations/b4_convpass_58ep.yaml configs/ablations/c2_rank64_convpass192.yaml \
-  configs/ablations/b4_convpass_72ep.yaml configs/ablations/b4_wst_72ep.yaml; do
+  configs/ablations/b4_convpass_72ep.yaml configs/ablations/b4_wst_72ep.yaml \
+  configs/ablations/d1_96ep.yaml configs/ablations/d2_ema.yaml configs/ablations/d3_head512_cp352.yaml \
+  configs/ablations/d4_convhead_cp352.yaml configs/ablations/d5_depthwise640.yaml configs/ablations/d6_multiscale.yaml \
+  configs/ablations/d7_parallel.yaml configs/ablations/d8_rpn06.yaml configs/ablations/d9_stem128.yaml; do
   python train.py --config "$config" "$@"
 done

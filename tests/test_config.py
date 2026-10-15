@@ -46,6 +46,16 @@ def test_base_is_the_dora_giou_recipe():
     ('c2_rank64_convpass192', 'a1_input', {'peft_kwargs', 'conv_adapters'}),
     ('b4_convpass_72ep', 'b4_convpass', {'epochs'}),
     ('b4_wst_72ep', 'b4_convpass_72ep', {'wst_stem'}),
+    ('d1_96ep', 'b4_convpass_72ep', {'epochs'}),
+    ('d2_ema', 'b4_convpass_72ep', {'ema_decay'}),
+    ('d3_head512_cp352', 'b4_convpass_72ep', {'head_params', 'conv_adapters'}),
+    ('d4_convhead_cp352', 'b4_convpass_72ep', {'head_params', 'conv_adapters'}),
+    ('d5_depthwise640', 'b4_convpass_72ep', {'conv_adapters'}),
+    ('d6_multiscale', 'b4_convpass_72ep', {'conv_adapters'}),
+    ('d7_parallel', 'b4_convpass_72ep', {'conv_adapters'}),
+    ('d8_rpn06', 'b4_convpass_72ep', {'rpn_fg_iou_thresh'}),
+    ('d9_stem128', 'b4_convpass_72ep', {'detail_stem_params'}),
+    ('d10_full_train', 'b4_convpass_72ep', {'val_fraction'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'

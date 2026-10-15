@@ -1,0 +1,8 @@
+# D6 (Convpass variant): the 3x3 conv split into two side by side, dilation 1 and 2 (128 channels each), so each
+# adapter sees 3x3 and 5x5 token neighbourhoods (48 and 80 px) for the same parameters. Larger local context for
+# harbours, bridges and airports. Compare with b4_convpass_72ep.
+base: b4_convpass_72ep.yaml
+name: giou_d6_multiscale
+peft:
+  conv_adapters:
+    kernel: multiscale

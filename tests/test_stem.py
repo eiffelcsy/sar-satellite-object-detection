@@ -3,6 +3,7 @@ import pytest
 import torch
 from torch import nn
 
+from sarbench.heads import ConvFCBoxHead
 from sarbench.model import ConvStem, InputAdapter, LayerFusion, MultiTaskModel, WSTStem
 
 
@@ -109,3 +110,36 @@ def test_model_with_input_adapter_and_wst_stem_runs():
     with torch.no_grad():
         logits, detections, losses = model(torch.randn(2, 3, 512, 512))
     assert logits.shape == (2, 9) and len(detections) == 2
+
+
+def test_detail_stem_width_and_extra_convs_keep_stride_four():
+    stem = ConvStem(in_chans=3, channels=32, out_channels=64, extra_convs=2)
+    assert stem(torch.randn(1, 3, 64, 64)).shape == (1, 64, 16, 16)
+    plain = ConvStem(in_chans=3, channels=32, out_channels=64)
+    assert set(plain.state_dict()) <= set(stem.state_dict())  # old checkpoints keep their layer names
+
+
+@pytest.mark.parametrize('head', ['standard', 'cascade'])
+def test_conv_box_head_trains_and_is_cheaper_than_the_mlp_head(head):
+    params = {**(CASCADE if head == 'cascade' else {}), 'box_head': 'conv', 'num_convs': 2, 'reduce': 16}
+    model = MultiTaskModel(_StubBackbone(), detail_stem=True, giou_weight=1.0, head=head, head_params=params)
+    assert any(isinstance(m, ConvFCBoxHead) for m in model.roi_heads.modules())
+    model.train()
+    _, _, losses = model(IMAGES, TARGETS)
+    sum(losses.values()).backward()
+    mlp = MultiTaskModel(_StubBackbone(), head='standard')
+    conv = MultiTaskModel(_StubBackbone(), head='standard', head_params={'box_head': 'conv'})
+    count = lambda m: sum(p.numel() for p in m.roi_heads.parameters())
+    assert count(conv) < count(mlp)
+
+
+def test_rpn_and_postprocess_settings_reach_the_detector():
+    model = MultiTaskModel(_StubBackbone(), rpn_fg_iou_thresh=0.6, rpn_bg_iou_thresh=0.25, score_thresh=0.001,
+                           nms_thresh=0.6, detections_per_img=50)
+    assert model.rpn.proposal_matcher.high_threshold == 0.6 and model.rpn.proposal_matcher.low_threshold == 0.25
+    heads = model.roi_heads
+    assert (heads.score_thresh, heads.nms_thresh, heads.detections_per_img) == (0.001, 0.6, 50)
+    model.eval()
+    with torch.no_grad():
+        _, detections, _ = model(IMAGES)
+    assert all(len(d['boxes']) <= 50 for d in detections)

@@ -111,6 +111,16 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `c2_rank64_convpass192` | DoRA rank 64 + 192-wide Convpass in every block | a1 | 124.12 | 39.05 |
 | `b4_convpass_72ep` | b4 trained 72 epochs | b4 | 123.09 | 38.02 |
 | `b4_wst_72ep` | b4_convpass_72ep + WST stem (a3) | b4_72ep | 123.70 | 38.63 |
+| `d1_96ep` | b4_72ep trained 96 epochs | b4_72ep | 123.09 | 38.02 |
+| `d2_ema` | EMA of the trainable weights (decay 0.9998), saved as the model | b4_72ep | 123.09 | 38.02 |
+| `d3_head512_cp352` | box head 1024 -> 512 wide, the freed budget to 352-wide Convpass | b4_72ep | 123.93 | 38.86 |
+| `d4_convhead_cp352` | 4-conv + 1-fc box head (5.6 M instead of 13.9 M) + 352-wide Convpass | b4_72ep | 122.86 | 37.79 |
+| `d5_depthwise640` | depthwise 3x3 Convpass, bottleneck 256 -> 640 | b4_72ep | 123.16 | 38.09 |
+| `d6_multiscale` | Convpass 3x3 split into dilation 1 + 2 halves | b4_72ep | 123.09 | 38.02 |
+| `d7_parallel` | Convpass beside the block (reads its LayerNorm'd input) | b4_72ep | 123.10 | 38.04 |
+| `d8_rpn06` | RPN positive anchor IoU 0.7 -> 0.6 | b4_72ep | 123.09 | 38.02 |
+| `d9_stem128` | P2 conv stem 64 -> 128 channels + one extra stride-4 3x3 conv | b4_72ep | 123.93 | 38.86 |
+| `d10_full_train` | final model: all of train (`val_fraction: 0`); rebase on the winner | b4_72ep | 123.09 | 38.02 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.
@@ -146,6 +156,11 @@ python train.py --config configs/dinov3_dora_giou.yaml \
 
 `--load` alone (without `--predict`) evaluates a saved model on the labelled split and writes its submission
 zips; `--predict` requires `--load` and skips metrics, so it needs no labels.
+
+**Post-processing.** `sweep_postprocess.py` (same flags as `train.py`, plus `--score-thresh` / `--nms-thresh` lists)
+re-scores a saved model on the held-out split for each score threshold x NMS IoU, without retraining, and writes
+`postprocess_sweep.json`. Apply the best setting to `--predict` with `--score-thresh` and `--nms-thresh`, or set
+`model.score_thresh` / `model.nms_thresh` in the config.
 
 
 ## 3. Baseline Results (for reference)

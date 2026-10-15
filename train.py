@@ -2,6 +2,7 @@
 Examples: python train.py --config configs/dinov3_dora_giou.yaml
           python train.py --config configs/ablations/b1_full_blocks.yaml"""
 import argparse
+import contextlib
 import json
 import math
 import time
@@ -15,6 +16,7 @@ from sarbench.channels import PseudoRGB
 from sarbench.config import DEFAULTS, load_config
 from sarbench.data import (SARImages, SARMultiTask, collate, collate_images, split_available,
                            to_original_xywh)
+from sarbench.ema import ModelEMA
 from sarbench.metrics import classification_metrics, detection_metrics
 from sarbench.model import MAX_TOTAL_PARAMETERS, MAX_TRAINABLE_PARAMETERS, build_model, parameter_counts
 
@@ -79,6 +81,11 @@ def parse_args(argv=None):
                         '(no metrics; the images have no labels)')
     p.add_argument('--predict-image-dir', type=Path, default=None,
                    help='directory holding the --predict images (default: the images.json directory, then its images/)')
+    p.add_argument('--score-thresh', type=float, default=cfg['score_thresh'],
+                   help='inference: drop detections scoring below this (see sweep_postprocess.py)')
+    p.add_argument('--nms-thresh', type=float, default=cfg['nms_thresh'], help='inference: per-class NMS IoU')
+    p.add_argument('--detections-per-img', type=int, default=cfg['detections_per_img'],
+                   help='inference: keep at most this many detections per image')
     p.add_argument('--predict-split', default='val',
                    help='name for the --predict output zip, submission_<predict-split>.zip')
     p.add_argument('--pseudo-rgb', action='store_true', default=cfg['pseudo_rgb'],
@@ -109,7 +116,8 @@ def parse_args(argv=None):
     # Backbone, adapter and loss options come from the config only.
     for key in ('pretrained', 'backbone_kwargs', 'peft_kwargs', 'peft_targets', 'rank_overrides', 'full_blocks',
                 'conv_adapters', 'giou_weight', 'roi_sampling_ratio', 'roi_output_size', 'wst_params',
-                'loss_weights', 'head', 'head_params'):
+                'loss_weights', 'head', 'head_params', 'detail_stem_params', 'rpn_fg_iou_thresh',
+                'rpn_bg_iou_thresh', 'ema_decay'):
         setattr(args, key, cfg[key])
     if args.predict is not None and args.load is None:
         p.error('--predict needs --load with the trained weights')
@@ -187,8 +195,9 @@ def weighted_total(losses, loss_weights):
     return sum(weights.get(name, 1.0) * value for name, value in losses.items())
 
 
-def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=None, loss_weights=None):
-    """One pass over the training set; the loss is classification plus the detector losses, weighted per term."""
+def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=None, loss_weights=None, ema=None):
+    """One pass over the training set; the loss is classification plus the detector losses, weighted per term.
+    With `ema`, the moving average is updated after every optimizer step."""
     model.train()
     start, seen = time.time(), 0
     for step, (images, labels, targets) in enumerate(loader, 1):
@@ -201,6 +210,8 @@ def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=Non
         loss.backward()
         optimizer.step()
         schedule.step()
+        if ema is not None:
+            ema.update()
         seen += len(images)
         if step % 50 == 0 or step == len(loader):
             parts = ' '.join(f'{name} {value.item():.3f}' for name, value in losses.items())
@@ -214,17 +225,20 @@ def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=Non
             start, seen = time.time(), 0
 
 
-def fit(model, train_loader, val_loader, epochs, optimizer, schedule, args, log_file, run, history, start_epoch=1):
+def fit(model, train_loader, val_loader, epochs, optimizer, schedule, args, log_file, run, history, start_epoch=1,
+        ema=None):
     """Train `epochs` epochs, validating every --eval-every and after the last one; appends to `history`.
 
+    Validation uses the EMA weights when `ema` is given, and is skipped without a `val_loader` (val_fraction 0).
     Returns the last validation's (detections, submission records), which the caller saves.
     """
     val_detections = val_sub = None
     for offset in range(epochs):
         epoch = start_epoch + offset
-        train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file, run, args.loss_weights)
-        if epoch % args.eval_every == 0 or offset == epochs - 1:
-            val, val_detections, val_sub = evaluate(model, val_loader, val_loader.dataset.instances_json)
+        train_one_epoch(model, train_loader, optimizer, schedule, epoch, log_file, run, args.loss_weights, ema)
+        if val_loader is not None and (epoch % args.eval_every == 0 or offset == epochs - 1):
+            with ema.averaged() if ema is not None else contextlib.nullcontext():
+                val, val_detections, val_sub = evaluate(model, val_loader, val_loader.dataset.instances_json)
             history.append({'epoch': epoch, **val})
             log(f'epoch {epoch} val: {headline(val)}', log_file)
             if run is not None:
@@ -309,7 +323,10 @@ def main():
     if args.predict is not None:  # submission-only: no labelled split is needed
         train_loader = val_loader = test_loader = None
     else:
-        train_loader, val_loader = make_loader(args, 'train'), make_loader(args, 'val')
+        train_loader = make_loader(args, 'train')
+        val_loader = make_loader(args, 'val') if args.val_fraction > 0 else None  # 0: train on all of train
+        if val_loader is None:
+            log('val_fraction 0: training on all of train, no held-out validation', log_file)
         test_loader = make_loader(args, 'test') if split_available(args.data, 'test') else None
         if test_loader is None:
             log('no labelled test split found; skipping test evaluation', log_file)
@@ -341,6 +358,8 @@ def main():
 
     # Inference-only: load saved weights and write submission zips for val (and test when labelled)
     if args.load is not None:
+        if val_loader is None:
+            raise SystemExit('--load evaluates on the held-out split; use val_fraction > 0, or --predict')
         model.load_state_dict(torch.load(args.load, map_location='cuda'))
         log(f'loaded weights from {args.load}', log_file)
         val, val_detections, val_sub = evaluate(model, val_loader, val_loader.dataset.instances_json)
@@ -385,9 +404,13 @@ def main():
     optimizer = torch.optim.AdamW([g for g in groups if g['params']], lr=args.lr, weight_decay=args.weight_decay)
     warmup, total = len(train_loader), args.epochs * len(train_loader)  # one epoch of warmup
     schedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: lr_factor(step, warmup, total))
+    ema = ModelEMA(model, args.ema_decay) if args.ema_decay > 0 else None  # over stage B's trainable weights
     val_detections, val_sub = fit(model, train_loader, val_loader, args.epochs, optimizer, schedule, args,
-                                  log_file, run, history, start_epoch=args.stage_a_epochs + 1)
+                                  log_file, run, history, start_epoch=args.stage_a_epochs + 1, ema=ema)
     train_hours = (time.time() - start) / 3600
+    if ema is not None:  # the averaged weights are the final model: test and model.pt use them
+        ema.copy_to_model()
+        log(f'EMA (decay {args.ema_decay}) weights copied into the model', log_file)
 
     # Evaluate on test, once (the course val/test labels are withheld, so test may be absent)
     if test_loader is not None:
@@ -406,12 +429,13 @@ def main():
     summary = {'args': vars(args), 'parameters': parameters, 'trainable_parameters': trainable,
                'parameter_breakdown': counts,
                'train_hours': train_hours, 'peak_gpu_memory_gb': peak_gb,
-               'val_history': history, 'val': history[-1], 'test': test}
+               'val_history': history, 'val': history[-1] if history else None, 'test': test}
     (run_dir / 'metrics.json').write_text(json.dumps(summary, indent=2, default=str))
-    (run_dir / 'predictions_val.json').write_text(json.dumps(val_detections))
+    if val_sub is not None:
+        (run_dir / 'predictions_val.json').write_text(json.dumps(val_detections))
+        write_submission(*val_sub, out=run_dir / 'submission_val.zip')
     if test_detections is not None:
         (run_dir / 'predictions_test.json').write_text(json.dumps(test_detections))
-    write_submission(*val_sub, out=run_dir / 'submission_val.zip')
     if test_sub is not None:
         write_submission(*test_sub, out=run_dir / 'submission_test.zip')
     torch.save(model.state_dict(), run_dir / 'model.pt')

@@ -1,0 +1,11 @@
+# D3 (reallocation): the box head's first fc layer (256*7*7 -> 1024) is 12.85 M, a third of the trainable budget.
+# Halving the head to 512 wide frees ~7.2 M, spent on 352-wide Convpass adapters (from 256). Asks whether backbone
+# capacity beats head capacity. Compare with b4_convpass_72ep (and d4, which frees it with a conv head instead).
+base: b4_convpass_72ep.yaml
+name: giou_d3_head512_cp352
+model:
+  head_params:
+    hidden_dim: 512
+peft:
+  conv_adapters:
+    dim: 352

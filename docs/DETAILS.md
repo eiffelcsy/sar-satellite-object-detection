@@ -46,6 +46,30 @@ refuses to train over 130 M total or 40 M trainable. `tests/test_config.py` chec
 **P2 stem** (`model.detail_stem`, on in the base). The ViT sees only 16 px patches, so the neck's stride-4 level is
 upsampled. A small conv stem (two stride-2 convs on the 512 px input, ~0.1 M) adds real stride-4 detail to P2.
 
+**Convpass variants** (`peft.conv_adapters`): `kernel` dense (one 3x3 conv on the `dim` channels, the default),
+depthwise (one 3x3 per channel, so `dim` can be much wider for the same parameters) or multiscale (two 3x3 convs of
+`dim` / 2 output channels side by side, dilation 1 and 2: 3x3 and 5x5 token context for the dense conv's parameters);
+`placement` sequential (after the block, the default) or parallel (`y = block(x) + adapter(LayerNorm(x))`, beside
+attention and MLP, as in the Convpass paper). Every variant starts as a no-op.
+
+**Box head** (`model.head_params.box_head`, both heads): `mlp` (torchvision's two fc layers of width `hidden_dim`;
+the first, 256*7*7 -> 1024, is 12.85 M) or `conv` (`ConvFCBoxHead`: `num_convs` 3x3 convs with GroupNorm on the 7x7
+RoI, a 1x1 down to `reduce` channels, one fc of width `hidden_dim`: 5.6 M at 4 / 256 / 64 / 1024).
+
+**RPN and post-processing** (`model.*`): `rpn_fg_iou_thresh` / `rpn_bg_iou_thresh` (0.7 / 0.3) label the anchors;
+every GT keeps its best anchor regardless. `score_thresh` / `nms_thresh` / `detections_per_img` (0.05 / 0.5 / 100)
+only affect inference; `sweep_postprocess.py` tunes them on a saved model, `--score-thresh` / `--nms-thresh` override
+them for `--predict`. COCO AP counts at most 100 detections per image.
+
+**P2 stem size** (`model.detail_stem_params`): `channels` (64; the second conv has twice as many) and `extra_convs`
+(0) more 3x3 convs at stride 4.
+
+**EMA** (`train.ema_decay`, 0 = off). An exponential moving average of the trainable weights, updated after every
+optimizer step (decay ramped from ~0.1 to `ema_decay`), is used for validation, the final test and `model.pt`.
+
+**Full train** (`data.val_fraction: 0`). Trains on all of train with no held-out validation; the run writes
+`model.pt` and `metrics.json` only, and the zips come from `--load ... --predict`.
+
 **WST stem** (`model.wst_stem`). MSFA's best filter: a wavelet scattering transform (kymatio, J = 2, L = 8, 81
 channels at stride 4, P2's resolution) on the first input channel, projected to 256 channels and added to P2
 (~0.6 M).

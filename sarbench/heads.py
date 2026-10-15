@@ -1,6 +1,6 @@
 """RoI heads with an optional GIoU box-regression term: torchvision's Faster R-CNN head (`DetRoIHeads`) and
-Cascade R-CNN (`CascadeRoIHeads`). Both return the same `(per-image detections, loss dict)` interface as
-torchvision, so the rest of the pipeline is unchanged.
+Cascade R-CNN (`CascadeRoIHeads`), plus a conv box head (`ConvFCBoxHead`) usable by either. Both RoI heads return
+the same `(per-image detections, loss dict)` interface as torchvision, so the rest of the pipeline is unchanged.
 """
 import torch
 from torch import nn
@@ -9,6 +9,29 @@ from torchvision.models.detection.roi_heads import RoIHeads
 from torchvision.ops import box_iou, clip_boxes_to_image
 
 from .losses import fastrcnn_loss as roi_loss
+
+
+class ConvFCBoxHead(nn.Module):
+    """RoI box head of `num_convs` 3x3 convs (GroupNorm, ReLU) on the pooled 256 x 7 x 7 features, a 1x1 conv down to
+    `reduce` channels, then one fully connected layer of width `fc_dim` (the "4conv1fc" head, made cheaper).
+
+    The 3x3 convs keep the RoI's spatial layout for localization, and the 1x1 reduction makes the fully connected
+    layer `reduce`/256 of torchvision's first fc: 5.6 M parameters instead of 13.9 M at the defaults.
+    """
+
+    def __init__(self, in_channels=256, resolution=7, num_convs=4, conv_dim=256, reduce=64, fc_dim=1024):
+        super().__init__()
+        layers, channels = [], in_channels
+        for _ in range(num_convs):
+            layers += [nn.Conv2d(channels, conv_dim, 3, padding=1, bias=False), nn.GroupNorm(32, conv_dim),
+                       nn.ReLU(inplace=True)]
+            channels = conv_dim
+        layers += [nn.Conv2d(channels, reduce, 1), nn.ReLU(inplace=True)]
+        self.convs = nn.Sequential(*layers)
+        self.fc = nn.Linear(reduce * resolution * resolution, fc_dim)
+
+    def forward(self, x):
+        return torch.relu(self.fc(self.convs(x).flatten(1)))
 
 
 class DetRoIHeads(RoIHeads):
