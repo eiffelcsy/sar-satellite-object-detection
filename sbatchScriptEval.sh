@@ -52,8 +52,8 @@ source .venv/bin/activate
 # Submit your job to the cluster.
 ROOT=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data
 DATA="$ROOT/train"
-CONFIG=configs/ablations/c2_rank64_convpass192.yaml
-MODEL=runs/giou_c2_rank64_convpass192/model.pt
+CONFIG=configs/ablations/b4_wst_72ep.yaml
+MODEL=runs/giou_b4_wst_72ep/model.pt
 
 # Evaluation / submission (no training; reuses the trained checkpoint):
 # 1) Held-out train split (labelled): val metrics + submission_val.zip
