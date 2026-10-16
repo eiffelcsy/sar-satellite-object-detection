@@ -72,7 +72,9 @@ def parse_args(argv=None):
                    help='train-time scale jitter range, e.g. --scale-jitter 0.9 1.1 (omit to disable)')
     p.add_argument('--rotation90', action='store_true', default=cfg['rotation90'],
                    help='train-time random 0/90/180/270-degree rotations')
-    p.add_argument('--seed', type=int, default=cfg['seed'])
+    p.add_argument('--seed', type=int, default=cfg['seed'], help='training randomness (init, order, augmentation)')
+    p.add_argument('--split-seed', type=int, default=cfg['split_seed'],
+                   help='which images are held out for validation (keep it fixed to compare runs)')
     p.add_argument('--out', type=Path, default=Path(cfg['out']))
     p.add_argument('--load', type=Path, default=None,
                    help='load a saved model.pt state_dict, skip training, and only evaluate + write submission zips')
@@ -165,7 +167,7 @@ def make_loader(args, split):
     """Batches of `split`; only the training set is shuffled and augmented."""
     train = split == 'train'
     dataset = SARMultiTask(args.data, split, train=train, limit=args.limit,
-                           val_fraction=args.val_fraction, seed=args.seed,
+                           val_fraction=args.val_fraction, seed=args.split_seed,
                            preprocess=build_preprocess(args), cache_dir=args.preprocess_cache,
                            mosaic=args.mosaic, copy_paste=args.copy_paste,
                            copy_paste_margin=args.copy_paste_margin,

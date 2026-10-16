@@ -56,6 +56,9 @@ def test_base_is_the_dora_giou_recipe():
     ('d8_rpn06', 'b4_convpass_72ep', {'rpn_fg_iou_thresh'}),
     ('d9_stem128', 'b4_convpass_72ep', {'detail_stem_params'}),
     ('d10_full_train', 'b4_convpass_72ep', {'val_fraction'}),
+    ('e1_stem_96ep', 'd1_96ep', {'detail_stem_params'}),
+    ('e2_120ep', 'd1_96ep', {'epochs'}),
+    ('e3_d1_seed1', 'd1_96ep', {'seed'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'
@@ -83,3 +86,9 @@ def test_every_config_fits_the_parameter_budget(path):
     args = SimpleNamespace(**{**load_config(path), 'pretrained': False})  # the count needs no weights
     counts = parameter_counts(*build_model(args))
     assert counts['total'] <= MAX_TOTAL_PARAMETERS and counts['trainable'] <= MAX_TRAINABLE_PARAMETERS
+
+
+def test_training_seed_does_not_move_the_held_out_split():
+    """e3 changes only the training seed; its held-out images are d1's, so the two are scored on the same split."""
+    d1, e3 = (load_config(CONFIGS / 'ablations' / f'{name}.yaml') for name in ('d1_96ep', 'e3_d1_seed1'))
+    assert (d1['seed'], e3['seed']) == (0, 1) and d1['split_seed'] == e3['split_seed'] == 0

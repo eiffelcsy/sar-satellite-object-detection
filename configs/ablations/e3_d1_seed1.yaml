@@ -1,0 +1,6 @@
+# E3 (noise check): d1 with training seed 1 (initialization, data order, augmentation). The held-out images stay the
+# same (data.split_seed 0). |e3 - d1| is the seed noise: gaps between candidates smaller than it are not real.
+base: d1_96ep.yaml
+name: giou_e3_d1_seed1
+train:
+  seed: 1

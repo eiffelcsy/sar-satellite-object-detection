@@ -1,0 +1,7 @@
+# E2 (schedule): d1 trained 120 epochs. 48 -> 58 -> 72 -> 96 epochs gave +1.7 / +2.1 / +1.9 mAP, with the gain per
+# epoch shrinking (0.17 -> 0.15 -> 0.08), so expect ~+0.5-1. ~5 h. Compare with d1_96ep; watch the held-out curve
+# for a drop before the end (overfitting).
+base: d1_96ep.yaml
+name: giou_e2_120ep
+train:
+  epochs: 120

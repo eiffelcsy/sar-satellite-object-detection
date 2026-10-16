@@ -1,0 +1,8 @@
+# E1 (stack): d1 (96 epochs, the best: local mAP 0.396) + d9's stride-4 stem (128 channels + one extra 3x3 conv;
+# +0.45 mAP at 72 epochs, the only other positive). Compare with d1_96ep.
+base: d1_96ep.yaml
+name: giou_e1_stem_96ep
+model:
+  detail_stem_params:
+    channels: 128
+    extra_convs: 1

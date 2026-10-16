@@ -51,6 +51,8 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
     data: {root: null, val_fraction: 0.1, limit: null, mosaic: 0.0, copy_paste: 0.0, copy_paste_margin: 0,
            scale_jitter: null, rotation90: false}
           # val_fraction: 0 trains on all of train (no held-out validation; for the final model)
+          # split_seed (0): which images are held out; train.seed only changes the training randomness, so runs
+          # with different seeds are scored on the same held-out images
     preprocess: {pseudo_rgb: false, mode: despeckle, edge: sobel, despeckle: true, clip_percentile: 0.5,
                  cache: null, bm3d_sigma: null, bm3d_profile: np, bm3d_threads: 1}
                  # pseudo_rgb: 1-channel SAR -> 3 channels; mode: despeckle (amp+base+edge),
@@ -100,6 +102,7 @@ DEFAULTS = {
     'seed': 0,
     'data': None,
     'val_fraction': 0.1,
+    'split_seed': 0,
     'limit': None,
     'mosaic': 0.0,
     'copy_paste': 0.0,
@@ -126,8 +129,8 @@ _MODEL_KEYS = ('detail_stem', 'fusion_layers', 'input_adapter', 'wst_stem', 'wst
                'rpn_fg_iou_thresh', 'rpn_bg_iou_thresh', 'score_thresh', 'nms_thresh', 'detections_per_img')
 _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'unfrozen_lr',
                'ema_decay', 'weight_decay', 'eval_every', 'workers', 'seed')
-_DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'limit': 'limit', 'mosaic': 'mosaic',
-              'copy_paste': 'copy_paste', 'copy_paste_margin': 'copy_paste_margin',
+_DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'split_seed': 'split_seed', 'limit': 'limit',
+              'mosaic': 'mosaic', 'copy_paste': 'copy_paste', 'copy_paste_margin': 'copy_paste_margin',
               'scale_jitter': 'scale_jitter', 'rotation90': 'rotation90'}
 _PREPROCESS_KEYS = {'pseudo_rgb': 'pseudo_rgb', 'mode': 'pseudo_rgb_mode', 'edge': 'edge',
                     'clip_percentile': 'clip_percentile', 'cache': 'preprocess_cache', 'bm3d_sigma': 'bm3d_sigma',

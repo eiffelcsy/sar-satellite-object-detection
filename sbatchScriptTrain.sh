@@ -96,11 +96,19 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # srun --gres=gpu:1 python train.py --config configs/ablations/d4_convhead_cp352.yaml --data "$DATA" --wandb --workers 4
 # srun --gres=gpu:1 python train.py --config configs/ablations/d5_depthwise640.yaml   --data "$DATA" --wandb --workers 4
 # Batch 2 (Convpass variants + detector, ~12 h):
-srun --gres=gpu:1 python train.py --config configs/ablations/d6_multiscale.yaml     --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/d7_parallel.yaml       --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/d8_rpn06.yaml          --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/d9_stem128.yaml        --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d6_multiscale.yaml     --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d7_parallel.yaml       --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d8_rpn06.yaml          --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d9_stem128.yaml        --data "$DATA" --wandb --workers 4
 
-# F: the final model, after the d* results: point configs/ablations/d10_full_train.yaml's `base` at the winning
-# recipe, train on all of train (no held-out metrics), then make the Codabench zips with sbatchScriptEval.sh 2) / 3).
+# G: after the d* results (d1_96ep best: local mAP 0.396; d9's stem the only other positive). ~13 h in total.
+#   e1 vs d1 = does d9's stem stack on 96 epochs; e2 vs d1 = does 120 epochs still pay; e3 vs d1 = seed noise
+#   (same held-out images, data.split_seed 0), which says whether the e1 / e2 gaps are real.
+srun --gres=gpu:1 python train.py --config configs/ablations/e1_stem_96ep.yaml   --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/e2_120ep.yaml       --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/e3_d1_seed1.yaml    --data "$DATA" --wandb --workers 4
+
+# F: the final model, after the e* results: point configs/ablations/d10_full_train.yaml's `base` at the winning
+# recipe (d1, e1 or e2), train on all of train (no held-out metrics), then make the Codabench zips with
+# sbatchScriptEval.sh 2) / 3) using --score-thresh 0.001 --nms-thresh 0.6 (the d1 post-processing sweep's best).
 # srun --gres=gpu:1 python train.py --config configs/ablations/d10_full_train.yaml    --data "$DATA" --wandb --workers 4
