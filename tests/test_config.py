@@ -59,6 +59,8 @@ def test_base_is_the_dora_giou_recipe():
     ('e1_stem_96ep', 'd1_96ep', {'detail_stem_params'}),
     ('e2_120ep', 'd1_96ep', {'epochs'}),
     ('e3_d1_seed1', 'd1_96ep', {'seed'}),
+    ('e4_stem_120ep', 'e1_stem_96ep', {'epochs'}),
+    ('e5_stem_150ep', 'e4_stem_120ep', {'epochs'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'

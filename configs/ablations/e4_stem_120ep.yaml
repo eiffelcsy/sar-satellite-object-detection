@@ -1,0 +1,6 @@
+# E4 (stack): e1 (d1 + d9's stride-4 stem) trained 120 epochs: the two Codabench wins together (stem +1.7 Δm over d1,
+# 96 -> 120 epochs +3.3). ~5 h. Compare with e1_stem_96ep and e2_120ep.
+base: e1_stem_96ep.yaml
+name: giou_e4_stem_120ep
+train:
+  epochs: 120

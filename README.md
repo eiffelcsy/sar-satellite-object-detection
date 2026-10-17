@@ -124,6 +124,8 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `e1_stem_96ep` | d1 + d9's stride-4 stem | d1 | 123.93 | 38.86 |
 | `e2_120ep` | d1 trained 120 epochs | d1 | 123.09 | 38.02 |
 | `e3_d1_seed1` | d1 with training seed 1 (same held-out images): the seed-noise check | d1 | 123.09 | 38.02 |
+| `e4_stem_120ep` | e1 (d1 + stem) trained 120 epochs | e1 | 123.93 | 38.86 |
+| `e5_stem_150ep` | e4 trained 150 epochs | e4 | 123.93 | 38.86 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.

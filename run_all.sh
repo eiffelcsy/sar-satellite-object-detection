@@ -11,6 +11,7 @@
 #   b4_*_72ep          longer training of the best model, with and without the WST stem
 #   d1-d9              one change each versus b4_convpass_72ep (d10_full_train, the final model, is run separately)
 #   e1-e3              on top of d1_96ep: + d9's stem, 120 epochs, and a second training seed
+#   e4-e5              the stem at 120 and 150 epochs
 set -e
 for config in \
   configs/dinov3_dora_giou.yaml \
@@ -24,6 +25,7 @@ for config in \
   configs/ablations/d1_96ep.yaml configs/ablations/d2_ema.yaml configs/ablations/d3_head512_cp352.yaml \
   configs/ablations/d4_convhead_cp352.yaml configs/ablations/d5_depthwise640.yaml configs/ablations/d6_multiscale.yaml \
   configs/ablations/d7_parallel.yaml configs/ablations/d8_rpn06.yaml configs/ablations/d9_stem128.yaml \
-  configs/ablations/e1_stem_96ep.yaml configs/ablations/e2_120ep.yaml configs/ablations/e3_d1_seed1.yaml; do
+  configs/ablations/e1_stem_96ep.yaml configs/ablations/e2_120ep.yaml configs/ablations/e3_d1_seed1.yaml \
+  configs/ablations/e4_stem_120ep.yaml configs/ablations/e5_stem_150ep.yaml; do
   python train.py --config "$config" "$@"
 done

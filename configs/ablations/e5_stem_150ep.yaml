@@ -1,0 +1,7 @@
+# E5 (schedule limit): e4 trained 150 epochs. Overfitting would show as a held-out mAP peak before the end, or as a
+# local gain over e4 that does not carry to Codabench (the held-out 10% shares train's distribution). ~6.5 h.
+# Compare with e4_stem_120ep on both.
+base: e4_stem_120ep.yaml
+name: giou_e5_stem_150ep
+train:
+  epochs: 150
