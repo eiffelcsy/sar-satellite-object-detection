@@ -52,8 +52,8 @@ source .venv/bin/activate
 # Submit your job to the cluster.
 ROOT=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data
 DATA="$ROOT/train"
-CONFIG=configs/ablations/e2_120ep.yaml
-MODEL=runs/giou_e2_120ep/model.pt
+CONFIG=configs/ablations/e4_stem_120ep.yaml
+MODEL=runs/giou_e4_stem_120ep/model.pt
 
 # Evaluation / submission (no training; reuses the trained checkpoint):
 # 0) Post-processing sweep on the held-out train split: score threshold x NMS IoU, no retraining. Prints the best
