@@ -119,5 +119,5 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # active, then comment it out, uncomment the d10 line and submit again.
 #   e6 vs e5 = does 200 epochs still pay (~8.7 h); d10 = the e5 recipe on all of train, the safe final submission
 #   (~7.3 h).
-srun --gres=gpu:1 python train.py --config configs/ablations/e6_stem_200ep.yaml  --data "$DATA" --wandb --workers 4
-# srun --gres=gpu:1 python train.py --config configs/ablations/d10_full_train.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/e6_stem_200ep.yaml  --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/d10_full_train.yaml --data "$DATA" --wandb --workers 4

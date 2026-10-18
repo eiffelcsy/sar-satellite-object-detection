@@ -2,7 +2,7 @@
 # ~11% more images), with no held-out validation. ~7.3 h. A safe final submission while e6 runs; if e6 wins, repoint
 # `base` at e6_stem_200ep.yaml and rename the run. The run writes model.pt only: make the Codabench zips with
 # --load ... --predict and --score-thresh 0.001 --nms-thresh 0.6 (sbatchScriptEval.sh, section 4).
-base: e5_stem_150ep.yaml
-name: giou_d10_full_train_e5
+base: e6_stem_200ep.yaml
+name: giou_d10_full_train_e6
 data:
   val_fraction: 0
