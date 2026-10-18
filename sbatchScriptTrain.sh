@@ -111,10 +111,13 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # H: stem + longer schedules (Codabench: d1 26.65, e1 stem 28.33, e2 120 epochs 29.95). ~11.5 h in total.
 #   e4 vs e1 / e2 = do the stem and 120 epochs add up; e5 vs e4 = does 150 epochs still pay. Submit both to
 #   Codabench: a local gain for e5 that does not carry over there is the sign of overfitting.
-# srun --gres=gpu:1 python train.py --config configs/ablations/e4_stem_120ep.yaml  --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/e5_stem_150ep.yaml  --data "$DATA" --wandb --workers 4
+# # srun --gres=gpu:1 python train.py --config configs/ablations/e4_stem_120ep.yaml  --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/e5_stem_150ep.yaml  --data "$DATA" --wandb --workers 4
 
-# F: the final model, after the e* results: point configs/ablations/d10_full_train.yaml's `base` at the winning
-# recipe (e4 or e5), train on all of train (no held-out metrics), then make the Codabench zips with
-# sbatchScriptEval.sh 2) / 3) using --score-thresh 0.001 --nms-thresh 0.6 (the d1 post-processing sweep's best).
-# srun --gres=gpu:1 python train.py --config configs/ablations/d10_full_train.yaml    --data "$DATA" --wandb --workers 4
+# I: the longest schedule so far, and the final model on all of train (Codabench: e4 120 epochs 30.51, e5 150 epochs
+# 32.55). They are independent, so run them as two jobs at the same time: submit this script with only the e6 line
+# active, then comment it out, uncomment the d10 line and submit again.
+#   e6 vs e5 = does 200 epochs still pay (~8.7 h); d10 = the e5 recipe on all of train, the safe final submission
+#   (~7.3 h).
+srun --gres=gpu:1 python train.py --config configs/ablations/e6_stem_200ep.yaml  --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d10_full_train.yaml --data "$DATA" --wandb --workers 4

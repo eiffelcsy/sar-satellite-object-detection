@@ -55,12 +55,13 @@ def test_base_is_the_dora_giou_recipe():
     ('d7_parallel', 'b4_convpass_72ep', {'conv_adapters'}),
     ('d8_rpn06', 'b4_convpass_72ep', {'rpn_fg_iou_thresh'}),
     ('d9_stem128', 'b4_convpass_72ep', {'detail_stem_params'}),
-    ('d10_full_train', 'b4_convpass_72ep', {'val_fraction'}),
+    ('d10_full_train', 'e5_stem_150ep', {'val_fraction'}),
     ('e1_stem_96ep', 'd1_96ep', {'detail_stem_params'}),
     ('e2_120ep', 'd1_96ep', {'epochs'}),
     ('e3_d1_seed1', 'd1_96ep', {'seed'}),
     ('e4_stem_120ep', 'e1_stem_96ep', {'epochs'}),
     ('e5_stem_150ep', 'e4_stem_120ep', {'epochs'}),
+    ('e6_stem_200ep', 'e5_stem_150ep', {'epochs'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'

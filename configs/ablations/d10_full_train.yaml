@@ -1,7 +1,8 @@
-# D10 (final model): train on all of train (val_fraction 0, ~11% more images), no held-out validation. A template:
-# point `base` at the winning recipe once the d* results are in (now: b4_convpass_72ep). The run writes model.pt
-# only; make the Codabench zips with --load ... --predict val/images.json (see README 2.4).
-base: b4_convpass_72ep.yaml
-name: giou_d10_full_train
+# D10 (final model): the e5 recipe (stem, 150 epochs; Codabench 32.55) trained on all of train (val_fraction 0,
+# ~11% more images), with no held-out validation. ~7.3 h. A safe final submission while e6 runs; if e6 wins, repoint
+# `base` at e6_stem_200ep.yaml and rename the run. The run writes model.pt only: make the Codabench zips with
+# --load ... --predict and --score-thresh 0.001 --nms-thresh 0.6 (sbatchScriptEval.sh, section 4).
+base: e5_stem_150ep.yaml
+name: giou_d10_full_train_e5
 data:
   val_fraction: 0

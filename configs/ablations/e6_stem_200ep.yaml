@@ -1,0 +1,7 @@
+# E6 (schedule limit): e5 (stem, the best: Codabench 32.55) trained 200 epochs. With the stem, 96 -> 120 -> 150 epochs
+# gave +2.2 / +2.0 Δm on Codabench, with no held-out decline. ~8.7 h. Compare with e5 locally and on Codabench: stop
+# extending once a step adds < ~0.5 Δm there, or the held-out curve dips before the end.
+base: e5_stem_150ep.yaml
+name: giou_e6_stem_200ep
+train:
+  epochs: 200
