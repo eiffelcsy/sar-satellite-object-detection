@@ -134,5 +134,5 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # submit this script once per line, with only that line active.
 #   f5 (~4 h) vs f1 / f3 = do the detection gain and the F1 come together; g1 (~8.7 h) vs e6 = does it hold at 200
 #   epochs.
-srun --gres=gpu:1 python train.py --config configs/ablations/g1_split_lr_200ep.yaml --data "$DATA" --wandb --workers 4
-# srun --gres=gpu:1 python train.py --config configs/ablations/f5_split_lr.yaml       --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/g1_split_lr_200ep.yaml --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/f5_split_lr.yaml       --data "$DATA" --wandb --workers 4
