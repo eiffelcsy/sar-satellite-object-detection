@@ -131,6 +131,8 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `f2_adapter_lr1e-3` | adapters at 1e-3 + a 2-epoch warmup | e1 | 123.93 | 38.86 |
 | `f3_lr2e-4` | heads and adapters at 2e-4 | e1 | 123.93 | 38.86 |
 | `f4_wd_exclude_1d` | no weight decay on biases, norm weights and DoRA magnitudes | e1 | 123.93 | 38.86 |
+| `f5_split_lr` | adapters 3e-4, detection heads 2e-4, image classifier 1e-4 | e1 | 123.93 | 38.86 |
+| `g1_split_lr_200ep` | f5's learning rates at 200 epochs | e6 | 123.93 | 38.86 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.

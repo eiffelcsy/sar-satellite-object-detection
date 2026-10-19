@@ -1,0 +1,10 @@
+# G1 (long schedule): e6 (stem, 200 epochs; local 0.448, Codabench 35.39) with f5's learning rates: adapters 3e-4,
+# detection heads 2e-4, image classifier 1e-4. Started before f5's result is in: if f5 does not beat f1 at 96
+# epochs, read this with that in mind. Asks whether the higher-rate gain survives a long schedule. ~8.7 h.
+# Compare with e6_stem_200ep; if it wins, the full-train version is the next final candidate (d10 was 38.50).
+base: e6_stem_200ep.yaml
+name: giou_g1_split_lr_200ep
+train:
+  backbone_lr: 3.0e-4
+  lr: 2.0e-4
+  cls_lr: 1.0e-4

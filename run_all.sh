@@ -12,7 +12,7 @@
 #   d1-d9              one change each versus b4_convpass_72ep (d10_full_train, the final model, is run separately)
 #   e1-e3              on top of d1_96ep: + d9's stem, 120 epochs, and a second training seed
 #   e4-e6              the stem at 120, 150 and 200 epochs (d10_full_train, the final model, is run separately)
-#   f1-f4              learning rates and weight decay, each one change on e1_stem_96ep
+#   f1-f5              learning rates and weight decay on e1_stem_96ep; g1 = f5's rates on e6 (200 epochs)
 set -e
 for config in \
   configs/dinov3_dora_giou.yaml \
@@ -29,6 +29,6 @@ for config in \
   configs/ablations/e1_stem_96ep.yaml configs/ablations/e2_120ep.yaml configs/ablations/e3_d1_seed1.yaml \
   configs/ablations/e4_stem_120ep.yaml configs/ablations/e5_stem_150ep.yaml configs/ablations/e6_stem_200ep.yaml \
   configs/ablations/f1_adapter_lr3e-4.yaml configs/ablations/f2_adapter_lr1e-3.yaml configs/ablations/f3_lr2e-4.yaml \
-  configs/ablations/f4_wd_exclude_1d.yaml; do
+  configs/ablations/f4_wd_exclude_1d.yaml configs/ablations/f5_split_lr.yaml configs/ablations/g1_split_lr_200ep.yaml; do
   python train.py --config "$config" "$@"
 done

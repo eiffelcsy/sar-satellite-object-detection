@@ -52,6 +52,8 @@ def parse_args(argv=None):
     p.add_argument('--lr', type=float, default=cfg['lr'])
     p.add_argument('--backbone-lr', type=float, default=cfg['backbone_lr'],
                    help='for the new backbone parameters: DoRA and Convpass adapters (default: --lr)')
+    p.add_argument('--cls-lr', type=float, default=cfg['cls_lr'],
+                   help='for the image classifier head (default: --lr)')
     p.add_argument('--unfrozen-lr', type=float, default=cfg['unfrozen_lr'],
                    help='for pretrained backbone weights made trainable (patch embedding, peft.full_blocks)')
     p.add_argument('--weight-decay', type=float, default=cfg['weight_decay'])
@@ -129,6 +131,8 @@ def parse_args(argv=None):
         p.error('--predict needs --load with the trained weights')
     if args.backbone_lr is None:
         args.backbone_lr = args.lr
+    if args.cls_lr is None:
+        args.cls_lr = args.lr
     return args
 
 
@@ -393,13 +397,16 @@ def main():
             run.finish()
         return
 
-    # Three parameter groups: new backbone parameters (DoRA, Convpass) at --backbone-lr, pretrained weights made
-    # trainable (patch embedding, full_blocks) gently at --unfrozen-lr, and every new module outside the backbone
-    # (neck, RPN, RoI head, classifier, stems, input adapter) at --lr.
+    # Four parameter groups: new backbone parameters (DoRA, Convpass) at --backbone-lr, pretrained weights made
+    # trainable (patch embedding, full_blocks) gently at --unfrozen-lr, the image classifier at --cls-lr, and every
+    # other new module outside the backbone (neck, RPN, RoI head, stems, input adapter) at --lr.
     backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
     new_backbone = [p for p in backbone_params if id(p) not in pretrained_ids]
     unfrozen = [p for p in backbone_params if id(p) in pretrained_ids]
     head_params = [p for name, p in model.named_parameters() if not name.startswith('backbone.')]
+    cls_ids = {id(p) for p in model.cls_head.parameters()}
+    cls_params = [p for p in head_params if id(p) in cls_ids]
+    det_params = [p for p in head_params if id(p) not in cls_ids]
 
     # Stage A: freeze the backbone (including DoRA) and train only the neck, RPN, RoI and class heads.
     history, start = [], time.time()
@@ -419,7 +426,8 @@ def main():
     # Stage B (and the only stage when stage_a_epochs is 0): trainable backbone at --backbone-lr, heads at --lr.
     groups = (decay_groups(new_backbone, args.weight_decay, args.wd_exclude_1d, lr=args.backbone_lr)
               + decay_groups(unfrozen, args.weight_decay, args.wd_exclude_1d, lr=args.unfrozen_lr)
-              + decay_groups(head_params, args.weight_decay, args.wd_exclude_1d, lr=args.lr))
+              + decay_groups(cls_params, args.weight_decay, args.wd_exclude_1d, lr=args.cls_lr)
+              + decay_groups(det_params, args.weight_decay, args.wd_exclude_1d, lr=args.lr))
     # the heads stay last: train_one_epoch logs param_groups[-1]'s lr
     optimizer = torch.optim.AdamW([g for g in groups if g['params']], lr=args.lr)
     warmup = max(1, round(args.warmup_epochs * len(train_loader)))

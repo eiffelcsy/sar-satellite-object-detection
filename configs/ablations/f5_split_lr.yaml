@@ -1,0 +1,9 @@
+# F5 (learning rate): f1's adapters at 3e-4 + f3's detection heads at 2e-4 (neck, RPN, RoI head, stems), with the
+# image classifier kept at 1e-4 (f3's 2e-4 on every head cost 1.1 macro-F1 while f1 kept it). Tests whether the
+# detection gain of f3 comes without its F1 loss. Compare with f1 and f3 (and e1_stem_96ep).
+base: e1_stem_96ep.yaml
+name: giou_f5_split_lr
+train:
+  backbone_lr: 3.0e-4
+  lr: 2.0e-4
+  cls_lr: 1.0e-4
