@@ -55,6 +55,10 @@ def parse_args(argv=None):
     p.add_argument('--unfrozen-lr', type=float, default=cfg['unfrozen_lr'],
                    help='for pretrained backbone weights made trainable (patch embedding, peft.full_blocks)')
     p.add_argument('--weight-decay', type=float, default=cfg['weight_decay'])
+    p.add_argument('--warmup-epochs', type=float, default=cfg['warmup_epochs'],
+                   help='linear learning-rate warmup before the cosine decay')
+    p.add_argument('--wd-exclude-1d', action='store_true', default=cfg['wd_exclude_1d'],
+                   help='no weight decay on 1-D parameters (biases, norm weights, DoRA magnitudes, LayerScale)')
     p.add_argument('--eval-every', type=int, default=cfg['eval_every'],
                    help='validate every N epochs, and after the last one')
     p.add_argument('--workers', type=int, default=cfg['workers'])
@@ -189,6 +193,17 @@ def lr_factor(step, warmup, total):
     if step < warmup:
         return (step + 1) / warmup
     return 0.5 * (1 + math.cos(math.pi * (step - warmup) / max(total - warmup, 1)))  # --epochs 1: no decay phase
+
+
+def decay_groups(params, weight_decay, exclude_1d, **options):
+    """AdamW parameter groups for `params`: one group with `weight_decay`, or, with `exclude_1d`, the 1-D parameters
+    (biases, norm weights, DoRA magnitudes, LayerScale) split into a second group without decay. Extra `options`
+    (e.g. lr) go to every group."""
+    params = list(params)
+    if not exclude_1d:
+        return [{'params': params, 'weight_decay': weight_decay, **options}]
+    return [{'params': [p for p in params if p.ndim > 1], 'weight_decay': weight_decay, **options},
+            {'params': [p for p in params if p.ndim <= 1], 'weight_decay': 0.0, **options}]
 
 
 def weighted_total(losses, loss_weights):
@@ -392,7 +407,8 @@ def main():
         log(f'stage A: {args.stage_a_epochs} epochs, backbone frozen, lr {args.stage_a_lr}', log_file)
         for p in model.backbone.parameters():
             p.requires_grad_(False)
-        optimizer_a = torch.optim.AdamW(head_params, lr=args.stage_a_lr, weight_decay=args.weight_decay)
+        optimizer_a = torch.optim.AdamW(decay_groups(head_params, args.weight_decay, args.wd_exclude_1d),
+                                        lr=args.stage_a_lr)
         schedule_a = torch.optim.lr_scheduler.LambdaLR(
             optimizer_a, lambda step: lr_factor(step, len(train_loader), args.stage_a_epochs * len(train_loader)))
         fit(model, train_loader, val_loader, args.stage_a_epochs, optimizer_a, schedule_a, args, log_file, run,
@@ -401,10 +417,13 @@ def main():
             p.requires_grad_(True)
 
     # Stage B (and the only stage when stage_a_epochs is 0): trainable backbone at --backbone-lr, heads at --lr.
-    groups = [{'params': new_backbone, 'lr': args.backbone_lr}, {'params': unfrozen, 'lr': args.unfrozen_lr},
-              {'params': head_params}]  # the heads stay last: train_one_epoch logs param_groups[-1]'s lr
-    optimizer = torch.optim.AdamW([g for g in groups if g['params']], lr=args.lr, weight_decay=args.weight_decay)
-    warmup, total = len(train_loader), args.epochs * len(train_loader)  # one epoch of warmup
+    groups = (decay_groups(new_backbone, args.weight_decay, args.wd_exclude_1d, lr=args.backbone_lr)
+              + decay_groups(unfrozen, args.weight_decay, args.wd_exclude_1d, lr=args.unfrozen_lr)
+              + decay_groups(head_params, args.weight_decay, args.wd_exclude_1d, lr=args.lr))
+    # the heads stay last: train_one_epoch logs param_groups[-1]'s lr
+    optimizer = torch.optim.AdamW([g for g in groups if g['params']], lr=args.lr)
+    warmup = max(1, round(args.warmup_epochs * len(train_loader)))
+    total = args.epochs * len(train_loader)
     schedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: lr_factor(step, warmup, total))
     ema = ModelEMA(model, args.ema_decay) if args.ema_decay > 0 else None  # over stage B's trainable weights
     val_detections, val_sub = fit(model, train_loader, val_loader, args.epochs, optimizer, schedule, args,

@@ -1,0 +1,8 @@
+# F2 (learning rate): e1 with the adapters at 1e-3 (the usual adapter rate), heads at 1e-4, and a 2-epoch warmup
+# (instead of 1) for stability at the higher rate. Two changes, so a gain over f1 is the rate and the warmup together.
+# Watch for NaN losses or an early mAP collapse (too high for DoRA under bf16). Compare with e1_stem_96ep and f1.
+base: e1_stem_96ep.yaml
+name: giou_f2_adapter_lr1e-3
+train:
+  backbone_lr: 1.0e-3
+  warmup_epochs: 2

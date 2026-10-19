@@ -119,5 +119,13 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # active, then comment it out, uncomment the d10 line and submit again.
 #   e6 vs e5 = does 200 epochs still pay (~8.7 h); d10 = the e5 recipe on all of train, the safe final submission
 #   (~7.3 h).
-# srun --gres=gpu:1 python train.py --config configs/ablations/e6_stem_200ep.yaml  --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/d10_full_train.yaml --data "$DATA" --wandb --workers 4
+# # srun --gres=gpu:1 python train.py --config configs/ablations/e6_stem_200ep.yaml  --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d10_full_train.yaml --data "$DATA" --wandb --workers 4
+
+# J: learning rate and weight decay, each one change on e1_stem_96ep (stem, 96 epochs; local mAP 0.400, Codabench
+# 28.33), ~4 h each. Independent: submit this script once per line, with only that line active.
+#   f1 adapters 3e-4 | f2 adapters 1e-3 + 2-epoch warmup | f3 heads and adapters 2e-4 | f4 no decay on 1-D params
+srun --gres=gpu:1 python train.py --config configs/ablations/f1_adapter_lr3e-4.yaml --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/f2_adapter_lr1e-3.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/f3_lr2e-4.yaml         --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/f4_wd_exclude_1d.yaml  --data "$DATA" --wandb --workers 4

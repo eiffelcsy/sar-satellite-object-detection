@@ -1,7 +1,6 @@
-# D10 (final model): the e5 recipe (stem, 150 epochs; Codabench 32.55) trained on all of train (val_fraction 0,
-# ~11% more images), with no held-out validation. ~7.3 h. A safe final submission while e6 runs; if e6 wins, repoint
-# `base` at e6_stem_200ep.yaml and rename the run. The run writes model.pt only: make the Codabench zips with
-# --load ... --predict and --score-thresh 0.001 --nms-thresh 0.6 (sbatchScriptEval.sh, section 4).
+# D10 (final model): the e6 recipe (stem, 200 epochs; Codabench 35.39) trained on all of train (val_fraction 0,
+# ~11% more images), with no held-out validation: Codabench 38.50, the best so far. The run writes model.pt only: make
+# the Codabench zips with --load ... --predict and --score-thresh 0.001 --nms-thresh 0.6 (sbatchScriptEval.sh, 4).
 base: e6_stem_200ep.yaml
 name: giou_d10_full_train_e6
 data:

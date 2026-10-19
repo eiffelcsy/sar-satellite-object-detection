@@ -41,11 +41,13 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
       nms_thresh: 0.5
       detections_per_img: 100
     train: {epochs: 48, stage_a_epochs: 0, stage_a_lr: 2.0e-4, batch_size: 16, lr: 1.0e-4,
-            backbone_lr: null, unfrozen_lr: 2.0e-5, ema_decay: 0.0, weight_decay: 0.05, eval_every: 4,
-            workers: 8, seed: 0}
+            backbone_lr: null, unfrozen_lr: 2.0e-5, ema_decay: 0.0, warmup_epochs: 1, wd_exclude_1d: false,
+            weight_decay: 0.05, eval_every: 4, workers: 8, seed: 0}
             # lr: heads; backbone_lr: new backbone parameters (DoRA, Convpass; default lr);
             # unfrozen_lr: pretrained weights made trainable (patch embedding, full_blocks).
             # stage_a_epochs: first N epochs freeze the backbone and train the heads only at stage_a_lr.
+            # warmup_epochs: linear learning-rate warmup before the cosine decay (stage B).
+            # wd_exclude_1d: no weight decay on 1-D parameters (biases, norm weights, DoRA magnitudes, LayerScale).
             # ema_decay: > 0 keeps an exponential moving average of the trainable weights (e.g. 0.9998), used for
             # validation and saved as model.pt.
     data: {root: null, val_fraction: 0.1, limit: null, mosaic: 0.0, copy_paste: 0.0, copy_paste_margin: 0,
@@ -96,6 +98,8 @@ DEFAULTS = {
     'backbone_lr': None,
     'unfrozen_lr': 2e-5,
     'ema_decay': 0.0,
+    'warmup_epochs': 1,
+    'wd_exclude_1d': False,
     'weight_decay': 0.05,
     'eval_every': 4,
     'workers': 8,
@@ -128,7 +132,7 @@ _MODEL_KEYS = ('detail_stem', 'fusion_layers', 'input_adapter', 'wst_stem', 'wst
                'roi_sampling_ratio', 'roi_output_size', 'head', 'head_params', 'detail_stem_params',
                'rpn_fg_iou_thresh', 'rpn_bg_iou_thresh', 'score_thresh', 'nms_thresh', 'detections_per_img')
 _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'unfrozen_lr',
-               'ema_decay', 'weight_decay', 'eval_every', 'workers', 'seed')
+               'ema_decay', 'warmup_epochs', 'wd_exclude_1d', 'weight_decay', 'eval_every', 'workers', 'seed')
 _DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'split_seed': 'split_seed', 'limit': 'limit',
               'mosaic': 'mosaic', 'copy_paste': 'copy_paste', 'copy_paste_margin': 'copy_paste_margin',
               'scale_jitter': 'scale_jitter', 'rotation90': 'rotation90'}

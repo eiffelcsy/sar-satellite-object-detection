@@ -1,0 +1,7 @@
+# F4 (weight decay): e1 with no weight decay on the 1-D parameters: biases, norm weights and DoRA magnitudes (~0.11 M).
+# Decaying DoRA's magnitude shrinks the pretrained weights' scale towards 0; excluding biases and norms is standard.
+# Compare with e1_stem_96ep.
+base: e1_stem_96ep.yaml
+name: giou_f4_wd_exclude_1d
+train:
+  wd_exclude_1d: true

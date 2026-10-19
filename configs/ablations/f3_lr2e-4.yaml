@@ -1,0 +1,7 @@
+# F3 (learning rate): e1 with every new module at 2e-4 instead of 1e-4: the heads (lr) and, since backbone_lr defaults
+# to lr, the adapters too. Asks whether the randomly initialized heads are under-trained as well. The unfrozen patch
+# embedding stays at 2e-5. Compare with e1_stem_96ep and f1.
+base: e1_stem_96ep.yaml
+name: giou_f3_lr2e-4
+train:
+  lr: 2.0e-4

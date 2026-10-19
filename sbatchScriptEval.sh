@@ -78,6 +78,6 @@ srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
 # 4) The final full-train model (configs/ablations/d10_full_train.yaml, no held-out split): predictions only, with
 #    the tuned post-processing. It has no local metrics, so its Codabench score is the only check.
 # srun --gres=gpu:1 python train.py --config configs/ablations/d10_full_train.yaml \
-#   --load runs/giou_d10_full_train_e5/model.pt --score-thresh 0.001 --nms-thresh 0.6 \
+#   --load runs/giou_d10_full_train_e6/model.pt --score-thresh 0.001 --nms-thresh 0.6 \
 #   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
 #   --preprocess-cache preprocess_cache/val

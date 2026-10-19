@@ -1,0 +1,8 @@
+# F1 (learning rate): e1 (stem, 96 epochs) with the new backbone adapters (DoRA + Convpass) at 3e-4 instead of 1e-4;
+# the heads stay at 1e-4. Adapter methods usually train at 5e-4-1e-3: at 1e-4 the zero-initialized updates may move
+# slowly, which would explain why every extra epoch still pays. Compare with e1_stem_96ep (local 0.400, Codabench
+# 28.33): ~0.43+ at 96 epochs would mean the learning rate, not the schedule, was the bottleneck.
+base: e1_stem_96ep.yaml
+name: giou_f1_adapter_lr3e-4
+train:
+  backbone_lr: 3.0e-4

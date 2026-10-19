@@ -120,13 +120,17 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `d7_parallel` | Convpass beside the block (reads its LayerNorm'd input) | b4_72ep | 123.10 | 38.04 |
 | `d8_rpn06` | RPN positive anchor IoU 0.7 -> 0.6 | b4_72ep | 123.09 | 38.02 |
 | `d9_stem128` | P2 conv stem 64 -> 128 channels + one extra stride-4 3x3 conv | b4_72ep | 123.93 | 38.86 |
-| `d10_full_train` | final model: the e5 recipe on all of train (`val_fraction: 0`) | e5 | 123.93 | 38.86 |
+| `d10_full_train` | final model: the e6 recipe on all of train (`val_fraction: 0`) | e6 | 123.93 | 38.86 |
 | `e1_stem_96ep` | d1 + d9's stride-4 stem | d1 | 123.93 | 38.86 |
 | `e2_120ep` | d1 trained 120 epochs | d1 | 123.09 | 38.02 |
 | `e3_d1_seed1` | d1 with training seed 1 (same held-out images): the seed-noise check | d1 | 123.09 | 38.02 |
 | `e4_stem_120ep` | e1 (d1 + stem) trained 120 epochs | e1 | 123.93 | 38.86 |
 | `e5_stem_150ep` | e4 trained 150 epochs | e4 | 123.93 | 38.86 |
 | `e6_stem_200ep` | e5 trained 200 epochs | e5 | 123.93 | 38.86 |
+| `f1_adapter_lr3e-4` | adapters (DoRA, Convpass) at 3e-4 instead of 1e-4 | e1 | 123.93 | 38.86 |
+| `f2_adapter_lr1e-3` | adapters at 1e-3 + a 2-epoch warmup | e1 | 123.93 | 38.86 |
+| `f3_lr2e-4` | heads and adapters at 2e-4 | e1 | 123.93 | 38.86 |
+| `f4_wd_exclude_1d` | no weight decay on biases, norm weights and DoRA magnitudes | e1 | 123.93 | 38.86 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.
