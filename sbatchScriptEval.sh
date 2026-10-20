@@ -59,7 +59,7 @@ MODEL=runs/giou_g1_split_lr_200ep/model.pt
 # 0) Post-processing sweep on the held-out train split: score threshold x NMS IoU, no retraining. Prints the best
 #    setting and writes postprocess_sweep.json next to the model; apply it to 2) / 3) with --score-thresh and
 #    --nms-thresh (e.g. --score-thresh 0.001 --nms-thresh 0.6).
-srun --gres=gpu:1 python sweep_postprocess.py --config "$CONFIG" --load "$MODEL" --data "$DATA" --workers 4
+# srun --gres=gpu:1 python sweep_postprocess.py --config "$CONFIG" --load "$MODEL" --data "$DATA" --workers 4
 
 # 1) Held-out train split (labelled): val metrics + submission_val.zip
 # srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
@@ -67,7 +67,7 @@ srun --gres=gpu:1 python sweep_postprocess.py --config "$CONFIG" --load "$MODEL"
 
 # 2) Official val split (unlabelled val/images.json): predictions only -> submission_val.zip
 srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
-  --score-thresh 0.001 --nms-thresh 0.6 \
+  --score-thresh 0.001 --nms-thresh 0.7 \
   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
   --preprocess-cache preprocess_cache/val
 
