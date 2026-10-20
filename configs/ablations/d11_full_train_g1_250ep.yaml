@@ -1,0 +1,11 @@
+# D11 (final model): g1's recipe (stem; adapters 3e-4, detection heads 2e-4, classifier 1e-4; Codabench 36.19 at
+# 200 epochs on 90% of train) trained 250 epochs on all of train (val_fraction 0). ~12 h. 250 epochs is untested and
+# this run has no held-out split, so its Codabench score against d10 (38.50, e6 recipe, 200 epochs) is the only check;
+# keep d10 as the fallback. The run writes model.pt only: make the zips with --load ... --predict and
+# --score-thresh 0.001 --nms-thresh 0.6 (sbatchScriptEval.sh, section 5).
+base: g1_split_lr_200ep.yaml
+name: giou_d11_full_train_g1_250ep
+train:
+  epochs: 250
+data:
+  val_fraction: 0

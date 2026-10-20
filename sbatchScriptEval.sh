@@ -52,8 +52,8 @@ source .venv/bin/activate
 # Submit your job to the cluster.
 ROOT=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data
 DATA="$ROOT/train"
-CONFIG=configs/ablations/g1_split_lr_200ep.yaml
-MODEL=runs/giou_g1_split_lr_200ep/model.pt
+CONFIG=configs/ablations/d11_full_train_g1_250ep.yaml
+MODEL=runs/giou_d11_full_train_g1_250ep/model.pt
 
 # Evaluation / submission (no training; reuses the trained checkpoint):
 # 0) Post-processing sweep on the held-out train split: score threshold x NMS IoU, no retraining. Prints the best
@@ -81,3 +81,13 @@ srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
 #   --load runs/giou_d10_full_train_e6/model.pt --score-thresh 0.001 --nms-thresh 0.6 \
 #   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
 #   --preprocess-cache preprocess_cache/val
+
+# 5) The final model d11 (g1 recipe, 250 epochs, all of train): val and test predictions with the tuned post-processing.
+# srun --gres=gpu:1 python train.py --config configs/ablations/d11_full_train_g1_250ep.yaml \
+#   --load runs/giou_d11_full_train_g1_250ep/model.pt --score-thresh 0.001 --nms-thresh 0.6 \
+#   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
+#   --preprocess-cache preprocess_cache/val
+# srun --gres=gpu:1 python train.py --config configs/ablations/d11_full_train_g1_250ep.yaml \
+#   --load runs/giou_d11_full_train_g1_250ep/model.pt --score-thresh 0.001 --nms-thresh 0.6 \
+#   --predict "$ROOT/test/images.json" --predict-split test --out runs/eval_test/ \
+#   --preprocess-cache preprocess_cache/test

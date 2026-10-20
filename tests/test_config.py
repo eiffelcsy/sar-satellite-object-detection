@@ -68,6 +68,7 @@ def test_base_is_the_dora_giou_recipe():
     ('f4_wd_exclude_1d', 'e1_stem_96ep', {'wd_exclude_1d'}),
     ('f5_split_lr', 'e1_stem_96ep', {'backbone_lr', 'lr', 'cls_lr'}),
     ('g1_split_lr_200ep', 'e6_stem_200ep', {'backbone_lr', 'lr', 'cls_lr'}),
+    ('d11_full_train_g1_250ep', 'g1_split_lr_200ep', {'epochs', 'val_fraction'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'
