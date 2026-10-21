@@ -67,7 +67,7 @@ MODEL=runs/giou_d11_full_train_g1_250ep/model.pt
 
 # 2) Official val split (unlabelled val/images.json): predictions only -> submission_val.zip
 srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
-  --score-thresh 0.001 --nms-thresh 0.5 \
+  --score-thresh 0.001 --nms-thresh 0.7 \
   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
   --preprocess-cache preprocess_cache/val
 
