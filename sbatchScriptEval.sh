@@ -67,7 +67,7 @@ MODEL=runs/giou_d11_full_train_g1_250ep/model.pt
 
 # 2) Official val split (unlabelled val/images.json): predictions only -> submission_val.zip
 srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
-  --score-thresh 0.001 --nms-thresh 0.7 \
+  --score-thresh 0.001 --nms-thresh 0.6 \
   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
   --preprocess-cache preprocess_cache/val
 
@@ -89,5 +89,15 @@ srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
 #   --preprocess-cache preprocess_cache/val
 # srun --gres=gpu:1 python train.py --config configs/ablations/d11_full_train_g1_250ep.yaml \
 #   --load runs/giou_d11_full_train_g1_250ep/model.pt --score-thresh 0.001 --nms-thresh 0.6 \
+#   --predict "$ROOT/test/images.json" --predict-split test --out runs/eval_test/ \
+#   --preprocess-cache preprocess_cache/test
+
+# 6) The final model d12 (g1 recipe, 200 epochs, all of train): val and test predictions with the tuned post-processing.
+# srun --gres=gpu:1 python train.py --config configs/ablations/d12_full_train_g1.yaml \
+#   --load runs/giou_d12_full_train_g1/model.pt --score-thresh 0.001 --nms-thresh 0.6 \
+#   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
+#   --preprocess-cache preprocess_cache/val
+# srun --gres=gpu:1 python train.py --config configs/ablations/d12_full_train_g1.yaml \
+#   --load runs/giou_d12_full_train_g1/model.pt --score-thresh 0.001 --nms-thresh 0.6 \
 #   --predict "$ROOT/test/images.json" --predict-split test --out runs/eval_test/ \
 #   --preprocess-cache preprocess_cache/test

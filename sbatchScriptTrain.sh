@@ -139,4 +139,8 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 
 # L: the final model. g1's recipe at 250 epochs on all of train (~12 h); no held-out split, so its Codabench score
 # against d10 (38.50) is the only check. Make the zips with sbatchScriptEval.sh section 5.
-srun --gres=gpu:1 python train.py --config configs/ablations/d11_full_train_g1_250ep.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d11_full_train_g1_250ep.yaml --data "$DATA" --wandb --workers 4
+
+# M: the final model. g1's exact recipe (200 epochs) on all of train (~9.7 h); d11 at 250 epochs tied d10 (38.34 vs
+# 38.50). No held-out split: compare its Codabench score with d10's. Make the zips with sbatchScriptEval.sh section 6.
+srun --gres=gpu:1 python train.py --config configs/ablations/d12_full_train_g1.yaml --data "$DATA" --wandb --workers 4

@@ -1,0 +1,9 @@
+# D12 (final model): g1's exact recipe (stem; adapters 3e-4, detection heads 2e-4, classifier 1e-4; 200 epochs;
+# Codabench 36.19 on 90% of train, +0.8 over e6) trained on all of train (val_fraction 0). ~9.7 h. Each piece is
+# checked on Codabench: the rates at 200 epochs (g1 vs e6) and full train on top (d10 vs e6, +3.1), so expect ~39.3.
+# d11 (the same at 250 epochs) tied d10 at 38.34: with the higher rates the schedule peaks earlier. Compare with d10
+# (38.50). The run writes model.pt only: make the zips with sbatchScriptEval.sh section 6.
+base: g1_split_lr_200ep.yaml
+name: giou_d12_full_train_g1
+data:
+  val_fraction: 0
