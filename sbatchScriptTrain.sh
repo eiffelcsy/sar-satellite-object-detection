@@ -149,6 +149,6 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # AP_small beyond seed noise). One change each on f5_split_lr (96 epochs, g1's rates; ~4 h), compared with f5:
 #   h1 ViT-Adapter instead of the P2 stem | h2 8 px tokens (several times slower: time one epoch first, and check the
 #   rule with the TA) | h3 max(IoU, NWD) label assignment. Independent: submit once per line, with only that line active.
-srun --gres=gpu:1 python train.py --config configs/ablations/h1_vit_adapter.yaml --data "$DATA" --wandb --workers 4
-# srun --gres=gpu:1 python train.py --config configs/ablations/h2_patch8.yaml       --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/h1_vit_adapter.yaml --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/h2_patch8.yaml       --data "$DATA" --wandb --workers 4
 # srun --gres=gpu:1 python train.py --config configs/ablations/h3_nwd.yaml          --data "$DATA" --wandb --workers 4
