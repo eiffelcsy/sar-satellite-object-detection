@@ -8,4 +8,4 @@ name: giou_d11_full_train_g1_250ep
 train:
   epochs: 250
 data:
-  val_fraction: 0.1
+  val_fraction: 0

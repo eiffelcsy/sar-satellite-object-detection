@@ -143,3 +143,129 @@ def test_rpn_and_postprocess_settings_reach_the_detector():
     with torch.no_grad():
         _, detections, _ = model(IMAGES)
     assert all(len(d['boxes']) <= 50 for d in detections)
+
+
+def test_class_prior_rescoring_modes():
+    from sarbench.heads import apply_class_prior
+    logits = torch.randn(5, 10)
+    prior = torch.rand(5, 9).softmax(-1)
+    scores = logits.softmax(-1)
+    soft0 = apply_class_prior(logits, prior, 'soft', power=0.0).softmax(-1)
+    torch.testing.assert_close(soft0, scores)  # power 0: unchanged
+    soft = apply_class_prior(logits, prior, 'soft', power=1.0).softmax(-1)
+    torch.testing.assert_close(soft[:, 1:], scores[:, 1:] * prior)  # foreground scaled, background the remainder
+    predicted = prior.argmax(1) + 1
+    hard = apply_class_prior(logits, prior, 'hard').softmax(-1)
+    rows = torch.arange(5)
+    torch.testing.assert_close(hard[rows, predicted], scores[rows, predicted])
+    assert (hard[:, 1:].sum(1) - hard[rows, predicted]).abs().max() < 1e-6  # every other class zeroed
+    merge = apply_class_prior(logits, prior, 'merge').softmax(-1)
+    torch.testing.assert_close(merge[rows, predicted], 1 - scores[:, 0])  # the whole foreground mass
+    with pytest.raises(ValueError):
+        apply_class_prior(logits, prior, 'sharpen')
+
+
+def test_hard_rescoring_keeps_only_the_predicted_image_class():
+    model = MultiTaskModel(_StubBackbone(), num_classes=9, rescore='hard', score_thresh=0.0)
+    model.eval()
+    with torch.no_grad():
+        logits, detections, _ = model(IMAGES)
+    for image_logits, det in zip(logits, detections):
+        assert len(det['labels']) and (det['labels'] == image_logits.argmax() + 1).all()
+
+
+def test_unknown_rescore_mode_is_rejected():
+    with pytest.raises(ValueError):
+        MultiTaskModel(_StubBackbone(), rescore='sharpen')
+
+
+def test_nwd_is_lenient_for_shifted_tiny_boxes_and_max_keeps_iou_for_large_ones():
+    from torchvision.ops import box_iou
+    from sarbench.heads import box_similarity, normalized_wasserstein
+    gt = torch.tensor([[100., 100., 108., 108.], [100., 100., 300., 300.]])
+    boxes = gt + torch.tensor([2., 2., 2., 2.])  # both shifted by 2 px
+    assert torch.allclose(normalized_wasserstein(gt, gt).diagonal(), torch.ones(2))
+    iou, nwd = box_iou(gt, boxes).diagonal(), normalized_wasserstein(gt, boxes, 16.0).diagonal()
+    assert iou[0] < 0.5 < 0.7 < nwd[0]  # tiny box: background by IoU, positive by NWD
+    best = box_similarity('max', 16.0)(gt, boxes).diagonal()
+    torch.testing.assert_close(best, torch.maximum(iou, nwd))
+    with pytest.raises(ValueError):
+        box_similarity('giou')
+
+
+def test_box_similarity_reaches_the_rpn_and_the_roi_head_and_trains():
+    model = MultiTaskModel(_StubBackbone(), box_similarity='nwd', nwd_constant=8.0, giou_weight=1.0)
+    assert model.rpn.box_similarity is model.roi_heads.box_similarity
+    model.train()
+    _, _, losses = model(IMAGES, TARGETS)
+    assert all(torch.isfinite(value) for value in losses.values())
+
+
+def test_feature_pyramid_for_an_8px_vit_keeps_the_strides():
+    from sarbench.model import SimpleFeaturePyramid
+    neck = SimpleFeaturePyramid(dim=128, channels=64, patch_size=8)
+    levels = neck(torch.randn(1, 128, 16, 16))  # a 128 px image at stride 8
+    assert [tuple(f.shape[-2:]) for f in levels.values()] == [(32, 32), (16, 16), (8, 8), (4, 4), (2, 2)]
+    with pytest.raises(ValueError):
+        SimpleFeaturePyramid(dim=128, patch_size=14)
+
+
+class _RecordingBlock(nn.Module):
+    """A token-mixing-free block that accepts the keyword arguments DINOv3 passes (RoPE)."""
+
+    def __init__(self, dim):
+        super().__init__()
+        self.linear = nn.Linear(dim, dim)
+
+    def forward(self, x, **kwargs):
+        return x + self.linear(x)
+
+
+def _adapter_backbone():
+    backbone = _StubBackbone(layers=4)
+    backbone._blocks = nn.ModuleList([_RecordingBlock(128) for _ in range(4)])
+    return backbone.requires_grad_(False)
+
+
+VIT_ADAPTER = {'dim': 32, 'heads': 4, 'points': 2, 'channels': 16, 'interactions': [[0, 1], [2, 3]]}
+
+
+def test_vit_adapter_is_a_noop_on_the_backbone_at_init_and_trains():
+    from sarbench.vit_adapter import InteractionBlock
+    torch.manual_seed(0)
+    plain = MultiTaskModel(_adapter_backbone(), detail_stem=False)
+    adapted = MultiTaskModel(_adapter_backbone(), detail_stem=False, vit_adapter=VIT_ADAPTER)
+    adapted.backbone.load_state_dict(plain.backbone.state_dict(), strict=False)  # wrapped: names differ
+    for wrapped, block in zip(adapted.backbone.blocks, plain.backbone.blocks):
+        inner = wrapped.block if isinstance(wrapped, InteractionBlock) else wrapped
+        inner.load_state_dict(block.state_dict())
+    assert sum(isinstance(b, InteractionBlock) for b in adapted.backbone.blocks) == 4
+    adapted.vit_adapter.prepare(IMAGES)
+    torch.testing.assert_close(adapted.backbone(IMAGES), plain.backbone(IMAGES))  # gamma = 0: injection is a no-op
+    adapted.vit_adapter.outputs()
+    # The adapter is the model's, not the backbone's: counted once, trained at the head learning rate.
+    assert not any('vit_adapter' in name for name, _ in adapted.backbone.named_parameters())
+    adapted.train()
+    _, _, losses = adapted(IMAGES, TARGETS)
+    sum(losses.values()).backward()
+    adapter = adapted.vit_adapter
+    assert adapter.injectors[0].gamma.grad is not None and adapter.extractors[1].attn.value_proj.weight.grad.abs().sum() > 0
+    assert adapter.spatial_prior.stem[0].weight.grad.abs().sum() > 0
+
+
+def test_vit_adapter_needs_prepare_before_the_backbone():
+    model = MultiTaskModel(_adapter_backbone(), vit_adapter=VIT_ADAPTER)
+    with pytest.raises(RuntimeError):
+        model.backbone(IMAGES)
+
+
+def test_deformable_attention_samples_at_the_reference_point():
+    """One point per head with zero offset and a constant value map: the output is that value, projected."""
+    from sarbench.vit_adapter import DeformableAttention, grid_centers
+    attn = DeformableAttention(8, 4, 4, 4, heads=2, levels=1, points=1)
+    with torch.no_grad():
+        attn.sampling_offsets.bias.zero_()
+        attn.value_proj.weight.copy_(torch.eye(4)), attn.output_proj.weight.copy_(torch.eye(4))
+    value = torch.arange(4.).repeat(1, 6 * 6, 1)  # every pixel holds (0, 1, 2, 3)
+    out = attn(torch.randn(1, 9, 8), grid_centers(3, 3), value, [(6, 6)])
+    torch.testing.assert_close(out, torch.arange(4.).expand(1, 9, 4))

@@ -1,0 +1,10 @@
+# H3 (tiny-object label assignment): f5 (stem, 96 epochs, split learning rates) with anchors (RPN) and proposals
+# (RoI head) labelled by max(IoU, NWD) instead of IoU (NWD: Wang et al., 2021, AI-TOD). For a 6-15 px box, a 2 px
+# offset drops IoU below the 0.7 / 0.5 thresholds, so tiny objects get few positives; NWD (C = 16 px, about the
+# median box) decays smoothly with offset, and taking the max keeps IoU's labels for large boxes, where NWD is the
+# stricter of the two. d8 (RPN IoU 0.7 -> 0.6) only moved the threshold. No new parameters. Compare with f5_split_lr.
+base: f5_split_lr.yaml
+name: giou_h3_nwd
+model:
+  box_similarity: max
+  nwd_constant: 16.0

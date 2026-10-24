@@ -2,8 +2,10 @@
 
 Configurable pieces (`model.*` in the YAML): `detail_stem` (real stride-4 detail for P2), `fusion_layers`
 (learnable fusion of several ViT blocks before the neck), `input_adapter` (ImageNet norm + learnable 1x1 conv +
-unfrozen patch embedding), `wst_stem` (wavelet scattering detail for P2), `giou_weight` (GIoU box term) and
-`head` (`standard` | `cascade` RoI head).
+unfrozen patch embedding), `wst_stem` (wavelet scattering detail for P2), `vit_adapter` (ViT-Adapter's spatial prior
+with injectors / extractors, added to P2-P5), `giou_weight` (GIoU box term), `head` (`standard` | `cascade` RoI head),
+`box_similarity` (IoU, NWD or their max for anchor / proposal labels) and `rescore` (re-score the boxes with the
+image classifier at inference).
 """
 from collections import OrderedDict
 
@@ -18,7 +20,8 @@ from torchvision.ops import MultiScaleRoIAlign
 
 from .adapters import adapt_backbone
 from .backbones import DINOv3
-from .heads import CascadeRoIHeads, ConvFCBoxHead, DetRoIHeads
+from .heads import RESCORE_MODES, CascadeRoIHeads, ConvFCBoxHead, DetRoIHeads, box_similarity as make_similarity
+from .vit_adapter import ViTAdapter
 
 # Competition limits (Codabench terms): every parameter counts towards the total, frozen ones included.
 MAX_TOTAL_PARAMETERS = 130_000_000
@@ -26,21 +29,36 @@ MAX_TRAINABLE_PARAMETERS = 40_000_000
 
 
 class SimpleFeaturePyramid(nn.Module):
-    """ViTDet neck (Li et al., 2022): the single stride-16 ViT map -> 256-channel maps at strides 4, 8, 16, 32, 64."""
+    """ViTDet neck (Li et al., 2022): the single ViT map -> 256-channel maps at strides 4, 8, 16, 32, 64.
 
-    def __init__(self, dim=768, channels=256):
+    `patch_size` is the ViT map's stride: 16 (the default) or 8 (`backbone.params.patch_size: 8`).
+    """
+
+    def __init__(self, dim=768, channels=256, patch_size=16):
         super().__init__()
-        self.rescale = nn.ModuleList([
-            nn.Sequential(nn.ConvTranspose2d(dim, dim // 2, 2, stride=2), nn.GroupNorm(32, dim // 2), nn.GELU(),
-                          nn.ConvTranspose2d(dim // 2, dim // 4, 2, stride=2)),  # stride 4
-            nn.ConvTranspose2d(dim, dim // 2, 2, stride=2),  # stride 8
-            nn.Identity(),  # stride 16
-            nn.MaxPool2d(2),  # stride 32
-        ])
+        if patch_size == 16:
+            self.rescale = nn.ModuleList([
+                nn.Sequential(nn.ConvTranspose2d(dim, dim // 2, 2, stride=2), nn.GroupNorm(32, dim // 2), nn.GELU(),
+                              nn.ConvTranspose2d(dim // 2, dim // 4, 2, stride=2)),  # stride 4
+                nn.ConvTranspose2d(dim, dim // 2, 2, stride=2),  # stride 8
+                nn.Identity(),  # stride 16
+                nn.MaxPool2d(2),  # stride 32
+            ])
+            widths = (dim // 4, dim // 2, dim, dim)
+        elif patch_size == 8:
+            self.rescale = nn.ModuleList([
+                nn.ConvTranspose2d(dim, dim // 2, 2, stride=2),  # stride 4
+                nn.Identity(),  # stride 8
+                nn.MaxPool2d(2),  # stride 16
+                nn.MaxPool2d(4),  # stride 32
+            ])
+            widths = (dim // 2, dim, dim, dim)
+        else:
+            raise ValueError(f'SimpleFeaturePyramid supports ViT strides 16 and 8, got {patch_size}')
         self.project = nn.ModuleList(
             nn.Sequential(nn.Conv2d(c, channels, 1, bias=False), nn.GroupNorm(32, channels),
                           nn.Conv2d(channels, channels, 3, padding=1, bias=False), nn.GroupNorm(32, channels))
-            for c in (dim // 4, dim // 2, dim, dim))
+            for c in widths)
 
     def forward(self, x):
         levels = [project(rescale(x)) for rescale, project in zip(self.rescale, self.project)]
@@ -144,16 +162,25 @@ class MultiTaskModel(nn.Module):
     def __init__(self, backbone, num_classes=9, detail_stem=False, fusion_layers=None, giou_weight=0.0,
                  roi_sampling_ratio=2, roi_output_size=7, input_adapter=False, wst_stem=False, wst_params=None,
                  head='standard', head_params=None, detail_stem_params=None, rpn_fg_iou_thresh=0.7,
-                 rpn_bg_iou_thresh=0.3, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100):
+                 rpn_bg_iou_thresh=0.3, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100,
+                 vit_adapter=None, box_similarity='iou', nwd_constant=16.0, rescore='off', rescore_power=1.0):
         super().__init__()
+        if rescore not in RESCORE_MODES:
+            raise ValueError(f"unknown rescore mode '{rescore}'; available: {', '.join(RESCORE_MODES)}")
         self.backbone = backbone
+        self.patch_size = getattr(backbone, 'patch_size', 16)
         self.cls_head = nn.Sequential(nn.LayerNorm(backbone.embed_dim), nn.Linear(backbone.embed_dim, num_classes))
-        self.neck = SimpleFeaturePyramid(backbone.embed_dim)
+        self.neck = SimpleFeaturePyramid(backbone.embed_dim, patch_size=self.patch_size)
         self.detail_stem = ConvStem(backbone.in_chans, **(detail_stem_params or {})) if detail_stem else None
         self.input_adapter = InputAdapter(backbone.in_chans) if input_adapter else None
         self.wst_stem = WSTStem(**(wst_params or {})) if wst_stem else None
         if input_adapter and hasattr(backbone, 'unfreeze_patch_embed'):  # adapt_backbone froze it; re-enable it
             backbone.unfreeze_patch_embed()
+        self.vit_adapter = None
+        if vit_adapter:  # wraps the interaction blocks, after DoRA / Convpass (adapt_backbone) wrapped them
+            self.vit_adapter = ViTAdapter(backbone.embed_dim, getattr(backbone, 'num_prefix_tokens', 0),
+                                          self.patch_size, in_chans=backbone.in_chans, **vit_adapter)
+            self.vit_adapter.attach(backbone)
         # Multi-layer fusion: normalize negative indices, register hooks in execution order.
         self.fusion_layers = self.fusion = None
         if fusion_layers:
@@ -174,6 +201,9 @@ class MultiTaskModel(nn.Module):
                                       sampling_ratio=roi_sampling_ratio)
         self.roi_heads = self._build_roi_heads(roi_pool, roi_output_size, num_classes, head, head_params or {},
                                                giou_weight, score_thresh, nms_thresh, detections_per_img)
+        self.roi_heads.rescore, self.roi_heads.rescore_power = rescore, rescore_power
+        # Anchor (RPN) and proposal (RoI head) labels: IoU, NWD or their max against the same thresholds.
+        self.rpn.box_similarity = self.roi_heads.box_similarity = make_similarity(box_similarity, nwd_constant)
 
     @staticmethod
     def _build_roi_heads(roi_pool, resolution, num_classes, head, params, giou_weight, score_thresh, nms_thresh,
@@ -235,10 +265,15 @@ class MultiTaskModel(nn.Module):
         """images [B, C, H, W], targets: per-image {'boxes' XYXY, 'labels' 1..9} (training only) ->
         (logits [B, num_classes], per-image detections (eval mode), the detection losses (training mode))."""
         backbone_images = self.input_adapter(images) if self.input_adapter is not None else images
+        if self.vit_adapter is not None:  # the spatial prior runs first: its injectors act inside the backbone
+            self.vit_adapter.prepare(images)
         tokens = self._backbone_tokens(backbone_images)
         logits = self.cls_head(tokens.mean(dim=1))
-        h, w = images.shape[-2] // 16, images.shape[-1] // 16  # one token per 16 x 16 patch
+        h, w = images.shape[-2] // self.patch_size, images.shape[-1] // self.patch_size  # one token per patch
         features = self.neck(tokens.transpose(1, 2).unflatten(2, (h, w)))  # tokens as a [B, 768, h, w] map
+        if self.vit_adapter is not None:  # the SPM features (strides 4-32) added to P2-P5
+            for name, extra in zip(('0', '1', '2', '3'), self.vit_adapter.outputs()):
+                features[name] = features[name] + extra.to(features[name].dtype)
         if self.detail_stem is not None:  # add genuine stride-4 detail (from the pixels) to the upsampled P2
             features['0'] = features['0'] + self.detail_stem(images.to(features['0'].dtype))
         if self.wst_stem is not None:  # scattering detail (81 coeffs at stride 4) added to P2
@@ -249,7 +284,9 @@ class MultiTaskModel(nn.Module):
             features = {name: f.float() for name, f in features.items()}
             image_list = ImageList(images, [tuple(images.shape[-2:])] * len(images))
             proposals, rpn_losses = self.rpn(image_list, features, targets)
-            detections, roi_losses = self.roi_heads(features, proposals, image_list.image_sizes, targets)
+            # At inference the image classifier's probabilities re-score the boxes (roi_heads.rescore, off by default).
+            detections, roi_losses = self.roi_heads(features, proposals, image_list.image_sizes, targets,
+                                                    class_prior=None if self.training else logits.float().softmax(-1))
         return logits, detections, {**rpn_losses, **roi_losses}
 
 
@@ -270,7 +307,9 @@ def build_model(args):
                            head_params=args.head_params, detail_stem_params=args.detail_stem_params,
                            rpn_fg_iou_thresh=args.rpn_fg_iou_thresh, rpn_bg_iou_thresh=args.rpn_bg_iou_thresh,
                            score_thresh=args.score_thresh, nms_thresh=args.nms_thresh,
-                           detections_per_img=args.detections_per_img)
+                           detections_per_img=args.detections_per_img, vit_adapter=args.vit_adapter,
+                           box_similarity=args.box_similarity, nwd_constant=args.nwd_constant,
+                           rescore=args.rescore, rescore_power=args.rescore_power)
     return model, pretrained_ids
 
 

@@ -1,0 +1,13 @@
+# H2 (finer tokens): f5 (stem, 96 epochs, split learning rates) with the ViT re-tokenized at 8 px: the patch embedding
+# is PI-resized from 16 to 8 px (FlexiViT), so the same 512 px input gives 64 x 64 tokens and each token sees what a
+# pretrained 16 px token would on a 2x-upsampled patch. Half of the boxes are smaller than a 16 px patch, and AP_small
+# has not moved with any change so far (0.38 at 200 epochs vs 0.58 / 0.67 medium / large). 4x the tokens: about
+# 4-6x the backbone compute; gradient checkpointing keeps batch 16 within an L40S. Time one epoch first.
+# Check with the TA that a finer internal tokenization is within "each image in once at <= 512 px".
+# Compare with f5_split_lr.
+base: f5_split_lr.yaml
+name: giou_h2_patch8
+backbone:
+  params:
+    patch_size: 8
+    grad_checkpointing: true

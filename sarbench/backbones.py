@@ -1,9 +1,30 @@
-"""The DINOv3 backbone, built for 512 px input: images [B, 3, 512, 512] -> patch tokens [B, 1024, embed_dim].
+"""The DINOv3 backbone, built for 512 px input: images [B, 3, 512, 512] -> patch tokens [B, 1024, embed_dim]
+(or [B, 4096, embed_dim] with `patch_size: 8`).
 
-It exposes `embed_dim`, `num_prefix_tokens`, a `blocks` list, `adapter_targets()` (the projections that DoRA may
-wrap, with their block index) and a forward that returns the final patch tokens (prefix tokens dropped).
+It exposes `embed_dim`, `patch_size`, `num_prefix_tokens`, a `blocks` list, `adapter_targets()` (the projections that
+DoRA may wrap, with their block index) and a forward that returns the final patch tokens (prefix tokens dropped).
 """
+import torch
+import torch.nn.functional as F
 from torch import nn
+
+
+def resize_patch_kernel(weight, size):
+    """FlexiViT's PI-resize (Beyer et al., 2023) of a patch-embedding kernel [D, C, p, p] to [D, C, size, size].
+
+    The new kernel on a size x size patch gives the token the old kernel gives on that patch bilinearly resized to
+    p x p: <B x, w> = <x, B^T w>, with B the resize matrix. Going from 16 to 8 px, every 8 x 8 patch is embedded
+    exactly as its 2x bilinear upsampling would be (about the image upsampled 2x, up to the patch borders), so the
+    frozen ViT sees tokens like the ones it was pretrained on (for
+    upsampling to a larger patch the pseudo-inverse of B^T would be needed instead; not used here).
+    """
+    old = weight.shape[-1]
+    if size > old:
+        raise ValueError(f'patch_size {size} > the pretrained {old}: only smaller patches are supported')
+    basis = torch.eye(size * size, dtype=torch.float64).view(-1, 1, size, size)
+    resize = F.interpolate(basis, size=(old, old), mode='bilinear', align_corners=False).view(size * size, -1)
+    resized = weight.double().flatten(2) @ resize.T  # [D, C, old*old] @ [old*old, size*size]
+    return resized.view(*weight.shape[:2], size, size).to(weight.dtype)
 
 
 class DINOv3(nn.Module):
@@ -13,10 +34,15 @@ class DINOv3(nn.Module):
     `model_name` selects the checkpoint (default facebook/dinov3-vitb16-pretrain-lvd1689m, 86 M parameters).
     The checkpoints are gated on Hugging Face: accept the licence on the model page and `huggingface-cli login`
     once before the first run.
+
+    `patch_size` (default: the checkpoint's 16) below 16 re-tokenizes the same 512 px input on a finer grid: 8 gives
+    64 x 64 tokens, so half of the boxes are no longer smaller than one token. The patch embedding is PI-resized
+    (`resize_patch_kernel`) and RoPE takes its grid from the input and the patch size, so nothing else changes;
+    the cost is 4x the tokens (16x the attention).
     """
 
     def __init__(self, pretrained: bool = True, model_name: str = 'facebook/dinov3-vitb16-pretrain-lvd1689m',
-                 grad_checkpointing: bool = False, **kwargs):
+                 grad_checkpointing: bool = False, patch_size: int | None = None, **kwargs):
         super().__init__()
         from transformers import DINOv3ViTConfig, DINOv3ViTModel  # lazy: keeps `import sarbench` light
         if pretrained:
@@ -27,7 +53,17 @@ class DINOv3(nn.Module):
             self.dinov3.gradient_checkpointing_enable()
             if hasattr(self.dinov3, 'enable_input_require_grads'):  # frozen embeddings still need a grad path
                 self.dinov3.enable_input_require_grads()
+        if patch_size is not None and patch_size != self.dinov3.config.patch_size:
+            embed = self.dinov3.embeddings.patch_embeddings
+            resized = nn.Conv2d(embed.in_channels, embed.out_channels, patch_size, stride=patch_size)
+            with torch.no_grad():
+                resized.weight.copy_(resize_patch_kernel(embed.weight, patch_size))
+                resized.bias.copy_(embed.bias)
+            resized.requires_grad_(embed.weight.requires_grad)
+            self.dinov3.embeddings.patch_embeddings = resized
+            self.dinov3.config.patch_size = patch_size  # the RoPE grid is input size // config.patch_size
         self.model_name = model_name
+        self.patch_size = self.dinov3.config.patch_size
         self.embed_dim = self.dinov3.config.hidden_size
         self.in_chans = self.dinov3.config.num_channels
         self.num_prefix_tokens = 1 + getattr(self.dinov3.config, 'num_register_tokens', 0)

@@ -74,6 +74,33 @@ optimizer step (decay ramped from ~0.1 to `ema_decay`), is used for validation, 
 channels at stride 4, P2's resolution) on the first input channel, projected to 256 channels and added to P2
 (~0.6 M).
 
+**ViT-Adapter** (`model.vit_adapter`, `sarbench/vit_adapter.py`; Chen et al., ICLR 2023). A spatial prior module (a
+conv stem and three stride-2 convs: strides 4, 8, 16, 32, projected to `dim`) runs on the input image. For each
+`interactions` entry `[start, end]`, an injector before block `start` lets the ViT patch tokens cross-attend to the
+stride 8/16/32 features (multi-scale deformable attention, `heads` x 3 levels x `points`) and adds the result scaled
+by a zero-initialized gamma, so it starts as a no-op; an extractor after block `end` lets the spatial features
+cross-attend to the patch tokens, then a ConvFFN (`ffn_ratio`). After the backbone the four spatial levels are
+projected to 256 channels and added to P2-P5. Deformable attention is pure PyTorch (`grid_sample`), no CUDA build.
+The adapter is outside the backbone, so it trains at `train.lr`. `h1` uses `dim` 128, 4 heads, 4 points, `channels`
+32 (1.88 M) and drops the P2 stem, whose role the stride-4 output takes over.
+
+**Patch size** (`backbone.params.patch_size: 8`). The 16 px patch embedding is PI-resized to 8 px (FlexiViT): the
+new kernel is B^T w, B the bilinear 8 -> 16 resize, so an 8 px token is exactly the pretrained token of that patch
+upsampled to 16 px. RoPE takes its grid from the input size and `config.patch_size`, so the 512 px input gives
+64 x 64 tokens with the same normalized coordinates. The neck then starts from stride 8 (one deconv to P2, max-pools
+to P4 / P5). 4x the tokens, 16x the attention: `grad_checkpointing: true` keeps batch 16 in memory, at ~30 % speed.
+
+**Box similarity** (`model.box_similarity`, `nwd_constant`). What the RPN (0.7 / 0.3) and RoI (0.5) thresholds
+compare: `iou` (default), `nwd` (normalized Wasserstein distance, exp(-W2 / C), boxes as Gaussians; Wang et al. 2021)
+or `max` (the larger of the two). A 2 px shift puts an 8 px box at IoU 0.39 but NWD 0.84 (C = 16), so tiny objects
+get more positive anchors and proposals; for large boxes NWD is the stricter one and `max` keeps IoU's labels. More
+(and looser) positives raise the logged box-regression losses.
+
+**Image-class re-scoring** (`model.rescore`, `rescore_power`; inference only). The RoI head's class scores are
+re-scored with the image classifier's softmax before the score threshold, NMS and top-k (`apply_class_prior`):
+`soft` p(c | box) p(c | image)^power, `hard` only the predicted image class, `merge` 1 - p(background | box) to the
+predicted image class. Needs no retraining: sweep it with `sweep_postprocess.py --rescore ...`.
+
 **Multi-layer fusion** (`model.fusion_layers: [5, 8, 11]`). Forward hooks capture those blocks' tokens; a learnable
 softmax weighting (initialized to the last block) combines them before the neck. Cost: one weight per block.
 

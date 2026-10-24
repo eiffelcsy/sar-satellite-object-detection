@@ -70,6 +70,9 @@ def test_base_is_the_dora_giou_recipe():
     ('g1_split_lr_200ep', 'e6_stem_200ep', {'backbone_lr', 'lr', 'cls_lr'}),
     ('d11_full_train_g1_250ep', 'g1_split_lr_200ep', {'epochs', 'val_fraction'}),
     ('d12_full_train_g1', 'g1_split_lr_200ep', {'val_fraction'}),
+    ('h1_vit_adapter', 'f5_split_lr', {'detail_stem', 'vit_adapter'}),
+    ('h2_patch8', 'f5_split_lr', {'backbone_kwargs'}),
+    ('h3_nwd', 'f5_split_lr', {'box_similarity'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'
@@ -103,3 +106,9 @@ def test_training_seed_does_not_move_the_held_out_split():
     """e3 changes only the training seed; its held-out images are d1's, so the two are scored on the same split."""
     d1, e3 = (load_config(CONFIGS / 'ablations' / f'{name}.yaml') for name in ('d1_96ep', 'e3_d1_seed1'))
     assert (d1['seed'], e3['seed']) == (0, 1) and d1['split_seed'] == e3['split_seed'] == 0
+
+
+def test_a_bare_yaml_off_turns_rescoring_off(tmp_path):
+    path = tmp_path / 'rescore.yaml'
+    path.write_text('model: {rescore: off}')  # YAML 1.1 reads it as false
+    assert load_config(path)['rescore'] == 'off'

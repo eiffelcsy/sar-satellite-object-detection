@@ -10,7 +10,8 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
     backbone:
       name: dinov3                 # the only backbone
       pretrained: true
-      params: {model_name: facebook/dinov3-vitb16-pretrain-lvd1689m}
+      params: {model_name: facebook/dinov3-vitb16-pretrain-lvd1689m, patch_size: 8, grad_checkpointing: true}
+                                   # patch_size 8: PI-resized patch embedding, 64 x 64 tokens at 512 px
     peft:
       method: dora                 # the only adapter
       params: {rank: 32, alpha: 32}
@@ -37,6 +38,13 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
       detail_stem_params: {channels: 64, extra_convs: 0}   # P2 conv stem width / extra stride-4 3x3 convs
       rpn_fg_iou_thresh: 0.7       # RPN anchor positive / negative IoU thresholds
       rpn_bg_iou_thresh: 0.3
+      box_similarity: iou          # what those thresholds (and the RoI head's 0.5) compare: iou | nwd | max
+      nwd_constant: 16.0           # NWD's C in px (about the typical box size)
+      vit_adapter: {dim: 192, heads: 6, points: 4, interactions: [[0, 2], [3, 5], [6, 8], [9, 11]],
+                    ffn_ratio: 0.25, channels: 64}
+                                   # ViT-Adapter: spatial prior + injectors / extractors, added to P2-P5
+      rescore: 'off'               # inference: re-score boxes with the image classifier: off | soft | hard | merge
+      rescore_power: 1.0           # soft: p(c | box) * p(c | image) ** rescore_power
       score_thresh: 0.05           # inference post-processing only (sweep it with sweep_postprocess.py)
       nms_thresh: 0.5
       detections_per_img: 100
@@ -91,6 +99,11 @@ DEFAULTS = {
     'score_thresh': 0.05,
     'nms_thresh': 0.5,
     'detections_per_img': 100,
+    'vit_adapter': None,
+    'box_similarity': 'iou',
+    'nwd_constant': 16.0,
+    'rescore': 'off',
+    'rescore_power': 1.0,
     'name': None,
     'epochs': 24,
     'stage_a_epochs': 0,
@@ -133,7 +146,8 @@ DEFAULTS = {
 
 _MODEL_KEYS = ('detail_stem', 'fusion_layers', 'input_adapter', 'wst_stem', 'wst_params', 'giou_weight',
                'roi_sampling_ratio', 'roi_output_size', 'head', 'head_params', 'detail_stem_params',
-               'rpn_fg_iou_thresh', 'rpn_bg_iou_thresh', 'score_thresh', 'nms_thresh', 'detections_per_img')
+               'rpn_fg_iou_thresh', 'rpn_bg_iou_thresh', 'score_thresh', 'nms_thresh', 'detections_per_img',
+               'vit_adapter', 'box_similarity', 'nwd_constant', 'rescore', 'rescore_power')
 _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'unfrozen_lr',
                'cls_lr', 'ema_decay', 'warmup_epochs', 'wd_exclude_1d', 'weight_decay', 'eval_every', 'workers',
                'seed')
@@ -192,6 +206,8 @@ def load_config(path):
     for key in _MODEL_KEYS:
         if key in model:
             config[key] = model[key]
+    if config['rescore'] is False:  # YAML 1.1 reads a bare `off` as false
+        config['rescore'] = 'off'
     if config['fusion_layers'] is not None:
         config['fusion_layers'] = list(config['fusion_layers']) or None
 

@@ -94,6 +94,10 @@ def parse_args(argv=None):
     p.add_argument('--nms-thresh', type=float, default=cfg['nms_thresh'], help='inference: per-class NMS IoU')
     p.add_argument('--detections-per-img', type=int, default=cfg['detections_per_img'],
                    help='inference: keep at most this many detections per image')
+    p.add_argument('--rescore', choices=['off', 'soft', 'hard', 'merge'], default=cfg['rescore'],
+                   help='inference: re-score boxes with the image classifier (see sarbench/heads.py)')
+    p.add_argument('--rescore-power', type=float, default=cfg['rescore_power'],
+                   help='inference, --rescore soft: p(c | box) * p(c | image) ** power')
     p.add_argument('--predict-split', default='val',
                    help='name for the --predict output zip, submission_<predict-split>.zip')
     p.add_argument('--pseudo-rgb', action='store_true', default=cfg['pseudo_rgb'],
@@ -125,7 +129,7 @@ def parse_args(argv=None):
     for key in ('pretrained', 'backbone_kwargs', 'peft_kwargs', 'peft_targets', 'rank_overrides', 'full_blocks',
                 'conv_adapters', 'giou_weight', 'roi_sampling_ratio', 'roi_output_size', 'wst_params',
                 'loss_weights', 'head', 'head_params', 'detail_stem_params', 'rpn_fg_iou_thresh',
-                'rpn_bg_iou_thresh', 'ema_decay'):
+                'rpn_bg_iou_thresh', 'ema_decay', 'vit_adapter', 'box_similarity', 'nwd_constant'):
         setattr(args, key, cfg[key])
     if args.predict is not None and args.load is None:
         p.error('--predict needs --load with the trained weights')

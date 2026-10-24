@@ -1,0 +1,16 @@
+# H1 (spatial prior inside the backbone): f5 (stem, 96 epochs, split learning rates) with the P2 conv stem replaced by
+# a lite ViT-Adapter (Chen et al., 2023): a conv spatial prior at strides 4-32 whose features are injected into the
+# frozen ViT (deformable cross-attention before blocks 0/3/6/9, zero-init) and extracted back from it (after blocks
+# 2/5/8/11), then added to P2-P5. The stem and Convpass only add detail after the backbone or between 16 px tokens;
+# here the backbone itself sees sub-patch detail. Width 128 (the paper uses the ViT's 768) to fit the 40 M budget
+# with the stem's 0.95 M freed: 1.88 M, 39.79 M trainable. Compare with f5_split_lr, AP_small first.
+base: f5_split_lr.yaml
+name: giou_h1_vit_adapter
+model:
+  detail_stem: false      # the adapter's stride-4 output replaces it on P2
+  vit_adapter:
+    dim: 128
+    heads: 4
+    points: 4
+    channels: 32
+    interactions: [[0, 2], [3, 5], [6, 8], [9, 11]]

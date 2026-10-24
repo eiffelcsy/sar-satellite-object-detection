@@ -135,6 +135,9 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `g1_split_lr_200ep` | f5's learning rates at 200 epochs | e6 | 123.93 | 38.86 |
 | `d11_full_train_g1_250ep` | g1's recipe at 250 epochs on all of train | g1 | 123.93 | 38.86 |
 | `d12_full_train_g1` | final model: g1's recipe (200 epochs) on all of train | g1 | 123.93 | 38.86 |
+| `h1_vit_adapter` | P2 stem replaced by a lite ViT-Adapter (spatial prior injected into / extracted from the ViT) | f5 | 124.86 | 39.79 |
+| `h2_patch8` | ViT re-tokenized at 8 px (PI-resized patch embedding: 64 x 64 tokens) | f5 | 122.16 | 37.09 |
+| `h3_nwd` | anchors and proposals labelled by max(IoU, NWD) (tiny-object label assignment) | f5 | 123.93 | 38.86 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.
@@ -172,9 +175,15 @@ python train.py --config configs/dinov3_dora_giou.yaml \
 zips; `--predict` requires `--load` and skips metrics, so it needs no labels.
 
 **Post-processing.** `sweep_postprocess.py` (same flags as `train.py`, plus `--score-thresh` / `--nms-thresh` lists)
-re-scores a saved model on the held-out split for each score threshold x NMS IoU, without retraining, and writes
-`postprocess_sweep.json`. Apply the best setting to `--predict` with `--score-thresh` and `--nms-thresh`, or set
-`model.score_thresh` / `model.nms_thresh` in the config.
+re-scores a saved model on the held-out split for each score threshold x NMS IoU (x image-class re-scoring, below),
+without retraining, and writes `postprocess_sweep.json`. Apply the best setting to `--predict` with `--score-thresh`,
+`--nms-thresh`, `--rescore` and `--rescore-power`, or set the matching `model.*` keys in the config.
+
+**Image-class re-scoring** (`--rescore`, off by default). Every image has one class, so a box of any other class is a
+false positive. At inference the image classifier's probabilities re-score the boxes before the score threshold, NMS
+and top-100: `soft` multiplies each class score by p(class | image)^power, `hard` keeps only the predicted image
+class, `merge` gives that class the box's whole foreground probability. Sweep it on an existing model:
+`python sweep_postprocess.py ... --score-thresh 0.001 --nms-thresh 0.6 --rescore off soft hard merge --rescore-power 0.5 1 2`.
 
 
 ## 3. Baseline Results (for reference)

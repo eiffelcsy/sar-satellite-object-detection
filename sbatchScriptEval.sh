@@ -66,10 +66,10 @@ MODEL=runs/giou_d12_full_train_g1/model.pt
 #   --data "$DATA" --out runs/eval_heldout
 
 # 2) Official val split (unlabelled val/images.json): predictions only -> submission_val.zip
-srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
-  --score-thresh 0.001 --nms-thresh 0.6 \
-  --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
-  --preprocess-cache preprocess_cache/val
+# srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
+#   --score-thresh 0.001 --nms-thresh 0.6 \
+#   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
+#   --preprocess-cache preprocess_cache/val
 
 # 3) Official test split (unlabelled test/images.json): predictions only -> submission_test.zip
 # srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
@@ -101,3 +101,9 @@ srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
 #   --load runs/giou_d12_full_train_g1/model.pt --score-thresh 0.001 --nms-thresh 0.6 \
 #   --predict "$ROOT/test/images.json" --predict-split test --out runs/eval_test/ \
 #   --preprocess-cache preprocess_cache/test
+
+# 7) Image-class re-scoring sweep (no retraining) on g1, the best model with a held-out split. A d12 model has no
+#    held-out split, so sweep here and apply the winner to d12's --predict with --rescore / --rescore-power.
+srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/g1_split_lr_200ep.yaml \
+  --load runs/giou_g1_split_lr_200ep/model.pt --data "$DATA" --workers 4 \
+  --score-thresh 0.001 --nms-thresh 0.6 --rescore off soft hard merge --rescore-power 0.5 1 2 4
