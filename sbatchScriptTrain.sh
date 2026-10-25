@@ -162,5 +162,5 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 
 # O: trade macro-F1 for mAP (delta-m: +1 mAP ~ +1.97, -1 F1 ~ -0.53). One change each on g1 (200 epochs, ~8.7 h),
 # compared with g1: i1 classification loss weight 0.1 | i2 no classification gradient into the backbone.
-# srun --gres=gpu:1 python train.py --config configs/ablations/i1_cls_loss01_200ep.yaml  --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/i2_cls_detach_200ep.yaml  --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/i1_cls_loss025_200ep.yaml  --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/i2_cls_detach_200ep.yaml  --data "$DATA" --wandb --workers 4
