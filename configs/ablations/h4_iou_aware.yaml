@@ -1,0 +1,12 @@
+# H4 (localization-aware ranking): f5 (stem, 96 epochs, split learning rates) with an IoU branch on the RoI head: one
+# linear layer (9.2 k parameters) predicts, per class, the IoU of the decoded box with its GT, trained with BCE on the
+# sampled positives (loss_iou, weight 1.0). At inference detections are ranked by class score x predicted IoU ** 0.5.
+# The class score says nothing about how tight a box is, and the gap is in localization (g1: AP50 0.73 vs AP75 0.47),
+# not in box classes (image-class re-scoring changed nothing). Compare with f5_split_lr; then sweep --iou-alpha
+# 0 0.25 0.5 1 2 on the saved model: alpha 0 is the same model ranked by class score alone, which separates the ranking
+# from the extra training signal.
+base: f5_split_lr.yaml
+name: giou_h4_iou_aware
+model:
+  iou_aware: true
+  iou_alpha: 0.5

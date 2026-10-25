@@ -1,0 +1,9 @@
+# H5 (LoRA+): f5 (stem, 96 epochs, split learning rates) with the DoRA B (up) matrices at 8x the adapter rate
+# (2.4e-3; A, the magnitudes and Convpass stay at 3e-4). LoRA+ (Hayou et al., 2024): with B zero-initialized, equal
+# rates for A and B are suboptimal and slow the update's growth; the paper's best ratios are 2^3-2^4. The schedule
+# kept paying up to 200 epochs, so a faster-converging adapter is worth testing. No new parameters. If it wins, try
+# 16; if it destabilizes (loss spikes early), 4. Compare with f5_split_lr.
+base: f5_split_lr.yaml
+name: giou_h5_lora_plus
+train:
+  lora_plus_ratio: 8.0

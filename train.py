@@ -16,6 +16,7 @@ from sarbench.channels import PseudoRGB
 from sarbench.config import DEFAULTS, load_config
 from sarbench.data import (SARImages, SARMultiTask, collate, collate_images, split_available,
                            to_original_xywh)
+from sarbench.adapters import dora_up_weights
 from sarbench.ema import ModelEMA
 from sarbench.metrics import classification_metrics, detection_metrics
 from sarbench.model import MAX_TOTAL_PARAMETERS, MAX_TRAINABLE_PARAMETERS, build_model, parameter_counts
@@ -52,6 +53,8 @@ def parse_args(argv=None):
     p.add_argument('--lr', type=float, default=cfg['lr'])
     p.add_argument('--backbone-lr', type=float, default=cfg['backbone_lr'],
                    help='for the new backbone parameters: DoRA and Convpass adapters (default: --lr)')
+    p.add_argument('--lora-plus-ratio', type=float, default=cfg['lora_plus_ratio'],
+                   help='LoRA+: the DoRA B (up) matrices at --backbone-lr x this ratio (1 = off)')
     p.add_argument('--cls-lr', type=float, default=cfg['cls_lr'],
                    help='for the image classifier head (default: --lr)')
     p.add_argument('--unfrozen-lr', type=float, default=cfg['unfrozen_lr'],
@@ -98,6 +101,8 @@ def parse_args(argv=None):
                    help='inference: re-score boxes with the image classifier (see sarbench/heads.py)')
     p.add_argument('--rescore-power', type=float, default=cfg['rescore_power'],
                    help='inference, --rescore soft: p(c | box) * p(c | image) ** power')
+    p.add_argument('--iou-alpha', type=float, default=cfg['iou_alpha'],
+                   help='inference, model.iou_aware: rank detections by class score x predicted IoU ** alpha')
     p.add_argument('--predict-split', default='val',
                    help='name for the --predict output zip, submission_<predict-split>.zip')
     p.add_argument('--pseudo-rgb', action='store_true', default=cfg['pseudo_rgb'],
@@ -129,7 +134,8 @@ def parse_args(argv=None):
     for key in ('pretrained', 'backbone_kwargs', 'peft_kwargs', 'peft_targets', 'rank_overrides', 'full_blocks',
                 'conv_adapters', 'giou_weight', 'roi_sampling_ratio', 'roi_output_size', 'wst_params',
                 'loss_weights', 'head', 'head_params', 'detail_stem_params', 'rpn_fg_iou_thresh',
-                'rpn_bg_iou_thresh', 'ema_decay', 'vit_adapter', 'box_similarity', 'nwd_constant'):
+                'rpn_bg_iou_thresh', 'ema_decay', 'vit_adapter', 'box_similarity', 'nwd_constant', 'iou_aware',
+                'heatmap_aux'):
         setattr(args, key, cfg[key])
     if args.predict is not None and args.load is None:
         p.error('--predict needs --load with the trained weights')
@@ -403,9 +409,13 @@ def main():
 
     # Four parameter groups: new backbone parameters (DoRA, Convpass) at --backbone-lr, pretrained weights made
     # trainable (patch embedding, full_blocks) gently at --unfrozen-lr, the image classifier at --cls-lr, and every
-    # other new module outside the backbone (neck, RPN, RoI head, stems, input adapter) at --lr.
+    # other new module outside the backbone (neck, RPN, RoI head, stems, input adapter) at --lr. With
+    # --lora-plus-ratio, the DoRA B matrices get a fifth group at --backbone-lr x that ratio.
     backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
     new_backbone = [p for p in backbone_params if id(p) not in pretrained_ids]
+    lora_up_ids = {id(p) for p in dora_up_weights(model.backbone)} if args.lora_plus_ratio != 1 else set()
+    lora_up = [p for p in new_backbone if id(p) in lora_up_ids]  # LoRA+: B at backbone_lr x lora_plus_ratio
+    new_backbone = [p for p in new_backbone if id(p) not in lora_up_ids]
     unfrozen = [p for p in backbone_params if id(p) in pretrained_ids]
     head_params = [p for name, p in model.named_parameters() if not name.startswith('backbone.')]
     cls_ids = {id(p) for p in model.cls_head.parameters()}
@@ -429,6 +439,8 @@ def main():
 
     # Stage B (and the only stage when stage_a_epochs is 0): trainable backbone at --backbone-lr, heads at --lr.
     groups = (decay_groups(new_backbone, args.weight_decay, args.wd_exclude_1d, lr=args.backbone_lr)
+              + decay_groups(lora_up, args.weight_decay, args.wd_exclude_1d,
+                             lr=args.backbone_lr * args.lora_plus_ratio)
               + decay_groups(unfrozen, args.weight_decay, args.wd_exclude_1d, lr=args.unfrozen_lr)
               + decay_groups(cls_params, args.weight_decay, args.wd_exclude_1d, lr=args.cls_lr)
               + decay_groups(det_params, args.weight_decay, args.wd_exclude_1d, lr=args.lr))

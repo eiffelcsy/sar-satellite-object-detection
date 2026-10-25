@@ -113,6 +113,12 @@ class AdaptedBlock(nn.Module):
         return self.adapter(out, source=hidden_states if self.placement == 'parallel' else None)
 
 
+def dora_up_weights(module):
+    """The DoRA `up` (B) matrices under `module`: the zero-initialized half of each low-rank update, which LoRA+
+    (Hayou et al., 2024) trains at a higher learning rate than `down` (A). Convpass's own `up` is not included."""
+    return [m.up.weight for m in module.modules() if isinstance(m, DoRA)]
+
+
 def adapt_backbone(backbone, targets=('attn', 'mlp'), rank=32, alpha=32, rank_overrides=None, full_blocks=(),
                    conv_layers=(), conv_dim=128, conv_kernel='dense', conv_placement='sequential'):
     """Freeze `backbone`, then apply the per-block options described in the module docstring (in place)."""

@@ -1,0 +1,9 @@
+# H6 (dense small-object supervision): f5 (stem, 96 epochs, split learning rates) + a training-only CenterNet heatmap
+# head on P2 (stride 4): one heatmap per class, a Gaussian peak at every GT centre, penalty-reduced focal loss
+# (loss_heatmap, weight 1.0). Tiny objects get few positive anchors, so P2 and the stem get little direct signal for
+# them; here every object supervises P2 at its own location. A training signal, not a new spatial module (those have
+# all been neutral or worse). Dropped at inference; 0.15 M trainable. Compare with f5_split_lr, AP_small first.
+base: f5_split_lr.yaml
+name: giou_h6_p2_heatmap
+model:
+  heatmap_aux: true

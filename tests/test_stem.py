@@ -269,3 +269,58 @@ def test_deformable_attention_samples_at_the_reference_point():
     value = torch.arange(4.).repeat(1, 6 * 6, 1)  # every pixel holds (0, 1, 2, 3)
     out = attn(torch.randn(1, 9, 8), grid_centers(3, 3), value, [(6, 6)])
     torch.testing.assert_close(out, torch.arange(4.).expand(1, 9, 4))
+
+
+def test_box_quality_ranking_and_paired_iou():
+    from sarbench.heads import apply_box_quality, paired_iou
+    logits = torch.randn(4, 10)
+    quality = torch.rand(4, 9)
+    torch.testing.assert_close(apply_box_quality(logits, quality, alpha=0.0).softmax(-1), logits.softmax(-1))
+    ranked = apply_box_quality(logits, quality, alpha=1.0).softmax(-1)
+    torch.testing.assert_close(ranked[:, 1:], logits.softmax(-1)[:, 1:] * quality)
+    boxes = torch.tensor([[0., 0., 10., 10.], [0., 0., 10., 10.]])
+    torch.testing.assert_close(paired_iou(boxes, torch.tensor([[0., 0., 10., 10.], [5., 0., 15., 10.]])),
+                               torch.tensor([1.0, 1 / 3]))
+
+
+def test_iou_aware_head_trains_its_branch_and_ranks_by_it():
+    model = MultiTaskModel(_StubBackbone(), giou_weight=0.0, iou_aware=True, iou_alpha=1.0, score_thresh=0.0)
+    model.train()
+    _, _, losses = model(IMAGES, TARGETS)
+    assert 'loss_iou' in losses and torch.isfinite(losses['loss_iou'])
+    sum(losses.values()).backward()
+    assert model.roi_heads.iou_predictor.weight.grad.abs().sum() > 0
+    model.eval()
+    with torch.no_grad():
+        _, ranked, _ = model(IMAGES)
+        model.roi_heads.iou_alpha = 0.0
+        _, plain, _ = model(IMAGES)
+    # a predicted IoU in (0, 1) can only lower a score; alpha 0 leaves the class scores
+    assert ranked[0]['scores'].max() <= plain[0]['scores'].max() + 1e-6
+
+
+def test_iou_aware_is_standard_head_only():
+    with pytest.raises(ValueError):
+        MultiTaskModel(_StubBackbone(), head='cascade', head_params=CASCADE, iou_aware=True)
+
+
+def test_p2_heatmap_targets_peak_at_each_centre_and_the_loss_trains_only_in_training():
+    from sarbench.model import CenterHeatmapHead
+    head = CenterHeatmapHead(channels=256, num_classes=9)
+    targets = [{'boxes': torch.tensor([[8., 8., 16., 16.], [40., 40., 120., 100.]]), 'labels': torch.tensor([3, 3])},
+               {'boxes': torch.zeros(0, 4), 'labels': torch.zeros(0, dtype=torch.int64)}]
+    heatmaps = head.targets(targets, 9, 32, 32, 'cpu')  # a 128 px image at stride 4
+    assert heatmaps.shape == (2, 9, 32, 32) and heatmaps[1].sum() == 0
+    assert heatmaps[0, 2, 3, 3] == 1 and heatmaps[0, 2, 17, 20] == 1  # centres (12, 12) and (80, 70) px
+    assert heatmaps[0, 2].eq(1).sum() == 2 and heatmaps[0, :2].sum() == 0  # class 3 only
+    model = MultiTaskModel(_StubBackbone(), detail_stem=True, heatmap_aux=True)
+    model.train()
+    _, _, losses = model(IMAGES, TARGETS)
+    assert torch.isfinite(losses['loss_heatmap']) and losses['loss_heatmap'] > 0
+    sum(losses.values()).backward()
+    assert model.heatmap_head.head[0].weight.grad.abs().sum() > 0
+    assert model.detail_stem.stem[0].weight.grad.abs().sum() > 0  # the signal reaches the P2 stem
+    model.eval()
+    with torch.no_grad():
+        _, _, losses = model(IMAGES)
+    assert losses == {}

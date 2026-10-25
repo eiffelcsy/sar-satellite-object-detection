@@ -36,7 +36,7 @@ The base recipe is `configs/dinov3_dora_giou.yaml`; every option below is off th
 channels are in [0, 1]. The adapter applies the ImageNet mean/std, then a learnable 1x1 conv initialized to the
 identity, and unfreezes the patch embedding (0.59 M) so the first layer can learn the SAR channels.
 
-**Learning rates.** Three AdamW groups: the heads and every new module outside the backbone at `train.lr` (1e-4),
+**Learning rates.** AdamW groups: the heads and every new module outside the backbone at `train.lr` (1e-4),
 new backbone parameters (DoRA, Convpass) at `train.backbone_lr` (default `lr`), and pretrained weights made
 trainable (patch embedding, `full_blocks`) at `train.unfrozen_lr` (2e-5, the course's full fine-tuning rate).
 
@@ -100,6 +100,23 @@ get more positive anchors and proposals; for large boxes NWD is the stricter one
 re-scored with the image classifier's softmax before the score threshold, NMS and top-k (`apply_class_prior`):
 `soft` p(c | box) p(c | image)^power, `hard` only the predicted image class, `merge` 1 - p(background | box) to the
 predicted image class. Needs no retraining: sweep it with `sweep_postprocess.py --rescore ...`.
+
+**IoU-aware scoring** (`model.iou_aware`, `iou_alpha`; standard head only). One linear layer on the box head's
+features predicts, per class, the IoU of that class's decoded box with its GT (IoU-Net). It trains on the sampled
+positives: `loss_iou` is binary cross-entropy against the detached IoU of the box as currently regressed (weight via
+`loss.loss_iou`, default 1.0). At inference the class scores become p(c | box) x IoU_c^`iou_alpha` before the score
+threshold, NMS and top-k, so tight boxes outrank loose ones (`apply_box_quality`); image-class re-scoring, if on,
+applies after it. `iou_alpha` 0 is the same model ranked by class score alone; sweep it with
+`sweep_postprocess.py --iou-alpha ...`.
+
+**LoRA+** (`train.lora_plus_ratio`, 1 = off; Hayou et al., 2024). The DoRA B (`up`) matrices, zero-initialized,
+train at `backbone_lr` x the ratio in their own AdamW group; A, the DoRA magnitudes and Convpass stay at
+`backbone_lr`.
+
+**P2 heatmap** (`model.heatmap_aux`, training only). A 3x3 conv (256 -> 64), GELU and a 1x1 conv to one heatmap per
+class on P2, trained with CenterNet's penalty-reduced focal loss (`loss_heatmap`, weight via `loss.loss_heatmap`)
+against Gaussian peaks at the GT centres (sigma = max(0.8, sqrt(w h) / 6) in P2 cells; exactly 1 at each centre
+cell). The head is skipped at inference; its parameters still count towards the trainable budget.
 
 **Multi-layer fusion** (`model.fusion_layers: [5, 8, 11]`). Forward hooks capture those blocks' tokens; a learnable
 softmax weighting (initialized to the last block) combines them before the neck. Cost: one weight per block.

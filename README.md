@@ -138,6 +138,9 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `h1_vit_adapter` | P2 stem replaced by a lite ViT-Adapter (spatial prior injected into / extracted from the ViT) | f5 | 124.86 | 39.79 |
 | `h2_patch8` | ViT re-tokenized at 8 px (PI-resized patch embedding: 64 x 64 tokens) | f5 | 122.16 | 37.09 |
 | `h3_nwd` | anchors and proposals labelled by max(IoU, NWD) (tiny-object label assignment) | f5 | 123.93 | 38.86 |
+| `h4_iou_aware` | IoU branch on the RoI head; detections ranked by class score x predicted IoU^0.5 | f5 | 123.94 | 38.87 |
+| `h5_lora_plus` | LoRA+: DoRA B matrices at 8x the adapter learning rate | f5 | 123.93 | 38.86 |
+| `h6_p2_heatmap` | training-only CenterNet heatmap loss on P2 | f5 | 124.08 | 39.01 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.

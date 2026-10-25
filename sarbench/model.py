@@ -4,8 +4,9 @@ Configurable pieces (`model.*` in the YAML): `detail_stem` (real stride-4 detail
 (learnable fusion of several ViT blocks before the neck), `input_adapter` (ImageNet norm + learnable 1x1 conv +
 unfrozen patch embedding), `wst_stem` (wavelet scattering detail for P2), `vit_adapter` (ViT-Adapter's spatial prior
 with injectors / extractors, added to P2-P5), `giou_weight` (GIoU box term), `head` (`standard` | `cascade` RoI head),
-`box_similarity` (IoU, NWD or their max for anchor / proposal labels) and `rescore` (re-score the boxes with the
-image classifier at inference).
+`box_similarity` (IoU, NWD or their max for anchor / proposal labels), `rescore` (re-score the boxes with the
+image classifier at inference), `iou_aware` (an IoU branch; rank boxes by class score x predicted IoU) and
+`heatmap_aux` (a training-only center-heatmap loss on P2).
 """
 from collections import OrderedDict
 
@@ -156,6 +157,51 @@ class LayerFusion(nn.Module):
         return sum(weight * token for weight, token in zip(weights, tokens))
 
 
+class CenterHeatmapHead(nn.Module):
+    """Training-only auxiliary supervision of the stride-4 level (CenterNet, Zhou et al., 2019).
+
+    Tiny objects get few positive anchors, so P2 and the stem receive little direct small-object signal. This head
+    predicts one heatmap per class on P2 and is trained with CenterNet's penalty-reduced focal loss against a
+    Gaussian peak at every GT centre (sigma = max(`min_sigma`, sqrt(w h) / (6 stride)) in P2 cells), so every object
+    supervises P2 at its own location. It is never used at inference; it adds ~0.15 M trainable parameters.
+    """
+
+    def __init__(self, channels=256, hidden=64, num_classes=9, stride=4, min_sigma=0.8):
+        super().__init__()
+        self.stride, self.min_sigma = stride, min_sigma
+        self.head = nn.Sequential(nn.Conv2d(channels, hidden, 3, padding=1), nn.GELU(),
+                                  nn.Conv2d(hidden, num_classes, 1))
+        nn.init.constant_(self.head[-1].bias, -2.19)  # CenterNet's prior: sigmoid = 0.1 everywhere at init
+
+    def targets(self, targets, num_classes, height, width, device):
+        """[B, num_classes, height, width] Gaussian heatmaps, exactly 1 at each GT's centre cell."""
+        ys = torch.arange(height, device=device, dtype=torch.float32).view(1, -1, 1)
+        xs = torch.arange(width, device=device, dtype=torch.float32).view(1, 1, -1)
+        heatmaps = torch.zeros(len(targets), num_classes, height, width, device=device)
+        for heatmap, target in zip(heatmaps, targets):
+            boxes, labels = target['boxes'].float() / self.stride, target['labels']
+            if not len(boxes):
+                continue
+            centers = ((boxes[:, :2] + boxes[:, 2:]) / 2).floor()  # the cell holding each centre
+            centers[:, 0].clamp_(0, width - 1), centers[:, 1].clamp_(0, height - 1)
+            sizes = (boxes[:, 2:] - boxes[:, :2]).clamp(min=0)
+            sigma = (sizes.prod(1).sqrt() / 6).clamp(min=self.min_sigma).view(-1, 1, 1)
+            peaks = torch.exp(-((xs - centers[:, :1, None]) ** 2 + (ys - centers[:, 1:, None]) ** 2)
+                              / (2 * sigma ** 2))  # [K, H, W], 1 at each centre cell
+            for label in labels.unique():
+                heatmap[label - 1] = peaks[labels == label].amax(0)
+        return heatmaps
+
+    def loss(self, feature, targets):
+        logits = self.head(feature)
+        heatmaps = self.targets(targets, logits.shape[1], *logits.shape[-2:], logits.device)
+        predicted = logits.sigmoid().clamp(1e-4, 1 - 1e-4)
+        positive = heatmaps.eq(1).float()
+        positive_loss = (predicted.log() * (1 - predicted) ** 2 * positive).sum()
+        negative_loss = ((1 - predicted).log() * predicted ** 2 * (1 - heatmaps) ** 4 * (1 - positive)).sum()
+        return -(positive_loss + negative_loss) / positive.sum().clamp(min=1)
+
+
 class MultiTaskModel(nn.Module):
     """backbone tokens -> classification logits (mean token -> LayerNorm -> Linear) and Faster R-CNN detections."""
 
@@ -163,10 +209,13 @@ class MultiTaskModel(nn.Module):
                  roi_sampling_ratio=2, roi_output_size=7, input_adapter=False, wst_stem=False, wst_params=None,
                  head='standard', head_params=None, detail_stem_params=None, rpn_fg_iou_thresh=0.7,
                  rpn_bg_iou_thresh=0.3, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100,
-                 vit_adapter=None, box_similarity='iou', nwd_constant=16.0, rescore='off', rescore_power=1.0):
+                 vit_adapter=None, box_similarity='iou', nwd_constant=16.0, rescore='off', rescore_power=1.0,
+                 iou_aware=False, iou_alpha=0.5, heatmap_aux=False):
         super().__init__()
         if rescore not in RESCORE_MODES:
             raise ValueError(f"unknown rescore mode '{rescore}'; available: {', '.join(RESCORE_MODES)}")
+        if iou_aware and head != 'standard':
+            raise ValueError('iou_aware is implemented for the standard RoI head only')
         self.backbone = backbone
         self.patch_size = getattr(backbone, 'patch_size', 16)
         self.cls_head = nn.Sequential(nn.LayerNorm(backbone.embed_dim), nn.Linear(backbone.embed_dim, num_classes))
@@ -176,6 +225,7 @@ class MultiTaskModel(nn.Module):
         self.wst_stem = WSTStem(**(wst_params or {})) if wst_stem else None
         if input_adapter and hasattr(backbone, 'unfreeze_patch_embed'):  # adapt_backbone froze it; re-enable it
             backbone.unfreeze_patch_embed()
+        self.heatmap_head = CenterHeatmapHead(num_classes=num_classes) if heatmap_aux else None
         self.vit_adapter = None
         if vit_adapter:  # wraps the interaction blocks, after DoRA / Convpass (adapt_backbone) wrapped them
             self.vit_adapter = ViTAdapter(backbone.embed_dim, getattr(backbone, 'num_prefix_tokens', 0),
@@ -200,20 +250,22 @@ class MultiTaskModel(nn.Module):
         roi_pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=roi_output_size,
                                       sampling_ratio=roi_sampling_ratio)
         self.roi_heads = self._build_roi_heads(roi_pool, roi_output_size, num_classes, head, head_params or {},
-                                               giou_weight, score_thresh, nms_thresh, detections_per_img)
+                                               giou_weight, score_thresh, nms_thresh, detections_per_img,
+                                               iou_aware, iou_alpha)
         self.roi_heads.rescore, self.roi_heads.rescore_power = rescore, rescore_power
         # Anchor (RPN) and proposal (RoI head) labels: IoU, NWD or their max against the same thresholds.
         self.rpn.box_similarity = self.roi_heads.box_similarity = make_similarity(box_similarity, nwd_constant)
 
     @staticmethod
     def _build_roi_heads(roi_pool, resolution, num_classes, head, params, giou_weight, score_thresh, nms_thresh,
-                         detections_per_img):
+                         detections_per_img, iou_aware=False, iou_alpha=0.5):
         """`standard`: one Faster R-CNN RoI head. `cascade`: Cascade R-CNN with `head_params` num_stages (3),
         share_head (true), fg_iou_thresholds (0.5/0.6/...), bg_iou_threshold (0.5) and stage_loss_weights (1.0).
 
         Both take `head_params` box_head: `mlp` (torchvision's two fc layers of width hidden_dim, default 1024) or
         `conv` (ConvFCBoxHead: num_convs 3x3 convs, a 1x1 down to `reduce` channels, one fc of width hidden_dim).
         score_thresh / nms_thresh / detections_per_img are the inference post-processing (no effect on training).
+        `iou_aware` adds the standard head's IoU branch; `iou_alpha` is its inference ranking exponent.
         """
         hidden = params.get('hidden_dim', 1024)
         post = dict(score_thresh=score_thresh, nms_thresh=nms_thresh, detections_per_img=detections_per_img)
@@ -230,7 +282,8 @@ class MultiTaskModel(nn.Module):
             return DetRoIHeads(
                 roi_pool, box_head(), FastRCNNPredictor(hidden, num_classes + 1),
                 fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=512, positive_fraction=0.25,
-                bbox_reg_weights=None, giou_weight=giou_weight, **post)
+                bbox_reg_weights=None, giou_weight=giou_weight, iou_dim=hidden if iou_aware else None,
+                iou_alpha=iou_alpha, **post)
         if head == 'cascade':
             stages = params.get('num_stages', 3)
             # A per-stage head at hidden 1024 costs ~14 M each; hidden 256 per stage costs less than one 1024 head.
@@ -284,6 +337,8 @@ class MultiTaskModel(nn.Module):
             features = {name: f.float() for name, f in features.items()}
             image_list = ImageList(images, [tuple(images.shape[-2:])] * len(images))
             proposals, rpn_losses = self.rpn(image_list, features, targets)
+            if self.training and self.heatmap_head is not None:  # training-only P2 supervision
+                rpn_losses['loss_heatmap'] = self.heatmap_head.loss(features['0'], targets)
             # At inference the image classifier's probabilities re-score the boxes (roi_heads.rescore, off by default).
             detections, roi_losses = self.roi_heads(features, proposals, image_list.image_sizes, targets,
                                                     class_prior=None if self.training else logits.float().softmax(-1))
@@ -309,7 +364,8 @@ def build_model(args):
                            score_thresh=args.score_thresh, nms_thresh=args.nms_thresh,
                            detections_per_img=args.detections_per_img, vit_adapter=args.vit_adapter,
                            box_similarity=args.box_similarity, nwd_constant=args.nwd_constant,
-                           rescore=args.rescore, rescore_power=args.rescore_power)
+                           rescore=args.rescore, rescore_power=args.rescore_power, iou_aware=args.iou_aware,
+                           iou_alpha=args.iou_alpha, heatmap_aux=args.heatmap_aux)
     return model, pretrained_ids
 
 

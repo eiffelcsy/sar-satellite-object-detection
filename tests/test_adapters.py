@@ -159,3 +159,13 @@ def test_adapt_backbone_passes_the_convpass_options():
     block = backbone.blocks[1]
     assert block.placement == 'parallel' and block.adapter.kernel == 'depthwise'
     assert block.adapter.norm is not None  # the parallel adapter normalizes the block input
+
+
+def test_dora_up_weights_are_the_b_matrices_only():
+    from sarbench.adapters import dora_up_weights
+    backbone = _Backbone()
+    adapt_backbone(backbone, rank=4, alpha=4, conv_layers=[0], conv_dim=8)
+    ups = dora_up_weights(backbone)
+    assert len(ups) == 4 * 6  # 6 projections per block
+    assert all(not w.any() for w in ups)  # B starts at zero
+    assert all(w is not backbone.blocks[0].adapter.up.weight for w in ups)  # Convpass's up is not included

@@ -4,7 +4,8 @@ the same `(per-image detections, loss dict)` interface as torchvision, so the re
 
 Both heads also take the image classifier's probabilities at inference (`class_prior`) and re-score their boxes
 with them (`rescore`, see `apply_class_prior`), and match proposals to GT with a configurable `box_similarity`
-(IoU, NWD or the larger of the two, see `box_similarity`).
+(IoU, NWD or the larger of the two, see `box_similarity`). The standard head can also predict each box's IoU with its
+ground truth and rank detections by class score x predicted IoU (`iou_aware`, see `apply_box_quality`).
 """
 import functools
 
@@ -74,8 +75,35 @@ def apply_class_prior(class_logits, prior, mode='soft', power=1.0):
         foreground = predicted * (foreground.sum(1, keepdim=True) if mode == 'merge' else foreground)
     elif mode != 'off':
         raise ValueError(f"unknown rescore mode '{mode}'; available: {', '.join(RESCORE_MODES)}")
+    return _as_logits(foreground)
+
+
+def apply_box_quality(class_logits, quality, alpha=0.5):
+    """Rank boxes by how well they are localized: p(c | box) * IoU_c ** alpha (inference only).
+
+    `class_logits` [N, 1 + C], `quality` [N, C] the predicted IoU of each class's decoded box with its GT (in [0, 1]).
+    The class score alone says nothing about localization, so a tight box can rank below a loose one; AP75 and above
+    pay for that. alpha 0 changes nothing (the same model ranked by class score alone). Returns logits, as
+    `apply_class_prior` does, so the two compose and torchvision's post-processing is unchanged.
+    """
+    foreground = class_logits.float().softmax(-1)[:, 1:] * quality.float().clamp(min=0).pow(alpha)
+    return _as_logits(foreground)
+
+
+def _as_logits(foreground):
+    """Logits whose softmax is `foreground` [N, C] with the background taking the remainder (re-scored foreground
+    mass never exceeds the original, so the remainder is >= 0)."""
     background = (1 - foreground.sum(1, keepdim=True)).clamp(min=0)
     return torch.cat([background, foreground], dim=1).clamp(min=1e-12).log()
+
+
+def paired_iou(boxes1, boxes2):
+    """IoU of each row of `boxes1` [N, 4] with the same row of `boxes2` (XYXY): [N]."""
+    top_left = torch.maximum(boxes1[:, :2], boxes2[:, :2])
+    bottom_right = torch.minimum(boxes1[:, 2:], boxes2[:, 2:])
+    inter = (bottom_right - top_left).clamp(min=0).prod(1)
+    area = lambda b: (b[:, 2:] - b[:, :2]).clamp(min=0).prod(1)
+    return inter / (area(boxes1) + area(boxes2) - inter).clamp(min=1e-6)
 
 
 def _rescored(heads, class_logits, proposals, class_prior):
@@ -111,12 +139,34 @@ class ConvFCBoxHead(nn.Module):
 
 class DetRoIHeads(RoIHeads):
     """torchvision's RoI head with an additional GIoU box-regression term (`giou_weight`, 0 disables it), image-class
-    re-scoring at inference (`rescore`, `rescore_power`) and proposal matching by `self.box_similarity`."""
+    re-scoring at inference (`rescore`, `rescore_power`) and proposal matching by `self.box_similarity`.
 
-    def __init__(self, *args, giou_weight=0.0, rescore='off', rescore_power=1.0, **kwargs):
+    `iou_dim` (the box head's output width; None disables it) adds an IoU branch: one linear layer predicting, per
+    class, the IoU of that class's decoded box with its GT (IoU-Net, Jiang et al., 2018). It trains on the sampled
+    positives (`loss_iou`: binary cross-entropy against the detached IoU of the box as currently regressed), and at
+    inference detections are ranked by class score x predicted IoU ** `iou_alpha` (`apply_box_quality`).
+    """
+
+    def __init__(self, *args, giou_weight=0.0, rescore='off', rescore_power=1.0, iou_dim=None, iou_alpha=0.5,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.giou_weight = giou_weight
         self.rescore, self.rescore_power = rescore, rescore_power
+        num_classes = self.box_predictor.cls_score.out_features - 1
+        self.iou_predictor = nn.Linear(iou_dim, num_classes) if iou_dim else None
+        self.iou_alpha = iou_alpha
+
+    def iou_loss(self, iou_logits, box_regression, proposals, labels, matched_gt):
+        """BCE of the predicted IoU of each positive's GT-class box against that box's actual IoU with its GT."""
+        labels = torch.cat(labels)
+        positive = torch.where(labels > 0)[0]
+        if not len(positive):
+            return iou_logits.sum() * 0
+        decoded = self.box_coder.decode(box_regression.detach(), proposals)  # [N, 1 + C, 4]
+        label = labels[positive]
+        predicted = decoded[positive, label]
+        target = paired_iou(predicted, torch.cat(matched_gt)[positive].to(predicted.dtype))
+        return F.binary_cross_entropy_with_logits(iou_logits[positive, label - 1], target)
 
     def assign_targets_to_proposals(self, proposals, gt_boxes, gt_labels):
         """torchvision's, with `self.box_similarity` in place of its hard-coded box_iou."""
@@ -139,18 +189,24 @@ class DetRoIHeads(RoIHeads):
         matched_gt = None
         if self.training:
             proposals, matched_idxs, labels, regression_targets = self.select_training_samples(proposals, targets)
-            if self.giou_weight > 0:  # an image may have no boxes left after augmentation: no matched GT then
+            if self.giou_weight > 0 or self.iou_predictor is not None:  # an image may have no boxes left after
+                # augmentation: no matched GT then
                 matched_gt = [t['boxes'][mi.clamp(min=0)].to(proposals[0].dtype) if len(t['boxes'])
                               else proposals[0].new_zeros((0, 4)) for t, mi in zip(targets, matched_idxs)]
         box_features = self.box_head(self.box_roi_pool(features, proposals, image_shapes))
         class_logits, box_regression = self.box_predictor(box_features)
+        iou_logits = self.iou_predictor(box_features) if self.iou_predictor is not None else None
         detections, losses = [], {}
         if self.training:
             loss_classifier, loss_box_reg = roi_loss(class_logits, box_regression, labels, regression_targets,
                                                      proposals, matched_gt, self.box_coder,
                                                      giou_weight=self.giou_weight)
             losses = {'loss_classifier': loss_classifier, 'loss_box_reg': loss_box_reg}
+            if iou_logits is not None:
+                losses['loss_iou'] = self.iou_loss(iou_logits, box_regression, proposals, labels, matched_gt)
         else:
+            if iou_logits is not None:  # localization quality first, then the image-class prior on top
+                class_logits = apply_box_quality(class_logits, iou_logits.float().sigmoid(), self.iou_alpha)
             all_boxes, all_scores, all_labels = self.postprocess_detections(
                 _rescored(self, class_logits, proposals, class_prior), box_regression, proposals, image_shapes)
             detections = [{'boxes': b, 'labels': l, 'scores': s}

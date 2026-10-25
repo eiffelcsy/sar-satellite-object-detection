@@ -52,8 +52,8 @@ source .venv/bin/activate
 # Submit your job to the cluster.
 ROOT=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data
 DATA="$ROOT/train"
-CONFIG=configs/ablations/d12_full_train_g1.yaml
-MODEL=runs/giou_d12_full_train_g1/model.pt
+CONFIG=configs/ablations/h1_vit_adapter.yaml
+MODEL=runs/giou_h1_vit_adapter/model.pt
 
 # Evaluation / submission (no training; reuses the trained checkpoint):
 # 0) Post-processing sweep on the held-out train split: score threshold x NMS IoU, no retraining. Prints the best
@@ -66,10 +66,10 @@ MODEL=runs/giou_d12_full_train_g1/model.pt
 #   --data "$DATA" --out runs/eval_heldout
 
 # 2) Official val split (unlabelled val/images.json): predictions only -> submission_val.zip
-# srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
-#   --score-thresh 0.001 --nms-thresh 0.6 \
-#   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
-#   --preprocess-cache preprocess_cache/val
+srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
+  --score-thresh 0.001 --nms-thresh 0.6 \
+  --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
+  --preprocess-cache preprocess_cache/val
 
 # 3) Official test split (unlabelled test/images.json): predictions only -> submission_test.zip
 # srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
@@ -104,6 +104,10 @@ MODEL=runs/giou_d12_full_train_g1/model.pt
 
 # 7) Image-class re-scoring sweep (no retraining) on g1, the best model with a held-out split. A d12 model has no
 #    held-out split, so sweep here and apply the winner to d12's --predict with --rescore / --rescore-power.
-srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/g1_split_lr_200ep.yaml \
-  --load runs/giou_g1_split_lr_200ep/model.pt --data "$DATA" --workers 4 \
-  --score-thresh 0.001 --nms-thresh 0.6 --rescore off soft hard merge --rescore-power 0.5 1 2 4
+# srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/g1_split_lr_200ep.yaml \
+#   --load runs/giou_g1_split_lr_200ep/model.pt --data "$DATA" --workers 4 \
+#   --score-thresh 0.001 --nms-thresh 0.6 --rescore off soft hard merge --rescore-power 0.5 1 2 4
+# 8) IoU ranking exponent sweep on h4 (no retraining): alpha 0 ranks the same model by class score alone.
+# srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/h4_iou_aware.yaml \
+#   --load runs/giou_h4_iou_aware/model.pt --data "$DATA" --workers 4 \
+#   --score-thresh 0.001 --nms-thresh 0.6 --iou-alpha 0 0.25 0.5 1 2

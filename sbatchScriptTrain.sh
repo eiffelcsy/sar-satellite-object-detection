@@ -152,3 +152,10 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # srun --gres=gpu:1 python train.py --config configs/ablations/h1_vit_adapter.yaml --data "$DATA" --wandb --workers 4
 # srun --gres=gpu:1 python train.py --config configs/ablations/h2_patch8.yaml       --data "$DATA" --wandb --workers 4
 srun --gres=gpu:1 python train.py --config configs/ablations/h3_nwd.yaml          --data "$DATA" --wandb --workers 4
+#   h4 IoU branch, detections ranked by class score x predicted IoU^0.5 (localization: AP50 0.73 vs AP75 0.47). ~4 h.
+#   Afterwards sweep --iou-alpha 0 0.25 0.5 1 2 with sbatchScriptEval.sh section 8 (alpha 0 = its own control).
+# srun --gres=gpu:1 python train.py --config configs/ablations/h4_iou_aware.yaml    --data "$DATA" --wandb --workers 4
+#   h5 LoRA+ (DoRA B matrices at 8x the adapter rate; no new parameters) | h6 training-only P2 center-heatmap loss
+#   (0.15 M). ~4 h each, compared with f5.
+# srun --gres=gpu:1 python train.py --config configs/ablations/h5_lora_plus.yaml    --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/h6_p2_heatmap.yaml   --data "$DATA" --wandb --workers 4

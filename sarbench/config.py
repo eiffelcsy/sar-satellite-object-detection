@@ -45,15 +45,21 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
                                    # ViT-Adapter: spatial prior + injectors / extractors, added to P2-P5
       rescore: 'off'               # inference: re-score boxes with the image classifier: off | soft | hard | merge
       rescore_power: 1.0           # soft: p(c | box) * p(c | image) ** rescore_power
+      iou_aware: true              # standard head: IoU branch (loss_iou), detections ranked by score x IoU ** alpha
+      iou_alpha: 0.5               # inference only: the IoU exponent (0 = rank by class score alone)
+      heatmap_aux: true            # training-only CenterNet heatmap loss on P2 (loss_heatmap)
       score_thresh: 0.05           # inference post-processing only (sweep it with sweep_postprocess.py)
       nms_thresh: 0.5
       detections_per_img: 100
     train: {epochs: 48, stage_a_epochs: 0, stage_a_lr: 2.0e-4, batch_size: 16, lr: 1.0e-4,
-            backbone_lr: null, unfrozen_lr: 2.0e-5, cls_lr: null, ema_decay: 0.0, warmup_epochs: 1,
+            backbone_lr: null, lora_plus_ratio: 1.0, unfrozen_lr: 2.0e-5, cls_lr: null, ema_decay: 0.0,
+            warmup_epochs: 1,
             wd_exclude_1d: false, weight_decay: 0.05, eval_every: 4, workers: 8, seed: 0}
             # lr: new modules outside the backbone (neck, RPN, RoI head, stems, input adapter);
             # cls_lr: the image classifier (default lr); backbone_lr: new backbone parameters (DoRA, Convpass;
             # default lr);
+            # lora_plus_ratio: LoRA+, the DoRA B (up) matrices at backbone_lr x this ratio (A, magnitudes and
+            # Convpass stay at backbone_lr; 1 = off).
             # unfrozen_lr: pretrained weights made trainable (patch embedding, full_blocks).
             # stage_a_epochs: first N epochs freeze the backbone and train the heads only at stage_a_lr.
             # warmup_epochs: linear learning-rate warmup before the cosine decay (stage B).
@@ -104,6 +110,9 @@ DEFAULTS = {
     'nwd_constant': 16.0,
     'rescore': 'off',
     'rescore_power': 1.0,
+    'iou_aware': False,
+    'iou_alpha': 0.5,
+    'heatmap_aux': False,
     'name': None,
     'epochs': 24,
     'stage_a_epochs': 0,
@@ -114,6 +123,7 @@ DEFAULTS = {
     'unfrozen_lr': 2e-5,
     'cls_lr': None,
     'ema_decay': 0.0,
+    'lora_plus_ratio': 1.0,
     'warmup_epochs': 1,
     'wd_exclude_1d': False,
     'weight_decay': 0.05,
@@ -147,9 +157,10 @@ DEFAULTS = {
 _MODEL_KEYS = ('detail_stem', 'fusion_layers', 'input_adapter', 'wst_stem', 'wst_params', 'giou_weight',
                'roi_sampling_ratio', 'roi_output_size', 'head', 'head_params', 'detail_stem_params',
                'rpn_fg_iou_thresh', 'rpn_bg_iou_thresh', 'score_thresh', 'nms_thresh', 'detections_per_img',
-               'vit_adapter', 'box_similarity', 'nwd_constant', 'rescore', 'rescore_power')
+               'vit_adapter', 'box_similarity', 'nwd_constant', 'rescore', 'rescore_power', 'iou_aware', 'iou_alpha',
+               'heatmap_aux')
 _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'unfrozen_lr',
-               'cls_lr', 'ema_decay', 'warmup_epochs', 'wd_exclude_1d', 'weight_decay', 'eval_every', 'workers',
+               'cls_lr', 'ema_decay', 'lora_plus_ratio', 'warmup_epochs', 'wd_exclude_1d', 'weight_decay', 'eval_every', 'workers',
                'seed')
 _DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'split_seed': 'split_seed', 'limit': 'limit',
               'mosaic': 'mosaic', 'copy_paste': 'copy_paste', 'copy_paste_margin': 'copy_paste_margin',
