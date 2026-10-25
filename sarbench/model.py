@@ -5,8 +5,9 @@ Configurable pieces (`model.*` in the YAML): `detail_stem` (real stride-4 detail
 unfrozen patch embedding), `wst_stem` (wavelet scattering detail for P2), `vit_adapter` (ViT-Adapter's spatial prior
 with injectors / extractors, added to P2-P5), `giou_weight` (GIoU box term), `head` (`standard` | `cascade` RoI head),
 `box_similarity` (IoU, NWD or their max for anchor / proposal labels), `rescore` (re-score the boxes with the
-image classifier at inference), `iou_aware` (an IoU branch; rank boxes by class score x predicted IoU) and
-`heatmap_aux` (a training-only center-heatmap loss on P2).
+image classifier at inference), `iou_aware` (an IoU branch; rank boxes by class score x predicted IoU),
+`heatmap_aux` (a training-only center-heatmap loss on P2) and `cls_detach` (no classification gradient into the
+backbone).
 """
 from collections import OrderedDict
 
@@ -210,7 +211,7 @@ class MultiTaskModel(nn.Module):
                  head='standard', head_params=None, detail_stem_params=None, rpn_fg_iou_thresh=0.7,
                  rpn_bg_iou_thresh=0.3, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100,
                  vit_adapter=None, box_similarity='iou', nwd_constant=16.0, rescore='off', rescore_power=1.0,
-                 iou_aware=False, iou_alpha=0.5, heatmap_aux=False):
+                 iou_aware=False, iou_alpha=0.5, heatmap_aux=False, cls_detach=False):
         super().__init__()
         if rescore not in RESCORE_MODES:
             raise ValueError(f"unknown rescore mode '{rescore}'; available: {', '.join(RESCORE_MODES)}")
@@ -219,6 +220,9 @@ class MultiTaskModel(nn.Module):
         self.backbone = backbone
         self.patch_size = getattr(backbone, 'patch_size', 16)
         self.cls_head = nn.Sequential(nn.LayerNorm(backbone.embed_dim), nn.Linear(backbone.embed_dim, num_classes))
+        # cls_detach: the classifier reads the pooled tokens without back-propagating into the backbone, so DoRA,
+        # Convpass and the input adapter train for detection only (mAP is worth ~3.7x macro-F1 per point in delta-m).
+        self.cls_detach = cls_detach
         self.neck = SimpleFeaturePyramid(backbone.embed_dim, patch_size=self.patch_size)
         self.detail_stem = ConvStem(backbone.in_chans, **(detail_stem_params or {})) if detail_stem else None
         self.input_adapter = InputAdapter(backbone.in_chans) if input_adapter else None
@@ -321,7 +325,8 @@ class MultiTaskModel(nn.Module):
         if self.vit_adapter is not None:  # the spatial prior runs first: its injectors act inside the backbone
             self.vit_adapter.prepare(images)
         tokens = self._backbone_tokens(backbone_images)
-        logits = self.cls_head(tokens.mean(dim=1))
+        pooled = tokens.mean(dim=1)
+        logits = self.cls_head(pooled.detach() if self.cls_detach else pooled)
         h, w = images.shape[-2] // self.patch_size, images.shape[-1] // self.patch_size  # one token per patch
         features = self.neck(tokens.transpose(1, 2).unflatten(2, (h, w)))  # tokens as a [B, 768, h, w] map
         if self.vit_adapter is not None:  # the SPM features (strides 4-32) added to P2-P5
@@ -365,7 +370,7 @@ def build_model(args):
                            detections_per_img=args.detections_per_img, vit_adapter=args.vit_adapter,
                            box_similarity=args.box_similarity, nwd_constant=args.nwd_constant,
                            rescore=args.rescore, rescore_power=args.rescore_power, iou_aware=args.iou_aware,
-                           iou_alpha=args.iou_alpha, heatmap_aux=args.heatmap_aux)
+                           iou_alpha=args.iou_alpha, heatmap_aux=args.heatmap_aux, cls_detach=args.cls_detach)
     return model, pretrained_ids
 
 

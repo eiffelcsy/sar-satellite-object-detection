@@ -76,6 +76,8 @@ def test_base_is_the_dora_giou_recipe():
     ('h4_iou_aware', 'f5_split_lr', {'iou_aware'}),
     ('h5_lora_plus', 'f5_split_lr', {'lora_plus_ratio'}),
     ('h6_p2_heatmap', 'f5_split_lr', {'heatmap_aux'}),
+    ('i1_cls_loss01_200ep', 'g1_split_lr_200ep', {'loss_weights'}),
+    ('i2_cls_detach_200ep', 'g1_split_lr_200ep', {'cls_detach'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'

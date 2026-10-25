@@ -324,3 +324,14 @@ def test_p2_heatmap_targets_peak_at_each_centre_and_the_loss_trains_only_in_trai
     with torch.no_grad():
         _, _, losses = model(IMAGES)
     assert losses == {}
+
+
+def test_cls_detach_keeps_classification_gradients_out_of_the_backbone():
+    for detach in (False, True):
+        model = MultiTaskModel(_StubBackbone(), input_adapter=True, cls_detach=detach)
+        model.train()
+        logits, _, _ = model(IMAGES, TARGETS)
+        logits.sum().backward()  # the classification path alone
+        backbone_grad = model.backbone.patch.weight.grad
+        assert model.cls_head[1].weight.grad.abs().sum() > 0  # the classifier itself always trains
+        assert (backbone_grad is None or not backbone_grad.any()) == detach

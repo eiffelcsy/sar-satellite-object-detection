@@ -1,0 +1,9 @@
+# I2 (trade F1 for mAP, the limit case): g1 (stem, split learning rates, 200 epochs; Codabench 36.19) with the image
+# classifier reading the pooled tokens through a stop-gradient: it still trains (LayerNorm + linear at 1e-4), but no
+# classification gradient reaches DoRA, Convpass, the input adapter or the patch embedding, which then train for
+# detection only. DINOv3's pooled features are strong for image-level recognition, so F1 may drop less than i1's
+# loss weight implies. ~8.7 h. Compare with g1_split_lr_200ep (and i1): mAP, macro-F1, delta-m.
+base: g1_split_lr_200ep.yaml
+name: giou_i2_cls_detach_200ep
+model:
+  cls_detach: true

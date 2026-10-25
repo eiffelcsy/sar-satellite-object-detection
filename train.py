@@ -135,7 +135,7 @@ def parse_args(argv=None):
                 'conv_adapters', 'giou_weight', 'roi_sampling_ratio', 'roi_output_size', 'wst_params',
                 'loss_weights', 'head', 'head_params', 'detail_stem_params', 'rpn_fg_iou_thresh',
                 'rpn_bg_iou_thresh', 'ema_decay', 'vit_adapter', 'box_similarity', 'nwd_constant', 'iou_aware',
-                'heatmap_aux'):
+                'heatmap_aux', 'cls_detach'):
         setattr(args, key, cfg[key])
     if args.predict is not None and args.load is None:
         p.error('--predict needs --load with the trained weights')

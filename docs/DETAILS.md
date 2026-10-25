@@ -118,6 +118,12 @@ class on P2, trained with CenterNet's penalty-reduced focal loss (`loss_heatmap`
 against Gaussian peaks at the GT centres (sigma = max(0.8, sqrt(w h) / 6) in P2 cells; exactly 1 at each centre
 cell). The head is skipped at inference; its parameters still count towards the trainable budget.
 
+**Classifier stop-gradient** (`model.cls_detach`). The image classifier reads the mean token through a
+stop-gradient: it still trains, but the backbone's trainable parts (DoRA, Convpass, input adapter, patch embedding)
+get gradients from detection only. Delta-m values one mAP point at ~1.97 and one macro-F1 point at ~0.53 (test
+references 25.41 / 93.99), so trading F1 for mAP pays at better than ~3.7 F1 points per mAP point. The softer version
+is a lower `loss.classification` weight.
+
 **Multi-layer fusion** (`model.fusion_layers: [5, 8, 11]`). Forward hooks capture those blocks' tokens; a learnable
 softmax weighting (initialized to the last block) combines them before the neck. Cost: one weight per block.
 

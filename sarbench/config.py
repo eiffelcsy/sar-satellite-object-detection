@@ -48,6 +48,7 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
       iou_aware: true              # standard head: IoU branch (loss_iou), detections ranked by score x IoU ** alpha
       iou_alpha: 0.5               # inference only: the IoU exponent (0 = rank by class score alone)
       heatmap_aux: true            # training-only CenterNet heatmap loss on P2 (loss_heatmap)
+      cls_detach: true             # the image classifier does not back-propagate into the backbone
       score_thresh: 0.05           # inference post-processing only (sweep it with sweep_postprocess.py)
       nms_thresh: 0.5
       detections_per_img: 100
@@ -113,6 +114,7 @@ DEFAULTS = {
     'iou_aware': False,
     'iou_alpha': 0.5,
     'heatmap_aux': False,
+    'cls_detach': False,
     'name': None,
     'epochs': 24,
     'stage_a_epochs': 0,
@@ -158,7 +160,7 @@ _MODEL_KEYS = ('detail_stem', 'fusion_layers', 'input_adapter', 'wst_stem', 'wst
                'roi_sampling_ratio', 'roi_output_size', 'head', 'head_params', 'detail_stem_params',
                'rpn_fg_iou_thresh', 'rpn_bg_iou_thresh', 'score_thresh', 'nms_thresh', 'detections_per_img',
                'vit_adapter', 'box_similarity', 'nwd_constant', 'rescore', 'rescore_power', 'iou_aware', 'iou_alpha',
-               'heatmap_aux')
+               'heatmap_aux', 'cls_detach')
 _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'unfrozen_lr',
                'cls_lr', 'ema_decay', 'lora_plus_ratio', 'warmup_epochs', 'wd_exclude_1d', 'weight_decay', 'eval_every', 'workers',
                'seed')
