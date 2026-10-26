@@ -1,0 +1,12 @@
+# D14 (final candidate): i1's recipe with the classification loss at 0.1 instead of 0.25, at 250 epochs on all of train
+# (val_fraction 0). On the held-out split 0.25 kept macro-F1 too high and mAP too low, and i2 (weight effectively 0)
+# won; 0.1 sits between them on the same dial, untested on held-out. ~12 h. No held-out split: compare its Codabench
+# delta-m with d13 (i2) and d12. The run writes model.pt only: make the zips with sbatchScriptEval.sh section 9.
+base: i1_cls_loss025_200ep.yaml
+name: giou_d14_full_train_i1_cls01_250ep
+loss:
+  classification: 0.1
+train:
+  epochs: 250
+data:
+  val_fraction: 0

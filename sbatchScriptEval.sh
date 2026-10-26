@@ -111,3 +111,15 @@ srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
 # srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/h4_iou_aware.yaml \
 #   --load runs/giou_h4_iou_aware/model.pt --data "$DATA" --workers 4 \
 #   --score-thresh 0.001 --nms-thresh 0.6 --iou-alpha 0 0.25 0.5 1 2
+
+# 9) The final candidates d13 (i2, 250 epochs) and d14 (i1 at classification weight 0.1, 250 epochs), both on all of
+#    train: val and test predictions with the tuned post-processing. Set NAME to one of them.
+# NAME=d13_full_train_i2_250ep   # or d14_full_train_i1_cls01_250ep
+# srun --gres=gpu:1 python train.py --config configs/ablations/$NAME.yaml \
+#   --load runs/giou_$NAME/model.pt --score-thresh 0.001 --nms-thresh 0.6 \
+#   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
+#   --preprocess-cache preprocess_cache/val
+# srun --gres=gpu:1 python train.py --config configs/ablations/$NAME.yaml \
+#   --load runs/giou_$NAME/model.pt --score-thresh 0.001 --nms-thresh 0.6 \
+#   --predict "$ROOT/test/images.json" --predict-split test --out runs/eval_test/ \
+#   --preprocess-cache preprocess_cache/test

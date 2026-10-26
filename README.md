@@ -141,8 +141,10 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `h4_iou_aware` | IoU branch on the RoI head; detections ranked by class score x predicted IoU^0.5 | f5 | 123.94 | 38.87 |
 | `h5_lora_plus` | LoRA+: DoRA B matrices at 8x the adapter learning rate | f5 | 123.93 | 38.86 |
 | `h6_p2_heatmap` | training-only CenterNet heatmap loss on P2 | f5 | 124.08 | 39.01 |
-| `i1_cls_loss01_200ep` | classification loss weight 1.0 -> 0.1 (trade macro-F1 for mAP) | g1 | 123.93 | 38.86 |
+| `i1_cls_loss025_200ep` | classification loss weight 1.0 -> 0.25 (trade macro-F1 for mAP) | g1 | 123.93 | 38.86 |
 | `i2_cls_detach_200ep` | no classification gradient into the backbone (classifier on detached tokens) | g1 | 123.93 | 38.86 |
+| `d13_full_train_i2_250ep` | final candidate: i2's recipe at 250 epochs on all of train | i2 | 123.93 | 38.86 |
+| `d14_full_train_i1_cls01_250ep` | final candidate: i1 with classification weight 0.1, 250 epochs, all of train | i1 | 123.93 | 38.86 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.
