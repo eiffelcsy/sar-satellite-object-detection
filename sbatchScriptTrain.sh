@@ -168,5 +168,5 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # P: final candidates from O, 250 epochs on all of train (~12 h each; independent, so submit one job per line):
 #   d13 = i2 (classifier stop-gradient) | d14 = i1 at classification weight 0.1. Make the zips with
 #   sbatchScriptEval.sh section 9 and compare their Codabench delta-m with d12.
-# srun --gres=gpu:1 python train.py --config configs/ablations/d13_full_train_i2_250ep.yaml       --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/d14_full_train_i1_cls01_250ep.yaml --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/d13_full_train_i2_250ep.yaml       --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d14_full_train_i1_cls01_250ep.yaml --data "$DATA" --wandb --workers 4
