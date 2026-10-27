@@ -174,9 +174,9 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # Q: new base j0 (f5 + classification 0.1, no mosaic, same-class copy-paste, 1 px margin; 96 epochs, ~4 h) and one
 # change each on it. Two at a time: round 1 = j0 + j1, round 2 = j2 + j3. Compare j1-j3 with j0.
 #   j1 RoI pooled from all levels (max) | j2 RoI canonical scale 56 | j3 classifier on [CLS, mean token]
-srun --gres=gpu:1 python train.py --config configs/ablations/j0_base.yaml            --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/j1_roi_fused.yaml       --data "$DATA" --wandb --workers 4
-# srun --gres=gpu:1 python train.py --config configs/ablations/j2_roi_canonical56.yaml --data "$DATA" --wandb --workers 4
-# srun --gres=gpu:1 python train.py --config configs/ablations/j3_cls_token.yaml       --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/j0_base.yaml            --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/j1_roi_fused.yaml       --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/j2_roi_canonical56.yaml --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/j3_cls_token.yaml       --data "$DATA" --wandb --workers 4
 # d15: d14 + j0's augmentation, 250 epochs on all of train (~12 h); vs d14 on Codabench. Zips: sbatchScriptEval.sh 9.
 # srun --gres=gpu:1 python train.py --config configs/ablations/d15_full_train_j0_250ep.yaml --data "$DATA" --wandb --workers 4
