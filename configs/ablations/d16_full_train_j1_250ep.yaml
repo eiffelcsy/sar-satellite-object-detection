@@ -1,0 +1,8 @@
+# D16 (final candidate, fused RoI pooling at full length): d15's recipe (d14 + j0's augmentation, 250 epochs, all of
+# train) with j1's RoI pooling: every RoI pooled from P2-P5 and fused by max. d16 vs d15 on Codabench isolates the
+# pooling change. ~12 h. The run writes model.pt only: make the zips with sbatchScriptEval.sh section 9
+# (NAME=d16_full_train_j1_250ep).
+base: d15_full_train_j0_250ep.yaml
+name: giou_d16_full_train_j1_250ep
+model:
+  roi_pooling: max
