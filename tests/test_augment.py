@@ -83,3 +83,31 @@ def test_rotate90_moves_boxes_exactly_with_the_pixels():
         bright = torch.stack([xs.min(), ys.min(), xs.max() + 1, ys.max() + 1]).float()  # pixel i spans [i, i + 1)
         assert torch.equal(bright, out_boxes[0]), k
     assert torch.equal(rotate90(image, boxes, 4)[1], boxes)  # four quarter turns are the identity
+
+
+def test_same_class_copy_paste_takes_donors_of_the_image_class_only(tmp_path, monkeypatch):
+    import json
+    import random as random_module
+    from PIL import Image
+    from sarbench.data import SARMultiTask
+    (tmp_path / 'images').mkdir()
+    labels = [0, 1, 0, 1, 2]
+    images, annotations = [], []
+    for i, label in enumerate(labels, 1):
+        Image.new('L', (64, 64), 40 * i).save(tmp_path / 'images' / f'{i:05d}.png')
+        images.append({'id': i, 'file_name': f'images/{i:05d}.png', 'width': 64, 'height': 64})
+        annotations.append({'id': i, 'image_id': i, 'category_id': label + 1, 'bbox': [8., 8., 10., 10.],
+                            'area': 100., 'iscrowd': 0})
+    (tmp_path / 'labels.csv').write_text('image_id,file_name,label\n' + ''.join(
+        f'{i},images/{i:05d}.png,{label}\n' for i, label in enumerate(labels, 1)))
+    (tmp_path / 'instances.json').write_text(json.dumps({'images': images, 'annotations': annotations,
+                                                         'categories': [{'id': c, 'name': str(c)} for c in (1, 2, 3)]}))
+    dataset = SARMultiTask(tmp_path, 'train', train=True, size=64, val_fraction=0.0, copy_paste=1.0,
+                           copy_paste_same_class=True)
+    pools = []
+    original = random_module.choice
+    monkeypatch.setattr(random_module, 'choice', lambda seq: pools.append(list(seq)) or original(seq))
+    for i in range(len(dataset)):
+        _, label, target = dataset[i]
+        assert set(target['labels'].tolist()) == {label + 1}  # pasted objects keep the image's single class
+        assert all(dataset.rows[j]['label'] == label for j in pools[-1])

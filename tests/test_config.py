@@ -80,6 +80,11 @@ def test_base_is_the_dora_giou_recipe():
     ('i2_cls_detach_200ep', 'g1_split_lr_200ep', {'cls_detach'}),
     ('d13_full_train_i2_250ep', 'i2_cls_detach_200ep', {'epochs', 'val_fraction'}),
     ('d14_full_train_i1_cls01_250ep', 'i1_cls_loss025_200ep', {'loss_weights', 'epochs', 'val_fraction'}),
+    ('j0_base', 'f5_split_lr', {'loss_weights', 'mosaic', 'copy_paste_same_class', 'copy_paste_margin'}),
+    ('j1_roi_fused', 'j0_base', {'roi_pooling'}),
+    ('j2_roi_canonical56', 'j0_base', {'roi_canonical_scale'}),
+    ('j3_cls_token', 'j0_base', {'cls_input'}),
+    ('d15_full_train_j0_250ep', 'd14_full_train_i1_cls01_250ep', {'mosaic', 'copy_paste_same_class', 'copy_paste_margin'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'

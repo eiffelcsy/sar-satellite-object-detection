@@ -145,6 +145,11 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `i2_cls_detach_200ep` | no classification gradient into the backbone (classifier on detached tokens) | g1 | 123.93 | 38.86 |
 | `d13_full_train_i2_250ep` | final candidate: i2's recipe at 250 epochs on all of train | i2 | 123.93 | 38.86 |
 | `d14_full_train_i1_cls01_250ep` | final candidate: i1 with classification weight 0.1, 250 epochs, all of train | i1 | 123.93 | 38.86 |
+| `j0_base` | new base: f5 + classification 0.1, no mosaic, same-class copy-paste with a 1 px margin | f5 | 123.93 | 38.86 |
+| `j1_roi_fused` | every RoI pooled from P2-P5, fused by max (instead of one level) | j0 | 123.93 | 38.86 |
+| `j2_roi_canonical56` | RoI level mapping canonical scale 224 -> 56 px | j0 | 123.93 | 38.86 |
+| `j3_cls_token` | image classifier on [CLS, mean patch token] | j0 | 123.94 | 38.87 |
+| `d15_full_train_j0_250ep` | final candidate: d14 with j0's augmentation | d14 | 123.93 | 38.86 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.

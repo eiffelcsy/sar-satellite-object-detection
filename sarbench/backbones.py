@@ -90,8 +90,10 @@ class DINOv3(nn.Module):
         """Re-enable gradients on the patch embedding (adapt_backbone freezes everything; this is called after)."""
         self.dinov3.get_input_embeddings().requires_grad_(True)
 
-    def forward(self, x):
+    def forward(self, x, with_prefix=False):
+        """Patch tokens [B, N, embed_dim]; with `with_prefix`, all tokens [B, prefix + N, embed_dim] (CLS first,
+        then the registers)."""
         if x.shape[1] != self.in_chans:  # gray -> the pretrained RGB channel count
             x = x.repeat(1, self.in_chans, 1, 1)
         tokens = self.dinov3(x).last_hidden_state  # [B, prefix + N, embed_dim], final norm applied
-        return tokens[:, self.num_prefix_tokens:]
+        return tokens if with_prefix else tokens[:, self.num_prefix_tokens:]

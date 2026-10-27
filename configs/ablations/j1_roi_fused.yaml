@@ -1,0 +1,8 @@
+# J1 (RoI pooling from every level): j0 with each RoI pooled from P2-P5 and fused by element-wise max (PANet's adaptive
+# feature pooling) instead of one level per RoI. With torchvision's mapping (canonical 224 px at P4), 94.9% of this
+# dataset's boxes are pooled from P2 alone (3.9% P3, 1.2% P4): the upsampled ViT map plus the stem, never P4, the
+# ViT's own stride-16 tokens. No new parameters. Compare with j0_base.
+base: j0_base.yaml
+name: giou_j1_roi_fused
+model:
+  roi_pooling: max

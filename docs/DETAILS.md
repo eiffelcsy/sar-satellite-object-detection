@@ -124,6 +124,19 @@ get gradients from detection only. Delta-m values one mAP point at ~1.97 and one
 references 25.41 / 93.99), so trading F1 for mAP pays at better than ~3.7 F1 points per mAP point. The softer version
 is a lower `loss.classification` weight.
 
+**RoI pooling** (`model.roi_pooling`, `roi_canonical_scale`). `level` (default) is torchvision's
+`MultiScaleRoIAlign`: one level per RoI, k = floor(4 + log2(sqrt(area) / canonical)), clamped to P2-P5. At the
+default canonical 224 px, 94.9% of the train boxes go to P2 (3.9% P3, 1.2% P4); at 56 px, 60.0 / 20.8 / 14.1 / 5.1%.
+`max` / `mean` pool every RoI from all four levels and fuse them element-wise (`FusedRoIAlign`, PANet's adaptive
+feature pooling); no parameters.
+
+**Classifier input** (`model.cls_input`). `mean` (default): the mean patch token. `cls_mean`: [CLS, mean patch token]
+(DINOv3's linear-probe input; the classifier's LayerNorm and Linear double in width). Not combinable with
+`fusion_layers`.
+
+**Same-class copy-paste** (`data.copy_paste_same_class`). Donors come only from images with the same label, so an
+image keeps its single class and a pasted object lands in a scene of its own kind.
+
 **Multi-layer fusion** (`model.fusion_layers: [5, 8, 11]`). Forward hooks capture those blocks' tokens; a learnable
 softmax weighting (initialized to the last block) combines them before the neck. Cost: one weight per block.
 

@@ -1,0 +1,8 @@
+# J2 (RoI level mapping): j0 with torchvision's one-level-per-RoI pooling kept but the canonical scale lowered from 224
+# to 56 px, so boxes move up the pyramid: P2 60.0% / P3 20.8% / P4 14.1% / P5 5.1% of this dataset's boxes, instead of
+# 94.9% / 3.9% / 1.2% / 0%. Tiny objects (under 28 px) stay on P2. The cheaper alternative to j1's fusion. No new
+# parameters. Compare with j0_base (and j1).
+base: j0_base.yaml
+name: giou_j2_roi_canonical56
+model:
+  roi_canonical_scale: 56

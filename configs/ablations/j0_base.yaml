@@ -1,0 +1,14 @@
+# J0 (new base, 96 epochs on 90% of train): f5 (stem, split learning rates) + d14's classification weight 0.1, with
+# the augmentation fixed. Mosaic off: it resized every tile to 256 px, halving all objects (median 15.9 -> 8 px,
+# wind turbines to 3-5 px, under the 8 px anchor) and gave 3/4 of each mosaic the wrong image label. Copy-paste donors
+# from the same class only, so every image keeps one class and objects land in scenes of their own kind, with a 1 px
+# context margin. The reference for every j* ablation (one change each). Not isolated from f5: it changes the
+# augmentation and the classification weight together (d15 vs d14 checks the augmentation at full length). ~4 h.
+base: f5_split_lr.yaml
+name: giou_j0_base
+loss:
+  classification: 0.1
+data:
+  mosaic: 0.0
+  copy_paste_same_class: true
+  copy_paste_margin: 1

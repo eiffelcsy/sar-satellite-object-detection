@@ -6,8 +6,9 @@ unfrozen patch embedding), `wst_stem` (wavelet scattering detail for P2), `vit_a
 with injectors / extractors, added to P2-P5), `giou_weight` (GIoU box term), `head` (`standard` | `cascade` RoI head),
 `box_similarity` (IoU, NWD or their max for anchor / proposal labels), `rescore` (re-score the boxes with the
 image classifier at inference), `iou_aware` (an IoU branch; rank boxes by class score x predicted IoU),
-`heatmap_aux` (a training-only center-heatmap loss on P2) and `cls_detach` (no classification gradient into the
-backbone).
+`heatmap_aux` (a training-only center-heatmap loss on P2), `cls_detach` (no classification gradient into the
+backbone), `cls_input` (mean patch token, or DINOv3's CLS token with it) and `roi_pooling` / `roi_canonical_scale`
+(which pyramid levels each RoI is pooled from).
 """
 from collections import OrderedDict
 
@@ -18,7 +19,7 @@ from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor, TwoMLPHead
 from torchvision.models.detection.image_list import ImageList
 from torchvision.models.detection.rpn import RegionProposalNetwork, RPNHead
-from torchvision.ops import MultiScaleRoIAlign
+from torchvision.ops import MultiScaleRoIAlign, roi_align
 
 from .adapters import adapt_backbone
 from .backbones import DINOv3
@@ -158,6 +159,30 @@ class LayerFusion(nn.Module):
         return sum(weight * token for weight, token in zip(weights, tokens))
 
 
+class FusedRoIAlign(nn.Module):
+    """Pool every RoI from all pyramid levels and fuse them element-wise (PANet's adaptive feature pooling, Liu et
+    al., 2018), instead of torchvision's one level per RoI.
+
+    With torchvision's mapping (canonical 224 px at P4) every box under 112 px, nearly all of this dataset, is pooled
+    from P2 alone: the twice-upsampled ViT map plus the stem, never P4, the ViT's own stride-16 tokens. Fusing gives
+    each RoI P2's detail and P3-P5's semantics. `fuse`: `max` (PANet's choice) or `mean`. No parameters.
+    """
+
+    def __init__(self, featmap_names, output_size=7, sampling_ratio=2, fuse='max'):
+        super().__init__()
+        if fuse not in ('max', 'mean'):
+            raise ValueError(f"unknown roi_pooling fuse '{fuse}'; available: max, mean")
+        self.featmap_names, self.output_size, self.sampling_ratio, self.fuse = \
+            list(featmap_names), output_size, sampling_ratio, fuse
+
+    def forward(self, features, boxes, image_shapes):
+        rois = torch.cat([torch.cat([b.new_full((len(b), 1), i), b], dim=1) for i, b in enumerate(boxes)])
+        pooled = [roi_align(features[name], rois, self.output_size, spatial_scale=features[name].shape[-1] /
+                            image_shapes[0][1], sampling_ratio=self.sampling_ratio) for name in self.featmap_names]
+        pooled = torch.stack(pooled)
+        return pooled.amax(0) if self.fuse == 'max' else pooled.mean(0)
+
+
 class CenterHeatmapHead(nn.Module):
     """Training-only auxiliary supervision of the stride-4 level (CenterNet, Zhou et al., 2019).
 
@@ -211,7 +236,8 @@ class MultiTaskModel(nn.Module):
                  head='standard', head_params=None, detail_stem_params=None, rpn_fg_iou_thresh=0.7,
                  rpn_bg_iou_thresh=0.3, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100,
                  vit_adapter=None, box_similarity='iou', nwd_constant=16.0, rescore='off', rescore_power=1.0,
-                 iou_aware=False, iou_alpha=0.5, heatmap_aux=False, cls_detach=False):
+                 iou_aware=False, iou_alpha=0.5, heatmap_aux=False, cls_detach=False, cls_input='mean',
+                 roi_pooling='level', roi_canonical_scale=224):
         super().__init__()
         if rescore not in RESCORE_MODES:
             raise ValueError(f"unknown rescore mode '{rescore}'; available: {', '.join(RESCORE_MODES)}")
@@ -219,7 +245,15 @@ class MultiTaskModel(nn.Module):
             raise ValueError('iou_aware is implemented for the standard RoI head only')
         self.backbone = backbone
         self.patch_size = getattr(backbone, 'patch_size', 16)
-        self.cls_head = nn.Sequential(nn.LayerNorm(backbone.embed_dim), nn.Linear(backbone.embed_dim, num_classes))
+        # cls_input: `mean` (the mean patch token) or `cls_mean` ([CLS, mean patch token], DINOv3's linear-probe input:
+        # its CLS token is trained for image-level semantics and was dropped before).
+        if cls_input not in ('mean', 'cls_mean'):
+            raise ValueError(f"unknown cls_input '{cls_input}'; available: mean, cls_mean")
+        if cls_input == 'cls_mean' and fusion_layers:
+            raise ValueError('cls_input cls_mean reads the final CLS token; it does not combine with fusion_layers')
+        self.cls_input = cls_input
+        cls_dim = backbone.embed_dim * (2 if cls_input == 'cls_mean' else 1)
+        self.cls_head = nn.Sequential(nn.LayerNorm(cls_dim), nn.Linear(cls_dim, num_classes))
         # cls_detach: the classifier reads the pooled tokens without back-propagating into the backbone, so DoRA,
         # Convpass and the input adapter train for detection only (mAP is worth ~3.7x macro-F1 per point in delta-m).
         self.cls_detach = cls_detach
@@ -251,8 +285,13 @@ class MultiTaskModel(nn.Module):
             batch_size_per_image=256,
             positive_fraction=0.5, pre_nms_top_n=dict(training=2000, testing=2000),
             post_nms_top_n=dict(training=2000, testing=2000), nms_thresh=0.7)
-        roi_pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=roi_output_size,
-                                      sampling_ratio=roi_sampling_ratio)
+        # roi_pooling `level`: torchvision's one level per RoI, k = floor(4 + log2(sqrt(area) / roi_canonical_scale));
+        # `max` / `mean`: every level, fused (FusedRoIAlign).
+        if roi_pooling == 'level':
+            roi_pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=roi_output_size,
+                                          sampling_ratio=roi_sampling_ratio, canonical_scale=roi_canonical_scale)
+        else:
+            roi_pool = FusedRoIAlign(['0', '1', '2', '3'], roi_output_size, roi_sampling_ratio, fuse=roi_pooling)
         self.roi_heads = self._build_roi_heads(roi_pool, roi_output_size, num_classes, head, head_params or {},
                                                giou_weight, score_thresh, nms_thresh, detections_per_img,
                                                iou_aware, iou_alpha)
@@ -324,8 +363,14 @@ class MultiTaskModel(nn.Module):
         backbone_images = self.input_adapter(images) if self.input_adapter is not None else images
         if self.vit_adapter is not None:  # the spatial prior runs first: its injectors act inside the backbone
             self.vit_adapter.prepare(images)
-        tokens = self._backbone_tokens(backbone_images)
-        pooled = tokens.mean(dim=1)
+        if self.cls_input == 'cls_mean':
+            prefix = self.backbone.num_prefix_tokens
+            all_tokens = self.backbone(backbone_images, with_prefix=True)
+            tokens = all_tokens[:, prefix:]
+            pooled = torch.cat([all_tokens[:, 0], tokens.mean(dim=1)], dim=1)
+        else:
+            tokens = self._backbone_tokens(backbone_images)
+            pooled = tokens.mean(dim=1)
         logits = self.cls_head(pooled.detach() if self.cls_detach else pooled)
         h, w = images.shape[-2] // self.patch_size, images.shape[-1] // self.patch_size  # one token per patch
         features = self.neck(tokens.transpose(1, 2).unflatten(2, (h, w)))  # tokens as a [B, 768, h, w] map
@@ -370,7 +415,9 @@ def build_model(args):
                            detections_per_img=args.detections_per_img, vit_adapter=args.vit_adapter,
                            box_similarity=args.box_similarity, nwd_constant=args.nwd_constant,
                            rescore=args.rescore, rescore_power=args.rescore_power, iou_aware=args.iou_aware,
-                           iou_alpha=args.iou_alpha, heatmap_aux=args.heatmap_aux, cls_detach=args.cls_detach)
+                           iou_alpha=args.iou_alpha, heatmap_aux=args.heatmap_aux, cls_detach=args.cls_detach,
+                           cls_input=args.cls_input, roi_pooling=args.roi_pooling,
+                           roi_canonical_scale=args.roi_canonical_scale)
     return model, pretrained_ids
 
 

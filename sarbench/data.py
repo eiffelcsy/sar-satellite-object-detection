@@ -233,7 +233,7 @@ class SARMultiTask(Dataset):
 
     def __init__(self, root, split, train=False, size=512, limit=None, val_fraction=0.1, seed=0,
                  preprocess=None, cache_dir=None, mosaic=0.0, copy_paste=0.0, copy_paste_max_iou=0.3,
-                 copy_paste_margin=0, scale_jitter=None, rotation90=False):
+                 copy_paste_margin=0, copy_paste_same_class=False, scale_jitter=None, rotation90=False):
         self.root = Path(root)
         self.train = train
         self.size = size
@@ -241,6 +241,9 @@ class SARMultiTask(Dataset):
         self.copy_paste = copy_paste  # probability of pasting objects from another image (train only)
         self.copy_paste_max_iou = copy_paste_max_iou
         self.copy_paste_margin = copy_paste_margin  # px of context pasted around each object
+        # Donors from images of the same class only: every image keeps one class (its label stays true) and a pasted
+        # object lands in a scene of its own kind (a ship in a harbour scene, not an airport).
+        self.copy_paste_same_class = copy_paste_same_class
         self.rotation90 = rotation90  # random 0/90/180/270-degree rotation (train only)
         self.scale_jitter = scale_jitter  # (lo, hi) scale range applied after the resize, or None/False
         self.image_dir = None
@@ -258,6 +261,9 @@ class SARMultiTask(Dataset):
                 rows = [{'file_name': row['image'], 'label': int(row['label'])}
                         for row in csv.DictReader(f)]
         self.rows = rows[:limit]
+        self.rows_by_label = defaultdict(list)  # image label -> row indices (same-class copy-paste donors)
+        for index, row in enumerate(self.rows):
+            self.rows_by_label[row['label']].append(index)
         coco = json.loads(self.instances_json.read_text())
         self.coco_images = {}  # key = CSV / COCO file name, and its basename
         for img in coco['images']:
@@ -324,7 +330,8 @@ class SARMultiTask(Dataset):
                                                 for _ in range(3)]
             image, boxes, labels = mosaic_tiles(tiles, self.size)
         if self.train and self.copy_paste and random.random() < self.copy_paste:  # paste donor objects
-            donor = self._load_transformed(random.randrange(len(self)))
+            pool = self.rows_by_label[self.rows[i]['label']] if self.copy_paste_same_class else range(len(self))
+            donor = self._load_transformed(random.choice(pool))
             image, boxes, labels = copy_paste(image, boxes, labels, donor[0], donor[1], donor[2],
                                               self.copy_paste_max_iou, margin=self.copy_paste_margin)
         if self.train:  # zero-area boxes (from the crop) make GIoU/box_iou NaN, so drop them before the model

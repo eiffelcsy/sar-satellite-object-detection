@@ -335,3 +335,45 @@ def test_cls_detach_keeps_classification_gradients_out_of_the_backbone():
         backbone_grad = model.backbone.patch.weight.grad
         assert model.cls_head[1].weight.grad.abs().sum() > 0  # the classifier itself always trains
         assert (backbone_grad is None or not backbone_grad.any()) == detach
+
+
+def test_fused_roi_pooling_reads_every_level_and_canonical_scale_reaches_torchvision():
+    from torchvision.ops import MultiScaleRoIAlign
+    from sarbench.model import FusedRoIAlign
+    features = {str(i): torch.zeros(1, 4, 128 // 2 ** i, 128 // 2 ** i) for i in range(4)}
+    features['2'][:, :, 4:8, 4:8] = 5.0  # signal only on the stride-16 level
+    boxes = [torch.tensor([[64., 64., 128., 128.]])]
+    pooled = FusedRoIAlign(['0', '1', '2', '3'], 7, 2)(features, boxes, [(512, 512)])
+    assert pooled.shape == (1, 4, 7, 7) and pooled.max() == 5.0  # a 64 px box sees the P4 signal
+    single = MultiScaleRoIAlign(['0', '1', '2', '3'], 7, 2)(features, boxes, [(512, 512)])
+    assert single.max() == 0  # torchvision pools a 64 px box from P2 only (canonical 224)
+    model = MultiTaskModel(_StubBackbone(), roi_canonical_scale=56)
+    assert model.roi_heads.box_roi_pool.canonical_scale == 56
+    fused = MultiTaskModel(_StubBackbone(), roi_pooling='max')
+    fused.train()
+    _, _, losses = fused(IMAGES, TARGETS)
+    assert all(torch.isfinite(v) for v in losses.values())
+    with pytest.raises(ValueError):
+        MultiTaskModel(_StubBackbone(), roi_pooling='sum')
+
+
+class _PrefixStubBackbone(_StubBackbone):
+    """The stub with DINOv3's `with_prefix` flag (one CLS token, set to ones so it is recognizable)."""
+
+    def forward(self, x, with_prefix=False):
+        patches = self.patch(x).flatten(2).transpose(1, 2)
+        tokens = torch.cat([torch.ones(x.shape[0], 1, self.embed_dim), patches], 1)
+        return tokens if with_prefix else tokens[:, 1:]
+
+
+def test_cls_mean_classifier_reads_the_cls_token_and_the_mean_patch_token():
+    model = MultiTaskModel(_PrefixStubBackbone(), cls_input='cls_mean')
+    assert model.cls_head[1].in_features == 2 * 128
+    seen = []
+    model.cls_head.register_forward_hook(lambda m, args, out: seen.append(args[0]))
+    model.eval()
+    with torch.no_grad():
+        logits, _, _ = model(IMAGES)
+    assert logits.shape == (2, 9) and torch.equal(seen[0][:, :128], torch.ones(2, 128))
+    with pytest.raises(ValueError):
+        MultiTaskModel(_PrefixStubBackbone(), cls_input='cls_mean', fusion_layers=[1, 2])

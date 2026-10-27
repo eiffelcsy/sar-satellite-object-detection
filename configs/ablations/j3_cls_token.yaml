@@ -1,0 +1,8 @@
+# J3 (classifier input): j0 with the image classifier on [CLS, mean patch token] (DINOv3's linear-probe input)
+# instead of the mean patch token alone; the CLS token, trained for image-level semantics, was dropped before. +7 k
+# parameters. Targets macro-F1 (worth ~0.54 delta-m per point on Codabench val); mAP should not move. Compare with
+# j0_base.
+base: j0_base.yaml
+name: giou_j3_cls_token
+model:
+  cls_input: cls_mean

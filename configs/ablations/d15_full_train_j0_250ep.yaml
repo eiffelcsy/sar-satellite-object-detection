@@ -1,0 +1,10 @@
+# D15 (final candidate, augmentation check at full length): d14's recipe (classification weight 0.1, 250 epochs, all
+# of train) with j0's augmentation: no mosaic, same-class copy-paste, 1 px margin. d15 vs d14 on Codabench isolates
+# the augmentation change (d14: +43.58, F1 95.69, mAP 48.24). ~12 h. Fold in the j1-j3 winners afterwards. The run
+# writes model.pt only: make the zips with sbatchScriptEval.sh section 9 (NAME=d15_full_train_j0_250ep).
+base: d14_full_train_i1_cls01_250ep.yaml
+name: giou_d15_full_train_j0_250ep
+data:
+  mosaic: 0.0
+  copy_paste_same_class: true
+  copy_paste_margin: 1
