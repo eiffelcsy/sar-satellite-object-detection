@@ -151,6 +151,7 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `j3_cls_token` | image classifier on [CLS, mean patch token] | j0 | 123.94 | 38.87 |
 | `d15_full_train_j0_250ep` | final candidate: d14 with j0's augmentation | d14 | 123.93 | 38.86 |
 | `d16_full_train_j1_250ep` | final candidate: d15 with j1's fused RoI pooling | d15 | 123.93 | 38.86 |
+| `d17_full_train_j1_200ep` | final candidate: d16 at 200 epochs instead of 250 | d16 | 123.93 | 38.86 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.

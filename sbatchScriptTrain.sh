@@ -179,6 +179,8 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # srun --gres=gpu:1 python train.py --config configs/ablations/j2_roi_canonical56.yaml --data "$DATA" --wandb --workers 4
 # srun --gres=gpu:1 python train.py --config configs/ablations/j3_cls_token.yaml       --data "$DATA" --wandb --workers 4
 # d15: d14 + j0's augmentation, 250 epochs on all of train (~12 h); vs d14 on Codabench. Zips: sbatchScriptEval.sh 9.
-srun --gres=gpu:1 python train.py --config configs/ablations/d15_full_train_j0_250ep.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d15_full_train_j0_250ep.yaml --data "$DATA" --wandb --workers 4
 # d16: d15 + j1's fused RoI pooling, 250 epochs on all of train (~12 h); vs d15 on Codabench. Zips: sbatchScriptEval.sh 9.
 # srun --gres=gpu:1 python train.py --config configs/ablations/d16_full_train_j1_250ep.yaml --data "$DATA" --wandb --workers 4
+# d17: d16 at 200 epochs (~9.5 h); vs d16 on Codabench. Zips: sbatchScriptEval.sh 9.
+srun --gres=gpu:1 python train.py --config configs/ablations/d17_full_train_j1_200ep.yaml --data "$DATA" --wandb --workers 4

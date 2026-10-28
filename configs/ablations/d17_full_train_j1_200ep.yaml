@@ -1,0 +1,7 @@
+# D17 (final candidate, shorter schedule): d16 (d15 + j1's fused RoI pooling, all of train) at 200 epochs instead of
+# 250. d17 vs d16 on Codabench isolates the schedule length. ~9.5 h. The run writes model.pt only: make the zips with
+# sbatchScriptEval.sh section 9 (NAME=d17_full_train_j1_200ep).
+base: d16_full_train_j1_250ep.yaml
+name: giou_d17_full_train_j1_200ep
+train:
+  epochs: 200
