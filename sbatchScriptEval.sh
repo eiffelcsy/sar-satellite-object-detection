@@ -127,6 +127,6 @@ srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
 # 10) Post-processing sweep on j1 (fused RoI pooling, held-out split; no retraining): fused pooling changes the box
 #     scores, so recheck the score threshold x NMS IoU x detections per image tuned on earlier models. Apply the
 #     printed winner to the d16 / d17 predictions in section 9 (--score-thresh / --nms-thresh / --detections-per-img).
-srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/j1_roi_fused.yaml \
-  --load runs/giou_j1_roi_fused/model.pt --data "$DATA" --workers 4 \
-  --score-thresh 0.01 0.001 0.0001 --nms-thresh 0.5 0.55 0.6 0.65 0.7
+# srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/j1_roi_fused.yaml \
+#   --load runs/giou_j1_roi_fused/model.pt --data "$DATA" --workers 4 \
+#   --score-thresh 0.01 0.001 0.0001 --nms-thresh 0.5 0.55 0.6 0.65 0.7
