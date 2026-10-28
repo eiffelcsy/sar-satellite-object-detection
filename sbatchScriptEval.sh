@@ -129,4 +129,4 @@ MODEL=runs/giou_d16_full_train_j1_250ep/model.pt
 #     printed winner to the d16 / d17 predictions in section 9 (--score-thresh / --nms-thresh / --detections-per-img).
 srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/j1_roi_fused.yaml \
   --load runs/giou_j1_roi_fused/model.pt --data "$DATA" --workers 4 \
-  --score-thresh 0.0001 0.00001 --nms-thresh 0.75 0.8 0.85 0.9 0.95 1.0
+  --score-thresh 0.0001 0.00001 --nms-thresh 0.75 0.8 0.85
