@@ -66,10 +66,10 @@ MODEL=runs/giou_d16_full_train_j1_250ep/model.pt
 #   --data "$DATA" --out runs/eval_heldout
 
 # 2) Official val split (unlabelled val/images.json): predictions only -> submission_val.zip
-# srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
-#   --score-thresh 0.0001 --nms-thresh 0.85 \
-#   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
-#   --preprocess-cache preprocess_cache/val
+srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
+  --score-thresh 0.00001 --nms-thresh 0.8 \
+  --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
+  --preprocess-cache preprocess_cache/val
 
 # 3) Official test split (unlabelled test/images.json): predictions only -> submission_test.zip
 # srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
@@ -127,6 +127,6 @@ MODEL=runs/giou_d16_full_train_j1_250ep/model.pt
 # 10) Post-processing sweep on j1 (fused RoI pooling, held-out split; no retraining): fused pooling changes the box
 #     scores, so recheck the score threshold x NMS IoU x detections per image tuned on earlier models. Apply the
 #     printed winner to the d16 / d17 predictions in section 9 (--score-thresh / --nms-thresh / --detections-per-img).
-srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/j1_roi_fused.yaml \
-  --load runs/giou_j1_roi_fused/model.pt --data "$DATA" --workers 4 \
-  --score-thresh 0.0001 0.00001 --nms-thresh 0.75 0.8 0.85
+# srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/j1_roi_fused.yaml \
+#   --load runs/giou_j1_roi_fused/model.pt --data "$DATA" --workers 4 \
+#   --score-thresh 0.0001 0.00001 --nms-thresh 0.75 0.8 0.85
