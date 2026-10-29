@@ -94,6 +94,9 @@ def test_base_is_the_dora_giou_recipe():
     ('k5_box_loss4', 'j1_roi_fused', {'loss_weights'}),
     ('k6_no_copy_paste', 'j1_roi_fused', {'copy_paste'}),
     ('k7_alpha_giou', 'j1_roi_fused', {'giou_alpha'}),
+    ('k8_patch8_bs32', 'j1_roi_fused', {'backbone_kwargs', 'batch_size', 'lr', 'backbone_lr', 'cls_lr', 'unfrozen_lr'}),
+    ('k9_p2_heatmap', 'j1_roi_fused', {'heatmap_aux'}),
+    ('k10_scale_jitter', 'j1_roi_fused', {'scale_jitter'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'

@@ -1,0 +1,8 @@
+# K10 (gentle scale jitter alone): j1 + scale jitter 0.9-1.1 (pads when shrinking, crops when enlarging), no rot90.
+# a2 combined jitter with rot90 and 3 px paste context on top of the old mosaic (tiles resized to 256 px), so its
+# -5.2 mAP never isolated jitter. Objects stay within +-10 % of their true size, close to the test distribution.
+# No new parameters. Compare with j1_roi_fused. ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k10_scale_jitter
+data:
+  scale_jitter: [0.9, 1.1]

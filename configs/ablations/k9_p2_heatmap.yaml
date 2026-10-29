@@ -1,0 +1,8 @@
+# K9 (h6 on j1, dense small-object supervision): j1 + the training-only CenterNet heatmap head on P2 (stride 4): one
+# heatmap per class, a Gaussian peak at every GT centre, penalty-reduced focal loss (loss_heatmap, weight 1.0). h6 was
+# judged on f5, under the old mosaic that halved every object, exactly the objects this loss targets. Dropped at
+# inference; 0.15 M trainable. Compare with j1_roi_fused, AP_small first. ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k9_p2_heatmap
+model:
+  heatmap_aux: true

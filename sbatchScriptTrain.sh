@@ -200,4 +200,11 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # srun --gres=gpu:1 python train.py --config configs/ablations/k6_no_copy_paste.yaml --data "$DATA" --wandb --workers 4
 
 # U: alpha-GIoU (alpha 3) in place of the GIoU box term, one change on j1. Compare with j1 (and k4).
-srun --gres=gpu:1 python train.py --config configs/ablations/k7_alpha_giou.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/k7_alpha_giou.yaml --data "$DATA" --wandb --workers 4
+
+# V: pre-fix results rerun on j1 (h2 / h6 / a2 were judged under the old mosaic that halved every object).
+#   k8 patch-8 tokens at batch 32 (LR x sqrt 2; ~4-6x backbone compute, time one epoch; two changes vs j1)
+#   k9 P2 heatmap loss (h6) | k10 scale jitter 0.9-1.1 alone
+srun --gres=gpu:1 python train.py --config configs/ablations/k8_patch8_bs32.yaml   --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/k9_p2_heatmap.yaml    --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/k10_scale_jitter.yaml --data "$DATA" --wandb --workers 4

@@ -1,0 +1,18 @@
+# K8 (h2 on j1, finer tokens, larger batch for speed): j1 with the ViT re-tokenized at 8 px (PI-resized patch
+# embedding, FlexiViT: 64 x 64 tokens at 512 px, gradient checkpointing) at batch 32 instead of 16, every learning
+# rate x sqrt(2) (AdamW scaling for half the steps). h2 was judged on f5, under the old mosaic that halved every object
+# (median 16 -> 8 px), so its result predates the augmentation fix. TWO changes vs j1 (tokens + batch/LR): a gain is
+# not attributable to patch-8 alone without a batch-32 j1. 4x the tokens: about 4-6x the backbone compute; check that
+# batch 32 fits (h2's batch-16 peak memory x 2 must stay under 48 GB) and time one epoch. Compare with j1_roi_fused.
+base: j1_roi_fused.yaml
+name: giou_k8_patch8_bs32
+backbone:
+  params:
+    patch_size: 8
+    grad_checkpointing: true
+train:
+  batch_size: 32
+  lr: 2.83e-4
+  backbone_lr: 4.24e-4
+  cls_lr: 1.41e-4
+  unfrozen_lr: 2.83e-5

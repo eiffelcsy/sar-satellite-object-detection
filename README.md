@@ -159,6 +159,9 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `k5_box_loss4` | RoI box loss weight (loss_box_reg) 2.0 -> 4.0 | j1 | 123.93 | 38.86 |
 | `k6_no_copy_paste` | copy-paste off (j1: same-class, p 0.5, up to 3 objects) | j1 | 123.93 | 38.86 |
 | `k7_alpha_giou` | alpha-GIoU (alpha 3) in place of the GIoU box term | j1 | 123.93 | 38.86 |
+| `k8_patch8_bs32` | h2 on j1: ViT re-tokenized at 8 px, batch 32 with every learning rate x sqrt(2) | j1 | 122.16 | 37.09 |
+| `k9_p2_heatmap` | h6 on j1: training-only CenterNet heatmap loss on P2 | j1 | 124.08 | 39.01 |
+| `k10_scale_jitter` | gentle scale jitter 0.9-1.1 alone (no rot90) | j1 | 123.93 | 38.86 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.
