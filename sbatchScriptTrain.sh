@@ -198,3 +198,6 @@ srun --gres=gpu:1 python train.py --config configs/ablations/k2_roi_sparse.yaml 
 
 # T: does j1's copy-paste help? Replaces k1 (stopped: -3.4 mAP / -4.5 AP_small vs j1 at step 14.8k). Compare with j1.
 srun --gres=gpu:1 python train.py --config configs/ablations/k6_no_copy_paste.yaml --data "$DATA" --wandb --workers 4
+
+# U: alpha-GIoU (alpha 3) in place of the GIoU box term, one change on j1. Compare with j1 (and k4).
+# srun --gres=gpu:1 python train.py --config configs/ablations/k7_alpha_giou.yaml --data "$DATA" --wandb --workers 4

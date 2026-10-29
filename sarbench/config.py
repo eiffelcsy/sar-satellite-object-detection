@@ -30,6 +30,7 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
       input_adapter: true          # ImageNet norm + learnable 1x1 conv (no-op init) + unfrozen patch embedding
       wst_stem: true               # wavelet scattering (J=2, L=8 -> 81 ch at stride 4) added to P2
       giou_weight: 1.0             # extra GIoU term added to the RoI box regression loss
+      giou_alpha: 1.0              # 1 = GIoU; > 1 = alpha-GIoU (e.g. 3), more weight on already-overlapping boxes
       roi_sampling_ratio: 2        # RoIAlign sampling_ratio
       roi_output_size: 7           # RoIAlign output_size
       head: cascade                # standard (default) | cascade RoI head
@@ -56,6 +57,7 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
       roi_positive_fraction: 0.25  # the most of them that may be positives
       score_thresh: 0.05           # inference post-processing only (sweep it with sweep_postprocess.py)
       nms_thresh: 0.5
+      soft_nms_sigma: 0.0          # > 0: Gaussian Soft-NMS with this sigma instead of NMS (nms_thresh unused)
       detections_per_img: 100
     train: {epochs: 48, stage_a_epochs: 0, stage_a_lr: 2.0e-4, batch_size: 16, lr: 1.0e-4,
             backbone_lr: null, lora_plus_ratio: 1.0, unfrozen_lr: 2.0e-5, cls_lr: null, ema_decay: 0.0,
@@ -103,6 +105,7 @@ DEFAULTS = {
     'wst_stem': False,
     'wst_params': {},
     'giou_weight': 0.0,
+    'giou_alpha': 1.0,
     'roi_sampling_ratio': 2,
     'roi_output_size': 7,
     'head': 'standard',
@@ -112,6 +115,7 @@ DEFAULTS = {
     'rpn_bg_iou_thresh': 0.3,
     'score_thresh': 0.05,
     'nms_thresh': 0.5,
+    'soft_nms_sigma': 0.0,
     'detections_per_img': 100,
     'vit_adapter': None,
     'box_similarity': 'iou',
@@ -175,7 +179,7 @@ _MODEL_KEYS = ('detail_stem', 'fusion_layers', 'input_adapter', 'wst_stem', 'wst
                'rpn_fg_iou_thresh', 'rpn_bg_iou_thresh', 'score_thresh', 'nms_thresh', 'detections_per_img',
                'vit_adapter', 'box_similarity', 'nwd_constant', 'rescore', 'rescore_power', 'iou_aware', 'iou_alpha',
                'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale',
-               'roi_batch_size_per_image', 'roi_positive_fraction')
+               'roi_batch_size_per_image', 'roi_positive_fraction', 'giou_alpha', 'soft_nms_sigma')
 _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'unfrozen_lr',
                'cls_lr', 'ema_decay', 'lora_plus_ratio', 'warmup_epochs', 'wd_exclude_1d', 'weight_decay', 'eval_every', 'workers',
                'seed')

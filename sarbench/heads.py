@@ -6,6 +6,7 @@ Both heads also take the image classifier's probabilities at inference (`class_p
 with them (`rescore`, see `apply_class_prior`), and match proposals to GT with a configurable `box_similarity`
 (IoU, NWD or the larger of the two, see `box_similarity`). The standard head can also predict each box's IoU with its
 ground truth and rank detections by class score x predicted IoU (`iou_aware`, see `apply_box_quality`).
+Both can replace per-class NMS with Gaussian Soft-NMS at inference (`soft_nms_sigma` > 0, see `soft_nms`).
 """
 import functools
 
@@ -14,7 +15,7 @@ import torch.nn.functional as F
 from torch import nn
 from torchvision.models.detection._utils import BalancedPositiveNegativeSampler, Matcher
 from torchvision.models.detection.roi_heads import RoIHeads
-from torchvision.ops import box_iou, clip_boxes_to_image
+from torchvision.ops import box_iou, clip_boxes_to_image, remove_small_boxes
 
 from .losses import fastrcnn_loss as roi_loss
 
@@ -114,6 +115,63 @@ def _rescored(heads, class_logits, proposals, class_prior):
     return apply_class_prior(class_logits, rows, heads.rescore, heads.rescore_power)
 
 
+def soft_nms(boxes, scores, labels, sigma=0.5, min_score=0.001, max_keep=100):
+    """Per-class Gaussian Soft-NMS (Bodla et al., ICCV 2017): returns (kept indices, decayed scores), best first.
+
+    Instead of deleting every box above an IoU with a higher-scoring one, each pick decays the others' scores by
+    exp(-IoU^2 / sigma); boxes falling below `min_score` are dropped. A slightly offset second box survives with a
+    lower score instead of vanishing, which is what COCO AP at high IoU thresholds rewards.
+    """
+    keep, kept_scores = [], []
+    if boxes.numel() == 0:
+        return boxes.new_zeros(0, dtype=torch.long), scores.new_zeros(0)
+    shifted = boxes + (labels.to(boxes) * (boxes.max() + 1))[:, None]  # no overlap across classes
+    scores = scores.clone()
+    alive = torch.arange(len(scores), device=boxes.device)
+    while alive.numel() and len(keep) < max_keep:
+        top = int(scores[alive].argmax())
+        best = alive[top]
+        keep.append(best)
+        kept_scores.append(scores[best])
+        alive = torch.cat([alive[:top], alive[top + 1:]])
+        if not alive.numel():
+            break
+        overlap = box_iou(shifted[best][None], shifted[alive])[0]
+        scores[alive] = scores[alive] * torch.exp(-overlap ** 2 / sigma)
+        alive = alive[scores[alive] > min_score]
+    return torch.stack(keep), torch.stack(kept_scores)
+
+
+class _SoftNMSPostprocess:
+    """torchvision's `postprocess_detections`, with Gaussian Soft-NMS in place of per-class NMS when
+    `soft_nms_sigma` > 0 (inference only; 0 keeps torchvision's path exactly)."""
+
+    soft_nms_sigma = 0.0
+
+    def postprocess_detections(self, class_logits, box_regression, proposals, image_shapes):
+        if self.soft_nms_sigma <= 0:
+            return super().postprocess_detections(class_logits, box_regression, proposals, image_shapes)
+        num_classes = class_logits.shape[-1]
+        counts = [len(p) for p in proposals]
+        pred_boxes = self.box_coder.decode(box_regression, proposals).split(counts, 0)
+        pred_scores = F.softmax(class_logits, -1).split(counts, 0)
+        all_boxes, all_scores, all_labels = [], [], []
+        for boxes, scores, image_shape in zip(pred_boxes, pred_scores, image_shapes):
+            boxes = clip_boxes_to_image(boxes, image_shape)
+            labels = torch.arange(num_classes, device=boxes.device).view(1, -1).expand_as(scores)
+            boxes, scores, labels = boxes[:, 1:].reshape(-1, 4), scores[:, 1:].reshape(-1), labels[:, 1:].reshape(-1)
+            inds = torch.where(scores > self.score_thresh)[0]
+            boxes, scores, labels = boxes[inds], scores[inds], labels[inds]
+            keep = remove_small_boxes(boxes, min_size=1e-2)
+            boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
+            keep, scores = soft_nms(boxes, scores, labels, self.soft_nms_sigma, self.score_thresh,
+                                    self.detections_per_img)
+            all_boxes.append(boxes[keep])
+            all_scores.append(scores)
+            all_labels.append(labels[keep])
+        return all_boxes, all_scores, all_labels
+
+
 class ConvFCBoxHead(nn.Module):
     """RoI box head of `num_convs` 3x3 convs (GroupNorm, ReLU) on the pooled 256 x 7 x 7 features, a 1x1 conv down to
     `reduce` channels, then one fully connected layer of width `fc_dim` (the "4conv1fc" head, made cheaper).
@@ -137,7 +195,7 @@ class ConvFCBoxHead(nn.Module):
         return torch.relu(self.fc(self.convs(x).flatten(1)))
 
 
-class DetRoIHeads(RoIHeads):
+class DetRoIHeads(_SoftNMSPostprocess, RoIHeads):
     """torchvision's RoI head with an additional GIoU box-regression term (`giou_weight`, 0 disables it), image-class
     re-scoring at inference (`rescore`, `rescore_power`) and proposal matching by `self.box_similarity`.
 
@@ -145,7 +203,10 @@ class DetRoIHeads(RoIHeads):
     class, the IoU of that class's decoded box with its GT (IoU-Net, Jiang et al., 2018). It trains on the sampled
     positives (`loss_iou`: binary cross-entropy against the detached IoU of the box as currently regressed), and at
     inference detections are ranked by class score x predicted IoU ** `iou_alpha` (`apply_box_quality`).
+    `giou_alpha` != 1 turns the GIoU term into alpha-GIoU (`losses.alpha_giou_loss`).
     """
+
+    giou_alpha = 1.0
 
     def __init__(self, *args, giou_weight=0.0, rescore='off', rescore_power=1.0, iou_dim=None, iou_alpha=0.5,
                  **kwargs):
@@ -200,7 +261,7 @@ class DetRoIHeads(RoIHeads):
         if self.training:
             loss_classifier, loss_box_reg = roi_loss(class_logits, box_regression, labels, regression_targets,
                                                      proposals, matched_gt, self.box_coder,
-                                                     giou_weight=self.giou_weight)
+                                                     giou_weight=self.giou_weight, giou_alpha=self.giou_alpha)
             losses = {'loss_classifier': loss_classifier, 'loss_box_reg': loss_box_reg}
             if iou_logits is not None:
                 losses['loss_iou'] = self.iou_loss(iou_logits, box_regression, proposals, labels, matched_gt)
@@ -214,11 +275,13 @@ class DetRoIHeads(RoIHeads):
         return detections, losses
 
 
-class CascadeRoIHeads(RoIHeads):
+class CascadeRoIHeads(_SoftNMSPostprocess, RoIHeads):
     """Cascade R-CNN (Cai & Vasconcelos, 2018): S RoI stages with increasing IoU thresholds, each decoding
     boxes that are re-pooled and refined by the next stage. Reuses torchvision's box coder and post-processing;
     the per-stage losses are summed into `loss_classifier` / `loss_box_reg` so the `loss:` weights still apply.
     """
+
+    giou_alpha = 1.0
 
     def __init__(self, box_roi_pool, box_heads, box_predictors, fg_iou_thresholds=(0.5, 0.6, 0.7),
                  bg_iou_threshold=0.5, batch_size_per_image=512, positive_fraction=0.25, bbox_reg_weights=None,
@@ -295,7 +358,7 @@ class CascadeRoIHeads(RoIHeads):
             if self.training:
                 loss_classifier, loss_box_reg = roi_loss(class_logits, box_regression, labels,
                                                          regression_targets, boxes, matched_gt, self.box_coder,
-                                                         giou_weight=self.giou_weight)
+                                                         giou_weight=self.giou_weight, giou_alpha=self.giou_alpha)
                 weight = self.stage_loss_weights[stage]
                 losses['loss_classifier'] = losses.get('loss_classifier', 0.) + weight * loss_classifier
                 losses['loss_box_reg'] = losses.get('loss_box_reg', 0.) + weight * loss_box_reg

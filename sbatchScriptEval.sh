@@ -130,3 +130,10 @@ srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
 # srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/j1_roi_fused.yaml \
 #   --load runs/giou_j1_roi_fused/model.pt --data "$DATA" --workers 4 \
 #   --score-thresh 0.0001 0.00001 --nms-thresh 0.75 0.8 0.85
+
+# 11) Gaussian Soft-NMS on j1 (no retraining): each sigma runs once (no IoU threshold); sigma 0 is plain NMS at
+#     --nms-thresh, the reference in the same run. Soft-NMS decays overlapping boxes instead of deleting them, which
+#     COCO AP at high IoU rewards (+0.7-1.1 AP on COCO). Apply the winner with --soft-nms-sigma (section 9).
+srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/j1_roi_fused.yaml \
+  --load runs/giou_j1_roi_fused/model.pt --data "$DATA" --workers 4 \
+  --score-thresh 0.001 0.0001 --nms-thresh 0.8 --soft-nms-sigma 0 0.1 0.25 0.5 1.0

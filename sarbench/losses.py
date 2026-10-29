@@ -1,12 +1,30 @@
-"""The RoI detection loss: torchvision's Fast R-CNN loss plus an optional GIoU box-regression term."""
+"""The RoI detection loss: torchvision's Fast R-CNN loss plus an optional GIoU (or alpha-GIoU) box term."""
 import torch
 import torch.nn.functional as F
 from torchvision.ops import generalized_box_iou
 
 
+def alpha_giou_loss(predicted, gt, alpha=3.0, eps=1e-7):
+    """Per-pair alpha-GIoU loss, 1 - IoU ** alpha + (|C - A u B| / |C|) ** alpha (He et al., NeurIPS 2021).
+
+    alpha 1 is the GIoU loss. alpha > 1 up-weights the loss and gradient of boxes that already overlap well, which
+    is where AP75 and above are decided (alpha 3: +1.0 AP75 / +0.6 AP_S on COCO Faster R-CNN).
+    """
+    lt = torch.max(predicted[:, :2], gt[:, :2])
+    rb = torch.min(predicted[:, 2:], gt[:, 2:])
+    inter = (rb - lt).clamp(min=0).prod(dim=1)
+    area_p = (predicted[:, 2:] - predicted[:, :2]).clamp(min=0).prod(dim=1)
+    area_g = (gt[:, 2:] - gt[:, :2]).clamp(min=0).prod(dim=1)
+    union = area_p + area_g - inter
+    iou = inter / union.clamp(min=eps)
+    enclose = (torch.max(predicted[:, 2:], gt[:, 2:]) - torch.min(predicted[:, :2], gt[:, :2])).prod(dim=1)
+    penalty = ((enclose - union) / enclose.clamp(min=eps)).clamp(min=0)
+    return 1 - iou.clamp(min=eps) ** alpha + penalty ** alpha
+
+
 def fastrcnn_loss(class_logits, box_regression, labels, regression_targets, proposals=None, matched_gt=None,
-                  box_coder=None, giou_weight=0.0):
-    """torchvision's RoI loss with an additional GIoU box term.
+                  box_coder=None, giou_weight=0.0, giou_alpha=1.0):
+    """torchvision's RoI loss with an additional GIoU box term (alpha-GIoU when `giou_alpha` != 1).
 
     `proposals` (sampled boxes, one tensor per image) and `matched_gt` (the GT box matched to each proposal) are
     only needed when `giou_weight > 0`.
@@ -34,7 +52,10 @@ def fastrcnn_loss(class_logits, box_regression, labels, regression_targets, prop
             predicted = predicted.view(-1, num_classes, 4)[keep]
             matched_class = label[keep]
             predicted = predicted[torch.arange(predicted.shape[0], device=predicted.device), matched_class]
-            terms.append((1 - torch.diag(generalized_box_iou(predicted, gt[keep]))).sum())
+            if giou_alpha == 1.0:
+                terms.append((1 - torch.diag(generalized_box_iou(predicted, gt[keep]))).sum())
+            else:
+                terms.append(alpha_giou_loss(predicted, gt[keep], giou_alpha).sum())
         if terms:
             box_loss = box_loss + giou_weight * (sum(terms) / labels.numel())
     return classification_loss, box_loss

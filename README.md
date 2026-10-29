@@ -158,6 +158,7 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `k4_giou_weight2` | GIoU term in the RoI box loss 1.0 -> 2.0 | j1 | 123.93 | 38.86 |
 | `k5_box_loss4` | RoI box loss weight (loss_box_reg) 2.0 -> 4.0 | j1 | 123.93 | 38.86 |
 | `k6_no_copy_paste` | copy-paste off (j1: same-class, p 0.5, up to 3 objects) | j1 | 123.93 | 38.86 |
+| `k7_alpha_giou` | alpha-GIoU (alpha 3) in place of the GIoU box term | j1 | 123.93 | 38.86 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.
@@ -197,7 +198,7 @@ zips; `--predict` requires `--load` and skips metrics, so it needs no labels.
 **Post-processing.** `sweep_postprocess.py` (same flags as `train.py`, plus `--score-thresh` / `--nms-thresh` lists)
 re-scores a saved model on the held-out split for each score threshold x NMS IoU (x image-class re-scoring, below),
 without retraining, and writes `postprocess_sweep.json`. Apply the best setting to `--predict` with `--score-thresh`,
-`--nms-thresh`, `--rescore` and `--rescore-power`, or set the matching `model.*` keys in the config.
+`--nms-thresh`, `--soft-nms-sigma`, `--rescore` and `--rescore-power`, or set the matching `model.*` keys in the config.
 
 **Image-class re-scoring** (`--rescore`, off by default). Every image has one class, so a box of any other class is a
 false positive. At inference the image classifier's probabilities re-score the boxes before the score threshold, NMS

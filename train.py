@@ -97,6 +97,8 @@ def parse_args(argv=None):
     p.add_argument('--score-thresh', type=float, default=cfg['score_thresh'],
                    help='inference: drop detections scoring below this (see sweep_postprocess.py)')
     p.add_argument('--nms-thresh', type=float, default=cfg['nms_thresh'], help='inference: per-class NMS IoU')
+    p.add_argument('--soft-nms-sigma', type=float, default=cfg['soft_nms_sigma'],
+                   help='inference: > 0 uses Gaussian Soft-NMS with this sigma instead of NMS (0: NMS)')
     p.add_argument('--detections-per-img', type=int, default=cfg['detections_per_img'],
                    help='inference: keep at most this many detections per image')
     p.add_argument('--rescore', choices=['off', 'soft', 'hard', 'merge'], default=cfg['rescore'],
@@ -138,7 +140,7 @@ def parse_args(argv=None):
                 'loss_weights', 'head', 'head_params', 'detail_stem_params', 'rpn_fg_iou_thresh',
                 'rpn_bg_iou_thresh', 'ema_decay', 'vit_adapter', 'box_similarity', 'nwd_constant', 'iou_aware',
                 'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale',
-                'roi_batch_size_per_image', 'roi_positive_fraction', 'copy_paste_small'):
+                'roi_batch_size_per_image', 'roi_positive_fraction', 'copy_paste_small', 'giou_alpha'):
         setattr(args, key, cfg[key])
     if args.predict is not None and args.load is None:
         p.error('--predict needs --load with the trained weights')

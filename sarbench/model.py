@@ -238,7 +238,7 @@ class MultiTaskModel(nn.Module):
                  vit_adapter=None, box_similarity='iou', nwd_constant=16.0, rescore='off', rescore_power=1.0,
                  iou_aware=False, iou_alpha=0.5, heatmap_aux=False, cls_detach=False, cls_input='mean',
                  roi_pooling='level', roi_canonical_scale=224, roi_batch_size_per_image=512,
-                 roi_positive_fraction=0.25):
+                 roi_positive_fraction=0.25, giou_alpha=1.0, soft_nms_sigma=0.0):
         super().__init__()
         if rescore not in RESCORE_MODES:
             raise ValueError(f"unknown rescore mode '{rescore}'; available: {', '.join(RESCORE_MODES)}")
@@ -298,6 +298,8 @@ class MultiTaskModel(nn.Module):
                                                iou_aware, iou_alpha, roi_batch_size_per_image,
                                                roi_positive_fraction)
         self.roi_heads.rescore, self.roi_heads.rescore_power = rescore, rescore_power
+        # giou_alpha: alpha-GIoU box term (1 = GIoU); soft_nms_sigma: Gaussian Soft-NMS at inference (0 = NMS).
+        self.roi_heads.giou_alpha, self.roi_heads.soft_nms_sigma = giou_alpha, soft_nms_sigma
         # Anchor (RPN) and proposal (RoI head) labels: IoU, NWD or their max against the same thresholds.
         self.rpn.box_similarity = self.roi_heads.box_similarity = make_similarity(box_similarity, nwd_constant)
 
@@ -426,7 +428,8 @@ def build_model(args):
                            cls_input=args.cls_input, roi_pooling=args.roi_pooling,
                            roi_canonical_scale=args.roi_canonical_scale,
                            roi_batch_size_per_image=args.roi_batch_size_per_image,
-                           roi_positive_fraction=args.roi_positive_fraction)
+                           roi_positive_fraction=args.roi_positive_fraction, giou_alpha=args.giou_alpha,
+                           soft_nms_sigma=args.soft_nms_sigma)
     return model, pretrained_ids
 
 

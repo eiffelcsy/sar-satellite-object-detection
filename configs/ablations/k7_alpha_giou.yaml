@@ -1,0 +1,9 @@
+# K7 (alpha-GIoU): j1 with the RoI box loss's GIoU term as alpha-GIoU, 1 - IoU^3 + penalty^3 (He et al., NeurIPS
+# 2021) instead of 1 - GIoU. alpha > 1 puts more of the loss and gradient on boxes that already overlap well, where
+# AP75 and above are decided; on COCO Faster R-CNN alpha-GIoU (alpha 3) gave +1.6 AP / +1.0 AP75 / +0.6 AP_S over
+# GIoU. Same weights as j1 (giou_weight 1.0, loss_box_reg 2.0), no new parameters. Compare with j1_roi_fused (and k4,
+# which adds GIoU weight without changing its shape). ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k7_alpha_giou
+model:
+  giou_alpha: 3.0

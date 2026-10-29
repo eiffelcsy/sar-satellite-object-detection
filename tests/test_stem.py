@@ -389,3 +389,66 @@ def test_roi_sampler_takes_the_configured_batch_and_positive_fraction():
         samplers = [heads.fg_bg_sampler, *getattr(heads, 'cascade_samplers', [])]
         for sampler in samplers:
             assert (sampler.batch_size_per_image, sampler.positive_fraction) == (256, 0.5)
+
+
+def test_alpha_giou_is_giou_at_alpha_one_and_zero_for_a_perfect_box():
+    from torchvision.ops import generalized_box_iou
+    from sarbench.losses import alpha_giou_loss
+    gt = torch.tensor([[10., 10., 20., 20.], [0., 0., 8., 8.], [5., 5., 9., 9.]])
+    predicted = torch.tensor([[11., 12., 21., 19.], [0., 0., 8., 8.], [30., 30., 34., 34.]])
+    giou = 1 - torch.diag(generalized_box_iou(predicted, gt))
+    assert torch.allclose(alpha_giou_loss(predicted, gt, alpha=1.0), giou, atol=1e-5)
+    loss = alpha_giou_loss(predicted, gt, alpha=3.0)
+    assert loss[1].abs() < 1e-5  # exact box
+    assert loss[0] > giou[0]  # a good but imperfect box keeps more loss than GIoU gives it (1 - IoU^3 > 1 - IoU)
+    assert 1.0 < loss[2] < 2.0  # disjoint: 1 + penalty^3
+
+
+@pytest.mark.parametrize('head,params', [('standard', {'hidden_dim': 64}), ('cascade', CASCADE)])
+def test_giou_alpha_and_soft_nms_reach_both_heads_train_and_predict(head, params):
+    model = MultiTaskModel(_StubBackbone(), giou_weight=1.0, giou_alpha=3.0, soft_nms_sigma=0.5, score_thresh=0.0,
+                           detections_per_img=20, head=head, head_params=params)
+    assert (model.roi_heads.giou_alpha, model.roi_heads.soft_nms_sigma) == (3.0, 0.5)
+    model.train()
+    _, _, losses = model(IMAGES, TARGETS)
+    assert torch.isfinite(losses['loss_box_reg'])
+    losses['loss_box_reg'].backward()
+    model.eval()
+    with torch.no_grad():
+        _, detections, _ = model(IMAGES)
+    for d in detections:
+        assert len(d['boxes']) <= 20 and len(d['boxes']) == len(d['scores']) == len(d['labels'])
+        assert (d['scores'][:-1] >= d['scores'][1:] - 1e-6).all()  # best first
+
+
+def test_soft_nms_decays_overlaps_instead_of_removing_them_and_leaves_other_classes_alone():
+    from sarbench.heads import soft_nms
+    boxes = torch.tensor([[0., 0., 10., 10.], [1., 0., 11., 10.], [0., 0., 10., 10.], [50., 50., 60., 60.]])
+    scores = torch.tensor([0.9, 0.8, 0.7, 0.6])
+    labels = torch.tensor([1, 1, 2, 1])
+    keep, kept = soft_nms(boxes, scores, labels, sigma=0.5, min_score=0.001, max_keep=10)
+    assert sorted(keep.tolist()) == [0, 1, 2, 3]  # hard NMS at 0.5 would drop box 1 (IoU 0.82)
+    decayed = dict(zip(keep.tolist(), kept.tolist()))
+    assert decayed[0] == pytest.approx(0.9) and decayed[2] == pytest.approx(0.7)  # class 2 untouched
+    assert decayed[3] == pytest.approx(0.6)  # disjoint box untouched
+    iou = 90 / 110
+    assert decayed[1] == pytest.approx(0.8 * torch.exp(torch.tensor(-iou ** 2 / 0.5)).item(), rel=1e-4)
+    keep, _ = soft_nms(boxes, scores, labels, sigma=0.5, min_score=0.5, max_keep=10)
+    assert 1 not in keep.tolist()  # pruned once decayed below min_score
+    keep, _ = soft_nms(boxes, scores, labels, sigma=0.5, max_keep=2)
+    assert keep.tolist() == [0, 2]
+
+
+def test_soft_nms_sigma_zero_keeps_torchvision_postprocessing():
+    from torchvision.models.detection.roi_heads import RoIHeads
+    heads = MultiTaskModel(_StubBackbone(), score_thresh=0.0, nms_thresh=0.5).roi_heads
+    torch.manual_seed(0)
+    proposals = [torch.rand(30, 2) * 50 + torch.tensor([[0., 0.]]).repeat(30, 1)]
+    proposals = [torch.cat([proposals[0], proposals[0] + 5 + torch.rand(30, 2) * 20], dim=1)]
+    logits, regression = torch.randn(30, 10), torch.randn(30, 40) * 0.1
+    ours = heads.postprocess_detections(logits, regression, proposals, [(128, 128)])
+    reference = RoIHeads.postprocess_detections(heads, logits, regression, proposals, [(128, 128)])
+    assert all(torch.equal(a[0], b[0]) for a, b in zip(ours, reference))  # boxes, scores, labels
+    heads.soft_nms_sigma = 0.5  # Soft-NMS keeps at least as many boxes (it decays instead of deleting)
+    soft = heads.postprocess_detections(logits, regression, proposals, [(128, 128)])
+    assert len(soft[0][0]) >= len(reference[0][0])
