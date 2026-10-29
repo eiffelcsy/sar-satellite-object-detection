@@ -377,3 +377,15 @@ def test_cls_mean_classifier_reads_the_cls_token_and_the_mean_patch_token():
     assert logits.shape == (2, 9) and torch.equal(seen[0][:, :128], torch.ones(2, 128))
     with pytest.raises(ValueError):
         MultiTaskModel(_PrefixStubBackbone(), cls_input='cls_mean', fusion_layers=[1, 2])
+
+
+def test_roi_sampler_takes_the_configured_batch_and_positive_fraction():
+    from torchvision.ops import MultiScaleRoIAlign
+    from sarbench.model import MultiTaskModel
+    pool = MultiScaleRoIAlign(['0'], 7, 2)
+    for head in ('standard', 'cascade'):
+        heads = MultiTaskModel._build_roi_heads(pool, 7, 9, head, {'hidden_dim': 64}, 0.0, 0.05, 0.5, 100,
+                                                batch_size_per_image=256, positive_fraction=0.5)
+        samplers = [heads.fg_bg_sampler, *getattr(heads, 'cascade_samplers', [])]
+        for sampler in samplers:
+            assert (sampler.batch_size_per_image, sampler.positive_fraction) == (256, 0.5)

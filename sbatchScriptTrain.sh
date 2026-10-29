@@ -183,4 +183,9 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # d16: d15 + j1's fused RoI pooling, 250 epochs on all of train (~12 h); vs d15 on Codabench. Zips: sbatchScriptEval.sh 9.
 # srun --gres=gpu:1 python train.py --config configs/ablations/d16_full_train_j1_250ep.yaml --data "$DATA" --wandb --workers 4
 # d17: d16 at 200 epochs (~9.5 h); vs d16 on Codabench. Zips: sbatchScriptEval.sh 9.
-srun --gres=gpu:1 python train.py --config configs/ablations/d17_full_train_j1_200ep.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/d17_full_train_j1_200ep.yaml --data "$DATA" --wandb --workers 4
+
+# R: one change each on j1 (96 epochs, ~4 h), both compared with j1. Run them as a pair.
+#   k1 small-object classes always copy-pasted (4 donors, 8 objects) | k2 RoI sampling 256 / 0.5 positives
+srun --gres=gpu:1 python train.py --config configs/ablations/k1_copy_paste_small.yaml --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/k2_roi_sparse.yaml       --data "$DATA" --wandb --workers 4

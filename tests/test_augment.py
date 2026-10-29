@@ -111,3 +111,36 @@ def test_same_class_copy_paste_takes_donors_of_the_image_class_only(tmp_path, mo
         _, label, target = dataset[i]
         assert set(target['labels'].tolist()) == {label + 1}  # pasted objects keep the image's single class
         assert all(dataset.rows[j]['label'] == label for j in pools[-1])
+
+
+def test_small_class_copy_paste_pastes_more_into_small_object_classes_only(tmp_path):
+    import json
+    from PIL import Image
+    from sarbench.data import SARMultiTask
+    (tmp_path / 'images').mkdir()
+    labels = [0, 0, 0, 1, 1, 1]  # class 0: 6x6 px objects (COCO-small); class 1: 40x40 px (not)
+    images, annotations, ann_id = [], [], 0
+    for i, label in enumerate(labels, 1):
+        Image.new('L', (128, 128), 30 * i).save(tmp_path / 'images' / f'{i:05d}.png')
+        images.append({'id': i, 'file_name': f'images/{i:05d}.png', 'width': 128, 'height': 128})
+        side = 6. if label == 0 else 40.
+        for k in range(2):
+            ann_id += 1
+            annotations.append({'id': ann_id, 'image_id': i, 'category_id': label + 1,
+                                'bbox': [4. + 60 * k, 4., side, side], 'area': side * side, 'iscrowd': 0})
+    (tmp_path / 'labels.csv').write_text('image_id,file_name,label\n' + ''.join(
+        f'{i},images/{i:05d}.png,{label}\n' for i, label in enumerate(labels, 1)))
+    (tmp_path / 'instances.json').write_text(json.dumps({'images': images, 'annotations': annotations,
+                                                         'categories': [{'id': c, 'name': str(c)} for c in (1, 2)]}))
+    dataset = SARMultiTask(tmp_path, 'train', train=True, size=128, val_fraction=0.0, copy_paste=0.0,
+                           copy_paste_same_class=True,
+                           copy_paste_small={'prob': 1.0, 'donors': 4, 'max_objects': 5})
+    assert dataset.small_object_labels == {0}
+    for i, label in enumerate(labels):
+        _, _, target = dataset[i]
+        n = len(target['boxes'])
+        if label == 0:
+            assert 2 < n <= 2 + 5  # several donors (2 objects each), capped at max_objects pasted
+            assert set(target['labels'].tolist()) == {1}
+        else:
+            assert n == 2  # copy_paste 0: the large-object class is untouched

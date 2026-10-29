@@ -233,7 +233,8 @@ class SARMultiTask(Dataset):
 
     def __init__(self, root, split, train=False, size=512, limit=None, val_fraction=0.1, seed=0,
                  preprocess=None, cache_dir=None, mosaic=0.0, copy_paste=0.0, copy_paste_max_iou=0.3,
-                 copy_paste_margin=0, copy_paste_same_class=False, scale_jitter=None, rotation90=False):
+                 copy_paste_margin=0, copy_paste_same_class=False, copy_paste_small=None, scale_jitter=None,
+                 rotation90=False):
         self.root = Path(root)
         self.train = train
         self.size = size
@@ -244,6 +245,12 @@ class SARMultiTask(Dataset):
         # Donors from images of the same class only: every image keeps one class (its label stays true) and a pasted
         # object lands in a scene of its own kind (a ship in a harbour scene, not an airport).
         self.copy_paste_same_class = copy_paste_same_class
+        # Stronger copy-paste for images of small-object classes (most of their objects COCO-small, area < 32^2 in
+        # original pixels; with this dataset: bridge, oil tank, playground, wind turbine, ship): with probability
+        # `prob` instead of `copy_paste`, from up to `donors` donor images, until `max_objects` objects are pasted.
+        # The other classes keep `copy_paste`. None disables it. `min_small_fraction` (0.5) picks the classes.
+        self.copy_paste_small = dict(copy_paste_small) if copy_paste_small else None
+        self.small_object_labels = set()
         self.rotation90 = rotation90  # random 0/90/180/270-degree rotation (train only)
         self.scale_jitter = scale_jitter  # (lo, hi) scale range applied after the resize, or None/False
         self.image_dir = None
@@ -272,6 +279,8 @@ class SARMultiTask(Dataset):
         self.annotations = defaultdict(list)  # COCO image id -> its boxes
         for ann in coco['annotations']:
             self.annotations[ann['image_id']].append(ann)
+        if self.copy_paste_small:
+            self.small_object_labels = self._small_object_labels(self.copy_paste_small.get('min_small_fraction', 0.5))
         flips = [v2.RandomHorizontalFlip(), v2.RandomVerticalFlip()] if train else []
         steps = [
             v2.ToImage(),
@@ -289,6 +298,16 @@ class SARMultiTask(Dataset):
 
     def __len__(self):
         return len(self.rows)
+
+    def _small_object_labels(self, min_fraction):
+        """Image labels whose objects (over these rows) are at least `min_fraction` COCO-small (area < 32^2 px)."""
+        small, total = defaultdict(int), defaultdict(int)
+        for row in self.rows:
+            info = self.coco_images.get(row['file_name']) or self.coco_images[Path(row['file_name']).name]
+            for ann in self.annotations[info['id']]:
+                total[row['label']] += 1
+                small[row['label']] += ann['bbox'][2] * ann['bbox'][3] < 32 ** 2
+        return {label for label in total if small[label] >= min_fraction * total[label]}
 
     def _image_path(self, file_name):
         if self.image_dir is None:
@@ -323,17 +342,34 @@ class SARMultiTask(Dataset):
             image, boxes, labels = scale_jitter(image, boxes, labels, tuple(self.scale_jitter), self.size)
         return image, boxes, labels, info['id'], orig_size
 
+    def _paste(self, image, boxes, labels, label, donors=1, max_objects=3):
+        """Copy-paste from up to `donors` donor images (of `label` with copy_paste_same_class), `max_objects` in all."""
+        pool = self.rows_by_label[label] if self.copy_paste_same_class else range(len(self))
+        start = len(boxes)
+        for _ in range(donors):
+            remaining = max_objects - (len(boxes) - start)
+            if remaining <= 0:
+                break
+            donor = self._load_transformed(random.choice(pool))
+            image, boxes, labels = copy_paste(image, boxes, labels, donor[0], donor[1], donor[2],
+                                              self.copy_paste_max_iou, max_objects=remaining,
+                                              margin=self.copy_paste_margin)
+        return image, boxes, labels
+
     def __getitem__(self, i):
         image, boxes, labels, image_id, orig_size = self._load_transformed(i)
         if self.train and self.mosaic and random.random() < self.mosaic:  # 4 images -> one 2x2 mosaic
             tiles = [(image, boxes, labels)] + [self._load_transformed(random.randrange(len(self)))[:3]
                                                 for _ in range(3)]
             image, boxes, labels = mosaic_tiles(tiles, self.size)
-        if self.train and self.copy_paste and random.random() < self.copy_paste:  # paste donor objects
-            pool = self.rows_by_label[self.rows[i]['label']] if self.copy_paste_same_class else range(len(self))
-            donor = self._load_transformed(random.choice(pool))
-            image, boxes, labels = copy_paste(image, boxes, labels, donor[0], donor[1], donor[2],
-                                              self.copy_paste_max_iou, margin=self.copy_paste_margin)
+        label = self.rows[i]['label']
+        if self.train and self.copy_paste_small and label in self.small_object_labels:
+            if random.random() < self.copy_paste_small.get('prob', 1.0):  # several donors, up to max_objects
+                image, boxes, labels = self._paste(image, boxes, labels, label,
+                                                   self.copy_paste_small.get('donors', 4),
+                                                   self.copy_paste_small.get('max_objects', 8))
+        elif self.train and self.copy_paste and random.random() < self.copy_paste:  # paste donor objects
+            image, boxes, labels = self._paste(image, boxes, labels, label)
         if self.train:  # zero-area boxes (from the crop) make GIoU/box_iou NaN, so drop them before the model
             boxes, labels = drop_degenerate_boxes(boxes, labels)
         target = {'boxes': boxes, 'labels': labels, 'image_id': image_id, 'orig_size': orig_size}

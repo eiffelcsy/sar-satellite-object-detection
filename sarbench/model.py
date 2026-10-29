@@ -237,7 +237,8 @@ class MultiTaskModel(nn.Module):
                  rpn_bg_iou_thresh=0.3, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100,
                  vit_adapter=None, box_similarity='iou', nwd_constant=16.0, rescore='off', rescore_power=1.0,
                  iou_aware=False, iou_alpha=0.5, heatmap_aux=False, cls_detach=False, cls_input='mean',
-                 roi_pooling='level', roi_canonical_scale=224):
+                 roi_pooling='level', roi_canonical_scale=224, roi_batch_size_per_image=512,
+                 roi_positive_fraction=0.25):
         super().__init__()
         if rescore not in RESCORE_MODES:
             raise ValueError(f"unknown rescore mode '{rescore}'; available: {', '.join(RESCORE_MODES)}")
@@ -294,14 +295,16 @@ class MultiTaskModel(nn.Module):
             roi_pool = FusedRoIAlign(['0', '1', '2', '3'], roi_output_size, roi_sampling_ratio, fuse=roi_pooling)
         self.roi_heads = self._build_roi_heads(roi_pool, roi_output_size, num_classes, head, head_params or {},
                                                giou_weight, score_thresh, nms_thresh, detections_per_img,
-                                               iou_aware, iou_alpha)
+                                               iou_aware, iou_alpha, roi_batch_size_per_image,
+                                               roi_positive_fraction)
         self.roi_heads.rescore, self.roi_heads.rescore_power = rescore, rescore_power
         # Anchor (RPN) and proposal (RoI head) labels: IoU, NWD or their max against the same thresholds.
         self.rpn.box_similarity = self.roi_heads.box_similarity = make_similarity(box_similarity, nwd_constant)
 
     @staticmethod
     def _build_roi_heads(roi_pool, resolution, num_classes, head, params, giou_weight, score_thresh, nms_thresh,
-                         detections_per_img, iou_aware=False, iou_alpha=0.5):
+                         detections_per_img, iou_aware=False, iou_alpha=0.5, batch_size_per_image=512,
+                         positive_fraction=0.25):
         """`standard`: one Faster R-CNN RoI head. `cascade`: Cascade R-CNN with `head_params` num_stages (3),
         share_head (true), fg_iou_thresholds (0.5/0.6/...), bg_iou_threshold (0.5) and stage_loss_weights (1.0).
 
@@ -309,6 +312,8 @@ class MultiTaskModel(nn.Module):
         `conv` (ConvFCBoxHead: num_convs 3x3 convs, a 1x1 down to `reduce` channels, one fc of width hidden_dim).
         score_thresh / nms_thresh / detections_per_img are the inference post-processing (no effect on training).
         `iou_aware` adds the standard head's IoU branch; `iou_alpha` is its inference ranking exponent.
+        batch_size_per_image / positive_fraction: proposals sampled per image for the RoI losses and the most of
+        them that may be positives (torchvision's 512 / 0.25).
         """
         hidden = params.get('hidden_dim', 1024)
         post = dict(score_thresh=score_thresh, nms_thresh=nms_thresh, detections_per_img=detections_per_img)
@@ -324,7 +329,8 @@ class MultiTaskModel(nn.Module):
         if head == 'standard':
             return DetRoIHeads(
                 roi_pool, box_head(), FastRCNNPredictor(hidden, num_classes + 1),
-                fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=512, positive_fraction=0.25,
+                fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=batch_size_per_image,
+                positive_fraction=positive_fraction,
                 bbox_reg_weights=None, giou_weight=giou_weight, iou_dim=hidden if iou_aware else None,
                 iou_alpha=iou_alpha, **post)
         if head == 'cascade':
@@ -336,8 +342,9 @@ class MultiTaskModel(nn.Module):
                 or tuple(round(0.5 + 0.1 * i, 2) for i in range(stages))
             return CascadeRoIHeads(
                 roi_pool, box_heads, predictors, fg_iou_thresholds=thresholds,
-                bg_iou_threshold=params.get('bg_iou_threshold', 0.5), batch_size_per_image=512,
-                positive_fraction=0.25, bbox_reg_weights=None, stage_loss_weights=params.get('stage_loss_weights'),
+                bg_iou_threshold=params.get('bg_iou_threshold', 0.5), batch_size_per_image=batch_size_per_image,
+                positive_fraction=positive_fraction, bbox_reg_weights=None,
+                stage_loss_weights=params.get('stage_loss_weights'),
                 giou_weight=giou_weight, **post)
         raise ValueError(f"unknown head '{head}'; available: standard, cascade")
 
@@ -417,7 +424,9 @@ def build_model(args):
                            rescore=args.rescore, rescore_power=args.rescore_power, iou_aware=args.iou_aware,
                            iou_alpha=args.iou_alpha, heatmap_aux=args.heatmap_aux, cls_detach=args.cls_detach,
                            cls_input=args.cls_input, roi_pooling=args.roi_pooling,
-                           roi_canonical_scale=args.roi_canonical_scale)
+                           roi_canonical_scale=args.roi_canonical_scale,
+                           roi_batch_size_per_image=args.roi_batch_size_per_image,
+                           roi_positive_fraction=args.roi_positive_fraction)
     return model, pretrained_ids
 
 

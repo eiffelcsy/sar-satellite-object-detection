@@ -52,6 +52,8 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
       cls_input: mean              # image classifier input: mean (patch tokens) | cls_mean ([CLS, mean])
       roi_pooling: level           # level (one pyramid level per RoI) | max / mean (all levels, fused)
       roi_canonical_scale: 224     # level pooling: a box of this side goes to P4 (smaller: lower levels)
+      roi_batch_size_per_image: 512  # proposals sampled per image for the RoI losses
+      roi_positive_fraction: 0.25  # the most of them that may be positives
       score_thresh: 0.05           # inference post-processing only (sweep it with sweep_postprocess.py)
       nms_thresh: 0.5
       detections_per_img: 100
@@ -71,7 +73,9 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
             # ema_decay: > 0 keeps an exponential moving average of the trainable weights (e.g. 0.9998), used for
             # validation and saved as model.pt.
     data: {root: null, val_fraction: 0.1, limit: null, mosaic: 0.0, copy_paste: 0.0, copy_paste_margin: 0,
-           copy_paste_same_class: false, scale_jitter: null, rotation90: false}
+           copy_paste_same_class: false, copy_paste_small: null, scale_jitter: null, rotation90: false}
+          # copy_paste_small: {prob, donors, max_objects, min_small_fraction} stronger copy-paste for images of
+          # small-object classes (SARMultiTask); null = off
           # val_fraction: 0 trains on all of train (no held-out validation; for the final model)
           # split_seed (0): which images are held out; train.seed only changes the training randomness, so runs
           # with different seeds are scored on the same held-out images
@@ -121,6 +125,8 @@ DEFAULTS = {
     'cls_input': 'mean',
     'roi_pooling': 'level',
     'roi_canonical_scale': 224,
+    'roi_batch_size_per_image': 512,
+    'roi_positive_fraction': 0.25,
     'name': None,
     'epochs': 24,
     'stage_a_epochs': 0,
@@ -146,6 +152,7 @@ DEFAULTS = {
     'copy_paste': 0.0,
     'copy_paste_margin': 0,
     'copy_paste_same_class': False,
+    'copy_paste_small': None,
     'scale_jitter': None,
     'rotation90': False,
     'out': 'runs',
@@ -167,13 +174,14 @@ _MODEL_KEYS = ('detail_stem', 'fusion_layers', 'input_adapter', 'wst_stem', 'wst
                'roi_sampling_ratio', 'roi_output_size', 'head', 'head_params', 'detail_stem_params',
                'rpn_fg_iou_thresh', 'rpn_bg_iou_thresh', 'score_thresh', 'nms_thresh', 'detections_per_img',
                'vit_adapter', 'box_similarity', 'nwd_constant', 'rescore', 'rescore_power', 'iou_aware', 'iou_alpha',
-               'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale')
+               'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale',
+               'roi_batch_size_per_image', 'roi_positive_fraction')
 _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'unfrozen_lr',
                'cls_lr', 'ema_decay', 'lora_plus_ratio', 'warmup_epochs', 'wd_exclude_1d', 'weight_decay', 'eval_every', 'workers',
                'seed')
 _DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'split_seed': 'split_seed', 'limit': 'limit',
               'mosaic': 'mosaic', 'copy_paste': 'copy_paste', 'copy_paste_margin': 'copy_paste_margin',
-              'copy_paste_same_class': 'copy_paste_same_class',
+              'copy_paste_same_class': 'copy_paste_same_class', 'copy_paste_small': 'copy_paste_small',
               'scale_jitter': 'scale_jitter', 'rotation90': 'rotation90'}
 _PREPROCESS_KEYS = {'pseudo_rgb': 'pseudo_rgb', 'mode': 'pseudo_rgb_mode', 'edge': 'edge',
                     'clip_percentile': 'clip_percentile', 'cache': 'preprocess_cache', 'bm3d_sigma': 'bm3d_sigma',

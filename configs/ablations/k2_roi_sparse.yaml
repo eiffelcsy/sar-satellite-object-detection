@@ -1,0 +1,9 @@
+# K2 (RoI sampling for sparse images): j1 with 256 sampled proposals per image for the RoI losses, up to half of them
+# positives (j1: torchvision's 512 / 0.25). With a median of 2 objects per image the positives are few and the 512
+# are mostly background, so the box classifier trains on background and box regression on few samples; this doubles
+# the positive share for the same positives. No new parameters. Compare with j1_roi_fused. ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k2_roi_sparse
+model:
+  roi_batch_size_per_image: 256
+  roi_positive_fraction: 0.5

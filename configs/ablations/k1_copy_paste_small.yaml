@@ -1,0 +1,13 @@
+# K1 (stronger copy-paste for small-object classes): j1 with images of the classes whose objects are mostly COCO-small
+# (bridge, oil tank, playground, wind turbine, ship) always copy-pasted, from up to 4 same-class donors and up to 8
+# objects (j1: probability 0.5, one donor, at most 3). The other classes (aircraft, airport, car, harbor) keep j1's
+# copy-paste. Targets AP_small (j1 0.407, the weakest size) and the few positives per image (median 2 objects). No new
+# parameters; only the data loading changes. Compare with j1_roi_fused. ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k1_copy_paste_small
+data:
+  copy_paste_small:
+    prob: 1.0
+    donors: 4
+    max_objects: 8
+    min_small_fraction: 0.5
