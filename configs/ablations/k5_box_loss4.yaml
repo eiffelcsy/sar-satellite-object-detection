@@ -1,0 +1,7 @@
+# K5 (more weight on RoI box regression): j1 with the RoI box loss weight (loss_box_reg: smooth L1 + GIoU) at 4.0
+# instead of 2.0, relative to the box classifier, RPN and image classification terms. Same mix as j1, twice the
+# weight; targets AP75 (j1: AP50 0.728 vs AP75 0.490). No new parameters. Compare with j1_roi_fused and k4. ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k5_box_loss4
+loss:
+  loss_box_reg: 4.0

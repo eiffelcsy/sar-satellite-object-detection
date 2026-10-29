@@ -154,6 +154,9 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `d17_full_train_j1_200ep` | final candidate: d16 at 200 epochs instead of 250 | d16 | 123.93 | 38.86 |
 | `k1_copy_paste_small` | small-object classes always copy-pasted, up to 4 donors / 8 objects | j1 | 123.93 | 38.86 |
 | `k2_roi_sparse` | RoI sampling 256 per image, up to half positives (instead of 512 / 0.25) | j1 | 123.93 | 38.86 |
+| `k3_iou_aware` | h4 on j1: IoU branch on the RoI head, detections ranked by score x IoU^0.5 | j1 | 123.94 | 38.87 |
+| `k4_giou_weight2` | GIoU term in the RoI box loss 1.0 -> 2.0 | j1 | 123.93 | 38.86 |
+| `k5_box_loss4` | RoI box loss weight (loss_box_reg) 2.0 -> 4.0 | j1 | 123.93 | 38.86 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.

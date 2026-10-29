@@ -1,0 +1,10 @@
+# K3 (h4 on j1, localization-aware ranking): j1 with an IoU branch on the RoI head: one linear layer (9.2 k parameters)
+# predicts, per class, the IoU of the decoded box with its GT, trained with BCE on the sampled positives (loss_iou,
+# weight 1.0). At inference detections are ranked by class score x predicted IoU ** 0.5. Targets the localization gap
+# (j1: AP50 0.728 vs AP75 0.490). Compare with j1_roi_fused; then sweep --iou-alpha 0 0.25 0.5 1 2 on the saved model
+# (alpha 0 = same model ranked by class score alone). ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k3_iou_aware
+model:
+  iou_aware: true
+  iou_alpha: 0.5

@@ -187,5 +187,11 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 
 # R: one change each on j1 (96 epochs, ~4 h), both compared with j1. Run them as a pair.
 #   k1 small-object classes always copy-pasted (4 donors, 8 objects) | k2 RoI sampling 256 / 0.5 positives
-srun --gres=gpu:1 python train.py --config configs/ablations/k1_copy_paste_small.yaml --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/k2_roi_sparse.yaml       --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/k1_copy_paste_small.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/k2_roi_sparse.yaml       --data "$DATA" --wandb --workers 4
+
+# S: localization (AP75) on j1, one change each, compared with j1 (k4 vs k5: GIoU share vs whole box-loss weight).
+#   k3 IoU-aware ranking (h4 on j1) | k4 giou_weight 2.0 | k5 loss_box_reg 4.0
+srun --gres=gpu:1 python train.py --config configs/ablations/k3_iou_aware.yaml    --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/k4_giou_weight2.yaml --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/k5_box_loss4.yaml    --data "$DATA" --wandb --workers 4

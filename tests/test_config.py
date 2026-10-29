@@ -89,6 +89,9 @@ def test_base_is_the_dora_giou_recipe():
     ('d17_full_train_j1_200ep', 'd16_full_train_j1_250ep', {'epochs'}),
     ('k1_copy_paste_small', 'j1_roi_fused', {'copy_paste_small'}),
     ('k2_roi_sparse', 'j1_roi_fused', {'roi_batch_size_per_image', 'roi_positive_fraction'}),
+    ('k3_iou_aware', 'j1_roi_fused', {'iou_aware'}),
+    ('k4_giou_weight2', 'j1_roi_fused', {'giou_weight'}),
+    ('k5_box_loss4', 'j1_roi_fused', {'loss_weights'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'

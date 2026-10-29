@@ -1,0 +1,8 @@
+# K4 (box loss mix towards GIoU): j1 with the GIoU term inside the RoI box loss at 2.0 instead of 1.0, so loss_box_reg
+# = smooth L1 + 2 x GIoU (still scaled by loss_box_reg 2.0). GIoU is the IoU-shaped term, so it should matter most for
+# AP75, where j1 trails AP50 by 0.24. No new parameters. Compare with j1_roi_fused (and k5: k4 shifts the mix, k5
+# scales the whole box loss). ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k4_giou_weight2
+model:
+  giou_weight: 2.0
