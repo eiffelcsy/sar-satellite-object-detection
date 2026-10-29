@@ -1,0 +1,9 @@
+# K6 (is copy-paste helping at all?): j1 with copy-paste off (j1: same-class donors, p 0.5, up to 3 objects, 1 px
+# margin). j0 brought copy-paste in together with mosaic off and classification 0.1, so it was never isolated, and k1
+# (much more pasting into small-object classes) trailed j1 by 3-5 mAP / AP_small at 30% of training. The paste can
+# cover small GT boxes whose labels stay (IoU check only) and carry unlabeled donor neighbours. If k6 >= j1, drop
+# copy-paste (or fix it); if k6 < j1, keep it. No new parameters. Compare with j1_roi_fused. ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k6_no_copy_paste
+data:
+  copy_paste: 0.0

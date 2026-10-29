@@ -92,6 +92,7 @@ def test_base_is_the_dora_giou_recipe():
     ('k3_iou_aware', 'j1_roi_fused', {'iou_aware'}),
     ('k4_giou_weight2', 'j1_roi_fused', {'giou_weight'}),
     ('k5_box_loss4', 'j1_roi_fused', {'loss_weights'}),
+    ('k6_no_copy_paste', 'j1_roi_fused', {'copy_paste'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'
