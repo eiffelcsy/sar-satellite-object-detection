@@ -50,7 +50,7 @@ source .venv/bin/activate
 # pip3 install numpy
 
 # Submit your job to the cluster.
-DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
+DATA=/common/scratch/projectgrps/CS425/CS425G6/cs701-sar-course-data/train/
 
 # One DINOv3 run is roughly 1.5-2 h; the 12 runs together do not fit one 24 h job, so split them over jobs.
 # Base (control; rerun it so every comparison uses the same code):
