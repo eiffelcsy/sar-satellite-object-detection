@@ -222,5 +222,5 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 #    pair 1: k11 (section W, aligned RoIAlign: 2 px = a near miss on 9 px boxes) + k14 (size-aware RPN positives)
 #    pair 2: k15 (anchors on cell centres) + k16 (bridge / playground images sampled 2x)
 # srun --gres=gpu:1 python train.py --config configs/ablations/k14_rpn_size_adaptive.yaml   --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/k15_rpn_centred_anchors.yaml --data "$DATA" --wandb --workers 4
-srun --gres=gpu:1 python train.py --config configs/ablations/k16_oversample_hard.yaml     --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/k15_rpn_centred_anchors.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/k16_oversample_hard.yaml     --data "$DATA" --wandb --workers 4
