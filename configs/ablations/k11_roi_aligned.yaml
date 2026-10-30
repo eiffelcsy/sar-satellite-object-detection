@@ -1,0 +1,10 @@
+# K11 (half-pixel-correct RoIAlign): j1 with RoIAlign's aligned=True (Detectron2's ROIAlignV2) in the fused pooler.
+# aligned=False (torchvision's default, which j1 used) reads feature cell j at j * stride though its centre is
+# (j + 0.5) * stride: half a cell off on every fused level (2 / 4 / 8 / 16 px on P2-P5), and it widens every RoI to at
+# least one cell, so on P5 any box under 32 px (most of this dataset) is pooled as a 32 px one. Learnable as a bias,
+# not a hard IoU cap; Detectron2 reports a small COCO gain, plausibly larger for these tiny boxes. No new parameters.
+# Compare with j1_roi_fused, AP75 and AP_small first. ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k11_roi_aligned
+model:
+  roi_aligned: true

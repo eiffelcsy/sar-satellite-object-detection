@@ -162,6 +162,8 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `k8_patch8_bs32` | h2 on j1: ViT re-tokenized at 8 px, batch 32 with every learning rate x sqrt(2) | j1 | 122.16 | 37.09 |
 | `k9_p2_heatmap` | h6 on j1: training-only CenterNet heatmap loss on P2 | j1 | 124.08 | 39.01 |
 | `k10_scale_jitter` | gentle scale jitter 0.9-1.1 alone (no rot90) | j1 | 123.93 | 38.86 |
+| `k11_roi_aligned` | RoIAlign aligned=True (half-pixel-correct sampling, no minimum RoI size) | j1 | 123.93 | 38.86 |
+| `k12_roi_stem_aligned` | k11 + P2 stem aligned with the ViT path (4x4 then 2x2 stride-2 convs) | k11 | 123.77 | 38.70 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.

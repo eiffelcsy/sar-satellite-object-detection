@@ -36,7 +36,8 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
       head: cascade                # standard (default) | cascade RoI head
       head_params: {num_stages: 3, share_head: false, hidden_dim: 256, fg_iou_thresholds: [0.4, 0.5, 0.6]}
                                    # both heads: box_head mlp (default) | conv (+ num_convs, conv_dim, reduce)
-      detail_stem_params: {channels: 64, extra_convs: 0}   # P2 conv stem width / extra stride-4 3x3 convs
+      detail_stem_params: {channels: 64, extra_convs: 0, aligned: false}
+                                   # P2 conv stem width / extra stride-4 3x3 convs / cells centred like the ViT's
       rpn_fg_iou_thresh: 0.7       # RPN anchor positive / negative IoU thresholds
       rpn_bg_iou_thresh: 0.3
       box_similarity: iou          # what those thresholds (and the RoI head's 0.5) compare: iou | nwd | max
@@ -53,6 +54,7 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
       cls_input: mean              # image classifier input: mean (patch tokens) | cls_mean ([CLS, mean])
       roi_pooling: level           # level (one pyramid level per RoI) | max / mean (all levels, fused)
       roi_canonical_scale: 224     # level pooling: a box of this side goes to P4 (smaller: lower levels)
+      roi_aligned: false           # RoIAlign aligned=True (half-pixel-correct sampling) on either pooler
       roi_batch_size_per_image: 512  # proposals sampled per image for the RoI losses
       roi_positive_fraction: 0.25  # the most of them that may be positives
       score_thresh: 0.05           # inference post-processing only (sweep it with sweep_postprocess.py)
@@ -129,6 +131,7 @@ DEFAULTS = {
     'cls_input': 'mean',
     'roi_pooling': 'level',
     'roi_canonical_scale': 224,
+    'roi_aligned': False,
     'roi_batch_size_per_image': 512,
     'roi_positive_fraction': 0.25,
     'name': None,
@@ -179,7 +182,7 @@ _MODEL_KEYS = ('detail_stem', 'fusion_layers', 'input_adapter', 'wst_stem', 'wst
                'rpn_fg_iou_thresh', 'rpn_bg_iou_thresh', 'score_thresh', 'nms_thresh', 'detections_per_img',
                'vit_adapter', 'box_similarity', 'nwd_constant', 'rescore', 'rescore_power', 'iou_aware', 'iou_alpha',
                'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale',
-               'roi_batch_size_per_image', 'roi_positive_fraction', 'giou_alpha', 'soft_nms_sigma')
+               'roi_batch_size_per_image', 'roi_positive_fraction', 'giou_alpha', 'soft_nms_sigma', 'roi_aligned')
 _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'unfrozen_lr',
                'cls_lr', 'ema_decay', 'lora_plus_ratio', 'warmup_epochs', 'wd_exclude_1d', 'weight_decay', 'eval_every', 'workers',
                'seed')

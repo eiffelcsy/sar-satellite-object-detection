@@ -1,0 +1,12 @@
+# K12 (geometry fix, both halves): k11 (RoIAlign aligned=True) + the P2 conv stem aligned with the ViT path: its two
+# stride-2 convs are 4x4 (pad 1) then 2x2 (pad 0) instead of 3x3 (pad 1) twice, so stem cell j is centred on image
+# coordinate 4j + 2 like the ViT path's P2 cell j (the 3x3 pair puts it at 4j + 0.5, 1.5 px off the response it is
+# added to). Not purely alignment: the second conv shrinks to 2x2 (receptive field 7 -> 6 px, ~0.16 M fewer
+# parameters). Run only if k11 beats j1; compare with k11_roi_aligned. ~4 h.
+base: k11_roi_aligned.yaml
+name: giou_k12_roi_stem_aligned
+model:
+  detail_stem_params:
+    channels: 128
+    extra_convs: 1
+    aligned: true

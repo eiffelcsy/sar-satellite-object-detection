@@ -452,3 +452,45 @@ def test_soft_nms_sigma_zero_keeps_torchvision_postprocessing():
     heads.soft_nms_sigma = 0.5  # Soft-NMS keeps at least as many boxes (it decays instead of deleting)
     soft = heads.postprocess_detections(logits, regression, proposals, [(128, 128)])
     assert len(soft[0][0]) >= len(reference[0][0])
+
+
+def test_roi_aligned_samples_cell_centres_on_both_poolers_and_defaults_to_torchvision():
+    from torchvision.ops import MultiScaleRoIAlign
+    from sarbench.model import AlignedMultiScaleRoIAlign, FusedRoIAlign
+    # feature value = column index; a box over image px [20, 24] is exactly P2 cell 5 (stride 4)
+    features = {'0': torch.arange(32.).repeat(32, 1)[None, None]}
+    boxes, shapes = [torch.tensor([[20., 20., 24., 24.]])], [(128, 128)]
+    fused = FusedRoIAlign(['0'], 1, 1, fuse='max', aligned=True)
+    assert fused(features, boxes, shapes).item() == pytest.approx(5.0)
+    assert FusedRoIAlign(['0'], 1, 1, fuse='max')(features, boxes, shapes).item() == pytest.approx(5.5)  # old
+    features4 = {name: torch.arange(32. / 2 ** i).repeat(int(32 / 2 ** i), 1)[None, None] for i, name in
+                 enumerate('0123')}
+    level = AlignedMultiScaleRoIAlign(list('0123'), 1, 1)
+    assert level(features4, boxes, shapes).item() == pytest.approx(5.0)
+    reference = MultiScaleRoIAlign(list('0123'), 1, 1)(features4, boxes, shapes).item()
+    assert reference == pytest.approx(5.5)
+    for pooling in ('level', 'max'):
+        default = MultiTaskModel(_StubBackbone(), roi_pooling=pooling).roi_heads.box_roi_pool
+        aligned = MultiTaskModel(_StubBackbone(), roi_pooling=pooling, roi_aligned=True).roi_heads.box_roi_pool
+        assert type(default) in (MultiScaleRoIAlign, FusedRoIAlign) and not getattr(default, 'aligned', False)
+        assert isinstance(aligned, AlignedMultiScaleRoIAlign) or aligned.aligned
+
+
+@pytest.mark.parametrize('aligned,centre', [(False, 24.5), (True, 26.0)])
+def test_aligned_stem_centres_p2_cells_where_the_vit_path_does(aligned, centre):
+    """Impulse test on the stem's two stride-2 convs (ones weights): the mean image coordinate (pixel i covers
+    [i, i + 1]) reaching P2 cell 6. The ViT path's cell 6 is centred at (6 + 0.5) x 4 = 26."""
+    stem = ConvStem(in_chans=1, channels=8, aligned=aligned)
+    convs = [m for m in stem.stem if isinstance(m, nn.Conv2d)][:2]
+    hits = []
+    with torch.no_grad():
+        for conv in convs:
+            conv.weight.fill_(1.0)
+        for p in range(64):
+            x = torch.zeros(1, 1, 64, 64)
+            x[..., 30, p] = 1
+            y = convs[1](convs[0](x))
+            if y[0, :, 7, 6].abs().sum() > 0:
+                hits.append(p + 0.5)
+    assert sum(hits) / len(hits) == pytest.approx(centre)
+    assert stem(torch.randn(1, 1, 64, 64)).shape[-2:] == (16, 16)

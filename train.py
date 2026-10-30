@@ -140,7 +140,7 @@ def parse_args(argv=None):
                 'loss_weights', 'head', 'head_params', 'detail_stem_params', 'rpn_fg_iou_thresh',
                 'rpn_bg_iou_thresh', 'ema_decay', 'vit_adapter', 'box_similarity', 'nwd_constant', 'iou_aware',
                 'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale',
-                'roi_batch_size_per_image', 'roi_positive_fraction', 'copy_paste_small', 'giou_alpha'):
+                'roi_batch_size_per_image', 'roi_positive_fraction', 'copy_paste_small', 'giou_alpha', 'roi_aligned'):
         setattr(args, key, cfg[key])
     if args.predict is not None and args.load is None:
         p.error('--predict needs --load with the trained weights')

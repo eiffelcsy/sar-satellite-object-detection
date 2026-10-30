@@ -20,6 +20,7 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor, TwoMLPHe
 from torchvision.models.detection.image_list import ImageList
 from torchvision.models.detection.rpn import RegionProposalNetwork, RPNHead
 from torchvision.ops import MultiScaleRoIAlign, roi_align
+from torchvision.ops.poolers import _filter_input, _setup_scales
 
 from .adapters import adapt_backbone
 from .backbones import DINOv3
@@ -76,13 +77,18 @@ class ConvStem(nn.Module):
     high-frequency content. The stem reads the 512 px input directly and produces stride-4 features that are
     added to P2, which is what tiny SAR objects need. `channels` sets its width (the second conv has twice as
     many); `extra_convs` adds that many 3x3 convs at stride 4 (on `out_channels`) for a deeper stride-4 path.
+
+    `aligned`: the two stride-2 convs are 4x4 (pad 1) then 2x2 (pad 0) instead of 3x3 (pad 1) twice, so output cell j
+    is centred on image coordinate 4j + 2, where the ViT path's P2 cell j is (two 2x2 stride-2 deconvs). The 3x3 pair
+    centres it at 4j + 0.5, 1.5 px up and left of the ViT response it is added to. ~0.16 M fewer parameters.
     """
 
-    def __init__(self, in_chans=3, channels=64, out_channels=256, extra_convs=0):
+    def __init__(self, in_chans=3, channels=64, out_channels=256, extra_convs=0, aligned=False):
         super().__init__()
+        (k1, p1), (k2, p2) = ((4, 1), (2, 0)) if aligned else ((3, 1), (3, 1))
         layers = [
-            nn.Conv2d(in_chans, channels, 3, stride=2, padding=1, bias=False), nn.GroupNorm(8, channels), nn.GELU(),
-            nn.Conv2d(channels, channels * 2, 3, stride=2, padding=1, bias=False),
+            nn.Conv2d(in_chans, channels, k1, stride=2, padding=p1, bias=False), nn.GroupNorm(8, channels), nn.GELU(),
+            nn.Conv2d(channels, channels * 2, k2, stride=2, padding=p2, bias=False),
             nn.GroupNorm(8, channels * 2), nn.GELU(),
             nn.Conv2d(channels * 2, out_channels, 1, bias=False), nn.GroupNorm(32, out_channels)]
         for _ in range(extra_convs):  # appended, so checkpoints without extra convs keep their layer indices
@@ -166,21 +172,47 @@ class FusedRoIAlign(nn.Module):
     With torchvision's mapping (canonical 224 px at P4) every box under 112 px, nearly all of this dataset, is pooled
     from P2 alone: the twice-upsampled ViT map plus the stem, never P4, the ViT's own stride-16 tokens. Fusing gives
     each RoI P2's detail and P3-P5's semantics. `fuse`: `max` (PANet's choice) or `mean`. No parameters.
+    `aligned`: RoIAlign's half-pixel convention (see AlignedMultiScaleRoIAlign).
     """
 
-    def __init__(self, featmap_names, output_size=7, sampling_ratio=2, fuse='max'):
+    def __init__(self, featmap_names, output_size=7, sampling_ratio=2, fuse='max', aligned=False):
         super().__init__()
         if fuse not in ('max', 'mean'):
             raise ValueError(f"unknown roi_pooling fuse '{fuse}'; available: max, mean")
-        self.featmap_names, self.output_size, self.sampling_ratio, self.fuse = \
-            list(featmap_names), output_size, sampling_ratio, fuse
+        self.featmap_names, self.output_size, self.sampling_ratio, self.fuse, self.aligned = \
+            list(featmap_names), output_size, sampling_ratio, fuse, aligned
 
     def forward(self, features, boxes, image_shapes):
         rois = torch.cat([torch.cat([b.new_full((len(b), 1), i), b], dim=1) for i, b in enumerate(boxes)])
         pooled = [roi_align(features[name], rois, self.output_size, spatial_scale=features[name].shape[-1] /
-                            image_shapes[0][1], sampling_ratio=self.sampling_ratio) for name in self.featmap_names]
+                            image_shapes[0][1], sampling_ratio=self.sampling_ratio, aligned=self.aligned)
+                  for name in self.featmap_names]
         pooled = torch.stack(pooled)
         return pooled.amax(0) if self.fuse == 'max' else pooled.mean(0)
+
+
+class AlignedMultiScaleRoIAlign(MultiScaleRoIAlign):
+    """torchvision's one-level-per-RoI pooler with RoIAlign's `aligned=True` (Detectron2's ROIAlignV2), which
+    torchvision's pooler hard-codes to False.
+
+    aligned=False reads feature cell j at image coordinate j * stride, though its centre is (j + 0.5) * stride: half
+    a cell off on every level (2 px on P2, 16 px on P5), and every RoI is widened to at least one cell (on P5, any box
+    under 32 px is pooled as a 32 px one). aligned=True subtracts the half cell and keeps RoIs at their size.
+    """
+
+    def forward(self, x, boxes, image_shapes):
+        features = _filter_input(x, self.featmap_names)
+        if self.scales is None or self.map_levels is None:
+            self.scales, self.map_levels = _setup_scales(features, image_shapes, self.canonical_scale,
+                                                         self.canonical_level)
+        rois = torch.cat([torch.cat([b.new_full((len(b), 1), i), b], dim=1) for i, b in enumerate(boxes)])
+        levels = self.map_levels(boxes)
+        result = features[0].new_zeros((len(rois), features[0].shape[1], *self.output_size))
+        for level, (feature, scale) in enumerate(zip(features, self.scales)):
+            idx = torch.where(levels == level)[0]
+            result[idx] = roi_align(feature, rois[idx], self.output_size, spatial_scale=scale,
+                                    sampling_ratio=self.sampling_ratio, aligned=True).to(result.dtype)
+        return result
 
 
 class CenterHeatmapHead(nn.Module):
@@ -238,7 +270,7 @@ class MultiTaskModel(nn.Module):
                  vit_adapter=None, box_similarity='iou', nwd_constant=16.0, rescore='off', rescore_power=1.0,
                  iou_aware=False, iou_alpha=0.5, heatmap_aux=False, cls_detach=False, cls_input='mean',
                  roi_pooling='level', roi_canonical_scale=224, roi_batch_size_per_image=512,
-                 roi_positive_fraction=0.25, giou_alpha=1.0, soft_nms_sigma=0.0):
+                 roi_positive_fraction=0.25, giou_alpha=1.0, soft_nms_sigma=0.0, roi_aligned=False):
         super().__init__()
         if rescore not in RESCORE_MODES:
             raise ValueError(f"unknown rescore mode '{rescore}'; available: {', '.join(RESCORE_MODES)}")
@@ -288,11 +320,14 @@ class MultiTaskModel(nn.Module):
             post_nms_top_n=dict(training=2000, testing=2000), nms_thresh=0.7)
         # roi_pooling `level`: torchvision's one level per RoI, k = floor(4 + log2(sqrt(area) / roi_canonical_scale));
         # `max` / `mean`: every level, fused (FusedRoIAlign).
+        # roi_aligned: RoIAlign's half-pixel-correct sampling (aligned=True) on either pooler; False is torchvision's.
         if roi_pooling == 'level':
-            roi_pool = MultiScaleRoIAlign(['0', '1', '2', '3'], output_size=roi_output_size,
-                                          sampling_ratio=roi_sampling_ratio, canonical_scale=roi_canonical_scale)
+            level_pool = AlignedMultiScaleRoIAlign if roi_aligned else MultiScaleRoIAlign
+            roi_pool = level_pool(['0', '1', '2', '3'], output_size=roi_output_size,
+                                  sampling_ratio=roi_sampling_ratio, canonical_scale=roi_canonical_scale)
         else:
-            roi_pool = FusedRoIAlign(['0', '1', '2', '3'], roi_output_size, roi_sampling_ratio, fuse=roi_pooling)
+            roi_pool = FusedRoIAlign(['0', '1', '2', '3'], roi_output_size, roi_sampling_ratio, fuse=roi_pooling,
+                                     aligned=roi_aligned)
         self.roi_heads = self._build_roi_heads(roi_pool, roi_output_size, num_classes, head, head_params or {},
                                                giou_weight, score_thresh, nms_thresh, detections_per_img,
                                                iou_aware, iou_alpha, roi_batch_size_per_image,
@@ -429,7 +464,7 @@ def build_model(args):
                            roi_canonical_scale=args.roi_canonical_scale,
                            roi_batch_size_per_image=args.roi_batch_size_per_image,
                            roi_positive_fraction=args.roi_positive_fraction, giou_alpha=args.giou_alpha,
-                           soft_nms_sigma=args.soft_nms_sigma)
+                           soft_nms_sigma=args.soft_nms_sigma, roi_aligned=args.roi_aligned)
     return model, pretrained_ids
 
 
