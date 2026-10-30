@@ -40,6 +40,9 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
                                    # P2 conv stem width / extra stride-4 3x3 convs / cells centred like the ViT's
       rpn_fg_iou_thresh: 0.7       # RPN anchor positive / negative IoU thresholds
       rpn_bg_iou_thresh: 0.3
+      rpn_size_adaptive: {floor: 0.25, base: 0.2, slope: 0.15, ref: 12}
+                                   # CFINet: RPN positive bar clamp(base + slope ln(sqrt(wh) / ref), floor, fg) per GT
+      rpn_centred_anchors: true    # anchors centred on their cell, (j + 0.5) x stride (torchvision: j x stride)
       box_similarity: iou          # what those thresholds (and the RoI head's 0.5) compare: iou | nwd | max
       nwd_constant: 16.0           # NWD's C in px (about the typical box size)
       vit_adapter: {dim: 192, heads: 6, points: 4, interactions: [[0, 2], [3, 5], [6, 8], [9, 11]],
@@ -77,9 +80,12 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
             # ema_decay: > 0 keeps an exponential moving average of the trainable weights (e.g. 0.9998), used for
             # validation and saved as model.pt.
     data: {root: null, val_fraction: 0.1, limit: null, mosaic: 0.0, copy_paste: 0.0, copy_paste_margin: 0,
-           copy_paste_same_class: false, copy_paste_small: null, scale_jitter: null, rotation90: false}
+           copy_paste_same_class: false, copy_paste_small: null, scale_jitter: null, rotation90: false,
+           class_sampling_weights: null}
           # copy_paste_small: {prob, donors, max_objects, min_small_fraction} stronger copy-paste for images of
           # small-object classes (SARMultiTask); null = off
+          # class_sampling_weights: {class name: weight}, e.g. {bridge: 2.0}: training images of that class are drawn
+          # that many times as often (with replacement; same images per epoch); null = plain shuffling
           # val_fraction: 0 trains on all of train (no held-out validation; for the final model)
           # split_seed (0): which images are held out; train.seed only changes the training randomness, so runs
           # with different seeds are scored on the same held-out images
@@ -115,6 +121,8 @@ DEFAULTS = {
     'detail_stem_params': {},
     'rpn_fg_iou_thresh': 0.7,
     'rpn_bg_iou_thresh': 0.3,
+    'rpn_size_adaptive': None,
+    'rpn_centred_anchors': False,
     'score_thresh': 0.05,
     'nms_thresh': 0.5,
     'soft_nms_sigma': 0.0,
@@ -160,6 +168,7 @@ DEFAULTS = {
     'copy_paste_margin': 0,
     'copy_paste_same_class': False,
     'copy_paste_small': None,
+    'class_sampling_weights': None,
     'scale_jitter': None,
     'rotation90': False,
     'out': 'runs',
@@ -182,14 +191,16 @@ _MODEL_KEYS = ('detail_stem', 'fusion_layers', 'input_adapter', 'wst_stem', 'wst
                'rpn_fg_iou_thresh', 'rpn_bg_iou_thresh', 'score_thresh', 'nms_thresh', 'detections_per_img',
                'vit_adapter', 'box_similarity', 'nwd_constant', 'rescore', 'rescore_power', 'iou_aware', 'iou_alpha',
                'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale',
-               'roi_batch_size_per_image', 'roi_positive_fraction', 'giou_alpha', 'soft_nms_sigma', 'roi_aligned')
+               'roi_batch_size_per_image', 'roi_positive_fraction', 'giou_alpha', 'soft_nms_sigma', 'roi_aligned',
+               'rpn_size_adaptive', 'rpn_centred_anchors')
 _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'unfrozen_lr',
                'cls_lr', 'ema_decay', 'lora_plus_ratio', 'warmup_epochs', 'wd_exclude_1d', 'weight_decay', 'eval_every', 'workers',
                'seed')
 _DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'split_seed': 'split_seed', 'limit': 'limit',
               'mosaic': 'mosaic', 'copy_paste': 'copy_paste', 'copy_paste_margin': 'copy_paste_margin',
               'copy_paste_same_class': 'copy_paste_same_class', 'copy_paste_small': 'copy_paste_small',
-              'scale_jitter': 'scale_jitter', 'rotation90': 'rotation90'}
+              'scale_jitter': 'scale_jitter', 'rotation90': 'rotation90',
+              'class_sampling_weights': 'class_sampling_weights'}
 _PREPROCESS_KEYS = {'pseudo_rgb': 'pseudo_rgb', 'mode': 'pseudo_rgb_mode', 'edge': 'edge',
                     'clip_percentile': 'clip_percentile', 'cache': 'preprocess_cache', 'bm3d_sigma': 'bm3d_sigma',
                     'bm3d_profile': 'bm3d_profile', 'bm3d_threads': 'bm3d_threads'}

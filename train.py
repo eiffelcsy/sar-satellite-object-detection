@@ -10,7 +10,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from sarbench.channels import PseudoRGB
 from sarbench.config import DEFAULTS, load_config
@@ -140,7 +140,8 @@ def parse_args(argv=None):
                 'loss_weights', 'head', 'head_params', 'detail_stem_params', 'rpn_fg_iou_thresh',
                 'rpn_bg_iou_thresh', 'ema_decay', 'vit_adapter', 'box_similarity', 'nwd_constant', 'iou_aware',
                 'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale',
-                'roi_batch_size_per_image', 'roi_positive_fraction', 'copy_paste_small', 'giou_alpha', 'roi_aligned'):
+                'roi_batch_size_per_image', 'roi_positive_fraction', 'copy_paste_small', 'giou_alpha', 'roi_aligned',
+                'rpn_size_adaptive', 'rpn_centred_anchors', 'class_sampling_weights'):
         setattr(args, key, cfg[key])
     if args.predict is not None and args.load is None:
         p.error('--predict needs --load with the trained weights')
@@ -196,7 +197,11 @@ def make_loader(args, split):
                            copy_paste_margin=args.copy_paste_margin, copy_paste_same_class=args.copy_paste_same_class,
                            copy_paste_small=args.copy_paste_small,
                            scale_jitter=args.scale_jitter, rotation90=args.rotation90)
-    return DataLoader(dataset, args.batch_size, shuffle=train, num_workers=args.workers, collate_fn=collate,
+    sampler = None
+    if train and args.class_sampling_weights:  # oversample some classes' images; an epoch keeps len(dataset) draws
+        sampler = WeightedRandomSampler(dataset.sampling_weights(args.class_sampling_weights), len(dataset))
+    return DataLoader(dataset, args.batch_size, shuffle=train and sampler is None, sampler=sampler,
+                      num_workers=args.workers, collate_fn=collate,
                       persistent_workers=train and args.workers > 0)  # training workers live across epochs
 
 

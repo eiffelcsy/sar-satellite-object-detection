@@ -1,0 +1,8 @@
+# K15 (anchors on their cell centres): j1 with every anchor shifted by half a stride, centred at (j + 0.5) x stride
+# where the RPN head's feature cell is, instead of torchvision's j x stride (2 px off on P2). Regression can learn a
+# constant offset, but on 9 px bridges a 2 px shift is the size of the near misses the RPN makes. No parameters.
+# Compare with j1_roi_fused (and with k14, the other RPN change; combine only if both win). ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k15_rpn_centred_anchors
+model:
+  rpn_centred_anchors: true

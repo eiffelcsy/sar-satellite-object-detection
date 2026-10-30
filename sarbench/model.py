@@ -24,7 +24,8 @@ from torchvision.ops.poolers import _filter_input, _setup_scales
 
 from .adapters import adapt_backbone
 from .backbones import DINOv3
-from .heads import RESCORE_MODES, CascadeRoIHeads, ConvFCBoxHead, DetRoIHeads, box_similarity as make_similarity
+from .heads import (RESCORE_MODES, CascadeRoIHeads, CentredAnchorGenerator, ConvFCBoxHead, DetRoIHeads,
+                    box_similarity as make_similarity, size_adaptive_similarity)
 from .vit_adapter import ViTAdapter
 
 # Competition limits (Codabench terms): every parameter counts towards the total, frozen ones included.
@@ -270,7 +271,8 @@ class MultiTaskModel(nn.Module):
                  vit_adapter=None, box_similarity='iou', nwd_constant=16.0, rescore='off', rescore_power=1.0,
                  iou_aware=False, iou_alpha=0.5, heatmap_aux=False, cls_detach=False, cls_input='mean',
                  roi_pooling='level', roi_canonical_scale=224, roi_batch_size_per_image=512,
-                 roi_positive_fraction=0.25, giou_alpha=1.0, soft_nms_sigma=0.0, roi_aligned=False):
+                 roi_positive_fraction=0.25, giou_alpha=1.0, soft_nms_sigma=0.0, roi_aligned=False,
+                 rpn_size_adaptive=None, rpn_centred_anchors=False):
         super().__init__()
         if rescore not in RESCORE_MODES:
             raise ValueError(f"unknown rescore mode '{rescore}'; available: {', '.join(RESCORE_MODES)}")
@@ -312,7 +314,9 @@ class MultiTaskModel(nn.Module):
         # stride 4 up to 181 px at stride 64, times 3 aspect ratios = 6 anchors per location. An anchor is an RPN
         # positive at IoU >= rpn_fg_iou_thresh (a few px of offset push a 6-15 px box below 0.7; every GT still keeps
         # its best anchor) and a negative below rpn_bg_iou_thresh.
-        anchors = AnchorGenerator(((8, 11), (16, 23), (32, 45), (64, 91), (128, 181)), ((0.5, 1.0, 2.0),) * 5)
+        # rpn_centred_anchors: anchors centred on their cell, (j + 0.5) x stride, not torchvision's j x stride.
+        generator = CentredAnchorGenerator if rpn_centred_anchors else AnchorGenerator
+        anchors = generator(((8, 11), (16, 23), (32, 45), (64, 91), (128, 181)), ((0.5, 1.0, 2.0),) * 5)
         self.rpn = RegionProposalNetwork(
             anchors, RPNHead(256, 6), fg_iou_thresh=rpn_fg_iou_thresh, bg_iou_thresh=rpn_bg_iou_thresh,
             batch_size_per_image=256,
@@ -337,6 +341,11 @@ class MultiTaskModel(nn.Module):
         self.roi_heads.giou_alpha, self.roi_heads.soft_nms_sigma = giou_alpha, soft_nms_sigma
         # Anchor (RPN) and proposal (RoI head) labels: IoU, NWD or their max against the same thresholds.
         self.rpn.box_similarity = self.roi_heads.box_similarity = make_similarity(box_similarity, nwd_constant)
+        # rpn_size_adaptive (CFINet's rule, e.g. {floor: 0.25, base: 0.2, slope: 0.15, ref: 12}): a lower RPN positive
+        # bar for small GT boxes (0.25 at 9 px), rpn_fg_iou_thresh for large ones. The RoI head is unchanged.
+        if rpn_size_adaptive:
+            self.rpn.box_similarity = size_adaptive_similarity(self.rpn.box_similarity, rpn_fg_iou_thresh,
+                                                               **rpn_size_adaptive)
 
     @staticmethod
     def _build_roi_heads(roi_pool, resolution, num_classes, head, params, giou_weight, score_thresh, nms_thresh,
@@ -464,7 +473,8 @@ def build_model(args):
                            roi_canonical_scale=args.roi_canonical_scale,
                            roi_batch_size_per_image=args.roi_batch_size_per_image,
                            roi_positive_fraction=args.roi_positive_fraction, giou_alpha=args.giou_alpha,
-                           soft_nms_sigma=args.soft_nms_sigma, roi_aligned=args.roi_aligned)
+                           soft_nms_sigma=args.soft_nms_sigma, roi_aligned=args.roi_aligned,
+                           rpn_size_adaptive=args.rpn_size_adaptive, rpn_centred_anchors=args.rpn_centred_anchors)
     return model, pretrained_ids
 
 

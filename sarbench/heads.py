@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torchvision.models.detection._utils import BalancedPositiveNegativeSampler, Matcher
+from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchvision.models.detection.roi_heads import RoIHeads
 from torchvision.ops import box_iou, clip_boxes_to_image, remove_small_boxes
 
@@ -51,6 +52,24 @@ def box_similarity(name='iou', nwd_constant=16.0):
     if name == 'max':
         return functools.partial(_iou_or_nwd, constant=nwd_constant)
     raise ValueError(f"unknown box_similarity '{name}'; available: {', '.join(BOX_SIMILARITIES)}")
+
+
+def size_adaptive_threshold(gt_boxes, fg_thresh=0.7, floor=0.25, base=0.20, slope=0.15, ref=12.0):
+    """CFINet's (Yuan et al., ICCV 2023) size-dependent positive IoU bar per GT box: clamp(base + slope *
+    ln(sqrt(w h) / ref), floor, fg_thresh). A 9 px box gets 0.25, a 32 px one ~0.35, a 100 px one ~0.52; none is
+    stricter than the usual `fg_thresh`."""
+    size = ((gt_boxes[:, 2] - gt_boxes[:, 0]) * (gt_boxes[:, 3] - gt_boxes[:, 1])).clamp(min=1e-6).sqrt()
+    return (base + slope * torch.log(size / ref)).clamp(min=floor, max=fg_thresh)
+
+
+def size_adaptive_similarity(similarity, fg_thresh=0.7, **rule):
+    """`similarity` with each GT row scaled by fg_thresh / its `size_adaptive_threshold`, so the Matcher's fixed
+    fg_thresh acts as the per-GT bar: an anchor at IoU 0.25 with a 9 px box becomes a positive. The background bar
+    scales with it (bg x threshold / fg_thresh, ~0.11 for a 9 px box), anchors in between are ignored, and each GT's
+    best anchors are unchanged (a row's argmax is unaffected by scaling)."""
+    def scaled(gt_boxes, boxes):
+        return similarity(gt_boxes, boxes) * (fg_thresh / size_adaptive_threshold(gt_boxes, fg_thresh, **rule))[:, None]
+    return scaled
 
 
 def apply_class_prior(class_logits, prior, mode='soft', power=1.0):
@@ -140,6 +159,16 @@ def soft_nms(boxes, scores, labels, sigma=0.5, min_score=0.001, max_keep=100):
         scores[alive] = scores[alive] * torch.exp(-overlap ** 2 / sigma)
         alive = alive[scores[alive] > min_score]
     return torch.stack(keep), torch.stack(kept_scores)
+
+
+class CentredAnchorGenerator(AnchorGenerator):
+    """torchvision's anchors shifted by half a stride, so each anchor is centred on its feature cell's centre,
+    (j + 0.5) x stride, instead of torchvision's j x stride (2 px off on P2, which is the size of a near miss on a
+    9 px box). The RPN head reading cell j then predicts offsets from the box that cell actually sees."""
+
+    def grid_anchors(self, grid_sizes, strides):
+        anchors = super().grid_anchors(grid_sizes, strides)
+        return [a + torch.stack([s[1], s[0], s[1], s[0]]).to(a) / 2 for a, s in zip(anchors, strides)]
 
 
 class _SoftNMSPostprocess:

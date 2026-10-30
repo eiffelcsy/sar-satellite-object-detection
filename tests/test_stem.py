@@ -494,3 +494,42 @@ def test_aligned_stem_centres_p2_cells_where_the_vit_path_does(aligned, centre):
                 hits.append(p + 0.5)
     assert sum(hits) / len(hits) == pytest.approx(centre)
     assert stem(torch.randn(1, 1, 64, 64)).shape[-2:] == (16, 16)
+
+
+def test_size_adaptive_rpn_makes_near_miss_anchors_on_tiny_boxes_positive_and_keeps_large_boxes():
+    from torchvision.models.detection._utils import Matcher
+    from torchvision.ops import box_iou
+    from sarbench.heads import size_adaptive_similarity, size_adaptive_threshold
+    gt = torch.tensor([[10., 10., 19., 19.], [100., 100., 500., 500.]])  # 9 px and 400 px
+    assert size_adaptive_threshold(gt).tolist() == pytest.approx([0.25, 0.7], abs=1e-3)
+    anchors = torch.tensor([[12., 12., 22., 22.],     # IoU ~0.4 with the 9 px box: a near miss
+                            [30., 30., 40., 40.],     # nowhere near: background
+                            [100., 100., 450., 450.]])  # IoU 0.77 with the 400 px box
+    matcher = Matcher(0.7, 0.3, allow_low_quality_matches=False)
+    plain = matcher(box_iou(gt, anchors)).tolist()
+    adaptive = matcher(size_adaptive_similarity(box_iou)(gt, anchors)).tolist()
+    assert plain[0] < 0 and adaptive[0] == 0  # the near miss becomes a positive for the tiny box
+    assert plain[1] == adaptive[1] == Matcher.BELOW_LOW_THRESHOLD
+    assert plain[2] == adaptive[2] == 1  # large boxes keep the 0.7 bar
+    model = MultiTaskModel(_StubBackbone(), rpn_size_adaptive={'floor': 0.25, 'base': 0.2, 'slope': 0.15, 'ref': 12})
+    assert model.rpn.box_similarity is not model.roi_heads.box_similarity  # the RoI head keeps plain IoU
+    model.train()
+    _, _, losses = model(IMAGES, TARGETS)
+    assert torch.isfinite(losses['loss_objectness'])
+
+
+def test_centred_anchors_sit_on_cell_centres_and_train():
+    from torchvision.models.detection.anchor_utils import AnchorGenerator
+    from torchvision.models.detection.image_list import ImageList
+    from sarbench.heads import CentredAnchorGenerator
+    images, features = ImageList(torch.zeros(1, 3, 16, 16), [(16, 16)]), [torch.zeros(1, 1, 4, 4)]
+    plain = AnchorGenerator(((8,),), ((1.0,),))(images, features)[0]
+    centred = CentredAnchorGenerator(((8,),), ((1.0,),))(images, features)[0]
+    assert torch.equal(centred - plain, torch.full_like(plain, 2.0))  # stride 4: half a cell
+    centres = (centred[:, :2] + centred[:, 2:]) / 2
+    assert centres[:4, 0].tolist() == [2.0, 6.0, 10.0, 14.0]  # (j + 0.5) x 4
+    model = MultiTaskModel(_StubBackbone(), rpn_centred_anchors=True)
+    assert isinstance(model.rpn.anchor_generator, CentredAnchorGenerator)
+    model.train()
+    _, _, losses = model(IMAGES, TARGETS)
+    assert torch.isfinite(losses['loss_rpn_box_reg'])

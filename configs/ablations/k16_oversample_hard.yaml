@@ -1,0 +1,10 @@
+# K16 (oversample the weakest classes): j1 with bridge and playground training images drawn twice as often
+# (WeightedRandomSampler, with replacement; the epoch keeps j1's number of images and steps, so other classes get
+# ~20% fewer draws). On j1 they are AP .052 / .165 against .42-.76 for the rest, lost in both the RPN (40% / 26%
+# never proposed) and the RoI head (34% / 35%; bridges found score a median 0.02), which looks like these classes
+# being learned as background. Repeat-factor sampling (LVIS) is the standard fix, without copy-paste's label
+# corruption. No parameters. Compare with j1_roi_fused: bridge / playground AP, and that the other classes hold. ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k16_oversample_hard
+data:
+  class_sampling_weights: {bridge: 2.0, playground: 2.0}

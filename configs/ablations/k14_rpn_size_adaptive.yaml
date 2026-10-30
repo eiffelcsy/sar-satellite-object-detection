@@ -1,0 +1,10 @@
+# K14 (size-aware RPN positives): j1 with CFINet's (ICCV 2023) per-GT RPN positive IoU bar, clamp(0.20 + 0.15 x
+# ln(sqrt(w h) / 12), 0.25, 0.7): 0.25 for a 9 px box, ~0.35 at 32 px, ~0.52 at 100 px, 0.7 (j1) above ~340 px; the
+# negative bar scales with it (~0.11 for a 9 px box). On j1 the RPN never proposes 40% of the bridges (IoU 0.5), and
+# half of those have a proposal at IoU 0.3-0.5: tiny boxes get one or two positive anchors at 0.7, so the RPN learns
+# little about placing them. Not j1's earlier global 0.6 (every box, mosaic era). RoI head unchanged; no parameters.
+# CFINet: +1.4 AP on SODA-D (tiny objects). Compare with j1_roi_fused: bridge / playground AP and AP_small first. ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k14_rpn_size_adaptive
+model:
+  rpn_size_adaptive: {floor: 0.25, base: 0.2, slope: 0.15, ref: 12}

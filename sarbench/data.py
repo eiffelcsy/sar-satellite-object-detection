@@ -299,6 +299,15 @@ class SARMultiTask(Dataset):
     def __len__(self):
         return len(self.rows)
 
+    def sampling_weights(self, weights_by_name):
+        """One weight per row: `weights_by_name[class name]` for images of that class, 1 otherwise."""
+        names = {c['id'] - 1: c['name'] for c in json.loads(self.instances_json.read_text())['categories']}
+        unknown = set(weights_by_name) - set(names.values())
+        if unknown:
+            raise ValueError(f"unknown class in class_sampling_weights: {sorted(unknown)}; "
+                             f"available: {', '.join(names.values())}")
+        return [float(weights_by_name.get(names[row['label']], 1.0)) for row in self.rows]
+
     def _small_object_labels(self, min_fraction):
         """Image labels whose objects (over these rows) are at least `min_fraction` COCO-small (area < 32^2 px)."""
         small, total = defaultdict(int), defaultdict(int)

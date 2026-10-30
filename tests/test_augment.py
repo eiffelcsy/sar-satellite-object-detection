@@ -144,3 +144,24 @@ def test_small_class_copy_paste_pastes_more_into_small_object_classes_only(tmp_p
             assert set(target['labels'].tolist()) == {1}
         else:
             assert n == 2  # copy_paste 0: the large-object class is untouched
+
+
+def test_class_sampling_weights_follow_the_image_class_and_reject_unknown_names(tmp_path):
+    import json
+    import pytest
+    from PIL import Image
+    from sarbench.data import SARMultiTask
+    (tmp_path / 'images').mkdir()
+    labels = [0, 1, 1, 2]
+    for i in range(1, 5):
+        Image.new('L', (32, 32)).save(tmp_path / 'images' / f'{i:05d}.png')
+    (tmp_path / 'labels.csv').write_text('image_id,file_name,label\n' + ''.join(
+        f'{i},images/{i:05d}.png,{label}\n' for i, label in enumerate(labels, 1)))
+    (tmp_path / 'instances.json').write_text(json.dumps({
+        'images': [{'id': i, 'file_name': f'images/{i:05d}.png', 'width': 32, 'height': 32} for i in range(1, 5)],
+        'annotations': [], 'categories': [{'id': 1, 'name': 'aircraft'}, {'id': 2, 'name': 'bridge'},
+                                          {'id': 3, 'name': 'playground'}]}))
+    dataset = SARMultiTask(tmp_path, 'train', train=True, size=32, val_fraction=0.0)
+    assert dataset.sampling_weights({'bridge': 2.0, 'playground': 3.0}) == [1.0, 2.0, 2.0, 3.0]
+    with pytest.raises(ValueError):
+        dataset.sampling_weights({'bridges': 2.0})

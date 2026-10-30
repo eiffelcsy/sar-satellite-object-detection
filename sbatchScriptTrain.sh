@@ -216,3 +216,11 @@ srun --gres=gpu:1 python train.py --config configs/ablations/k10_scale_jitter.ya
 
 # X: exact 90-degree rotations alone, one change on j1. Compare with j1 (and k10, scale jitter alone).
 # srun --gres=gpu:1 python train.py --config configs/ablations/k13_rot90.yaml --data "$DATA" --wandb --workers 4
+
+# Y: bridge / playground recall (j1: AP .052 / .165; 40% / 26% never proposed, half of the lost bridges at proposal
+#    IoU 0.3-0.5). One change each on j1, compare with j1 on per-class AP (bridge, playground) first. Run order:
+#    pair 1: k11 (section W, aligned RoIAlign: 2 px = a near miss on 9 px boxes) + k14 (size-aware RPN positives)
+#    pair 2: k15 (anchors on cell centres) + k16 (bridge / playground images sampled 2x)
+srun --gres=gpu:1 python train.py --config configs/ablations/k14_rpn_size_adaptive.yaml   --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/k15_rpn_centred_anchors.yaml --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/k16_oversample_hard.yaml     --data "$DATA" --wandb --workers 4
