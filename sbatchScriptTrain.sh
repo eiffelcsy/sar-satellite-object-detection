@@ -207,9 +207,9 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 #   k9 P2 heatmap loss (h6) | k10 scale jitter 0.9-1.1 alone
 # srun --gres=gpu:1 python train.py --config configs/ablations/k8_patch8_bs32.yaml   --data "$DATA" --wandb --workers 4
 # srun --gres=gpu:1 python train.py --config configs/ablations/k9_p2_heatmap.yaml    --data "$DATA" --wandb --workers 4
-# srun --gres=gpu:1 python train.py --config configs/ablations/k10_scale_jitter.yaml --data "$DATA" --wandb --workers 4
+srun --gres=gpu:1 python train.py --config configs/ablations/k10_scale_jitter.yaml --data "$DATA" --wandb --workers 4
 
 # W: half-pixel-correct RoIAlign (aligned=True) in j1's fused pooler, one change. Compare with j1 (AP75, AP_small).
-srun --gres=gpu:1 python train.py --config configs/ablations/k11_roi_aligned.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/k11_roi_aligned.yaml --data "$DATA" --wandb --workers 4
 # Only if k11 beats j1: k11 + the P2 stem aligned with the ViT path. Compare with k11.
-srun --gres=gpu:1 python train.py --config configs/ablations/k12_roi_stem_aligned.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/k12_roi_stem_aligned.yaml --data "$DATA" --wandb --workers 4
