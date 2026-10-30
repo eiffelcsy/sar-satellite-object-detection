@@ -1,0 +1,10 @@
+# K13 (exact 90-degree rotations alone): j1 + a random 0/90/180/270 rotation per training image (boxes rotated with
+# it, exactly; no interpolation). a2 combined rot90 with scale jitter and 3 px paste context on top of the old mosaic
+# that halved every object, so its -5.2 mAP never isolated rotation. Flips already break SAR's look direction, so
+# rotations add views without a new kind of physical inconsistency; overhead targets (oil tanks, wind turbines,
+# playgrounds) are close to rotation-invariant. The risk is shadow / layover direction, which rotation moves. No new
+# parameters. Compare with j1_roi_fused (and k10, scale jitter alone). ~4 h.
+base: j1_roi_fused.yaml
+name: giou_k13_rot90
+data:
+  rotation90: true

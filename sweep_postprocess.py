@@ -13,6 +13,8 @@ goes into the config as `model.score_thresh` / `nms_thresh` / `soft_nms_sigma` /
         --score-thresh 0.001 --nms-thresh 0.6 --rescore off soft hard merge --rescore-power 0.5 1 2
 
 COCO AP counts at most 100 detections per image, so more than 100 cannot raise mAP; the default grid keeps 100.
+Each setting also prints its per-class AP (and the JSON keeps it), so a threshold that only helps hard classes
+(bridge, playground) is visible.
 """
 import argparse
 import itertools
@@ -73,9 +75,13 @@ def main():
         metrics, _, _ = evaluate(model, loader, loader.dataset.instances_json)
         row = {'score_thresh': score, 'nms_thresh': nms, 'soft_nms_sigma': sigma, 'detections_per_img': per_img,
                'rescore': mode, 'rescore_power': power, 'iou_alpha': alpha,
-               **{k: metrics[k] for k in ('mAP', 'AP50', 'AP75', 'AP_small', 'AP_medium', 'AP_large', 'macro_f1')}}
+               **{k: metrics[k] for k in ('mAP', 'AP50', 'AP75', 'AP_small', 'AP_medium', 'AP_large', 'macro_f1')},
+               'per_class_AP': metrics['per_class_AP']}
         results.append(row)
-        print(' '.join(f'{k} {v:.4f}' if isinstance(v, float) else f'{k} {v}' for k, v in row.items()), flush=True)
+        print(' '.join(f'{k} {v:.4f}' if isinstance(v, float) else f'{k} {v}' for k, v in row.items()
+                       if k != 'per_class_AP'), flush=True)
+        print('  per-class AP: ' + ' '.join(f'{name} {ap:.3f}' for name, ap in row['per_class_AP'].items()),
+              flush=True)
 
     best = max(results, key=lambda r: r['mAP'])
     print(f"best: score_thresh {best['score_thresh']} nms_thresh {best['nms_thresh']} "
