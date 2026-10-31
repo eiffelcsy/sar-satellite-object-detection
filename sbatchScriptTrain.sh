@@ -230,3 +230,8 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # srun --gres=gpu:1 python train.py --config configs/ablations/k17_repeat_hard.yaml --data "$DATA" --wandb --workers 4
 # k17 + centred anchors (k15) + aligned RoIAlign (k11). Compare with k17.
 srun --gres=gpu:1 python train.py --config configs/ablations/k18_repeat_hard_centred_aligned.yaml --data "$DATA" --wandb --workers 4
+# k19, the bridge / playground stack: k17 + k14 (size-aware RPN positives) + context RoI pooling (2x box).
+#   Compare with j1 and k17 (per-class AP, diagnose_recall.py head losses).
+# srun --gres=gpu:1 python train.py --config configs/ablations/k19_bridge_stack.yaml --data "$DATA" --wandb --workers 4
+# d20: k19 on all of train at 200 epochs (~12 h). Compare with d17 on Codabench.
+# srun --gres=gpu:1 python train.py --config configs/ablations/d20_full_train_k19_200ep.yaml --data "$DATA" --wandb --workers 4

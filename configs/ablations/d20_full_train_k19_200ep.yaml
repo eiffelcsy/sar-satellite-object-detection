@@ -1,0 +1,14 @@
+# D20 (final candidate, the bridge / playground stack at full length): d17 (j1's recipe, all of train, 200 epochs)
+# with k19's changes: bridge / playground images repeated once more per epoch with nothing skipped, no copy-paste
+# on bridges or wind turbines (k17, k19), size-aware RPN positives (k14) and context RoI pooling at 2x (k19). Epochs
+# are ~26% longer, so ~12 h, like d16's 250 epochs. d20 vs d17 on Codabench isolates the stack. The run writes
+# model.pt only: make the zips with sbatchScriptEval.sh section 9 (NAME=d20_full_train_k19_200ep).
+base: d17_full_train_j1_200ep.yaml
+name: giou_d20_full_train_k19_200ep
+model:
+  rpn_size_adaptive: {floor: 0.25, base: 0.2, slope: 0.15, ref: 12}
+  roi_context_scale: 2.0
+data:
+  class_sampling_weights: {bridge: 2.0, playground: 2.0}
+  class_sampling_mode: repeat
+  copy_paste_exclude: [bridge, wind_turbine]

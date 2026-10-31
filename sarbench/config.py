@@ -58,6 +58,7 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
       roi_pooling: level           # level (one pyramid level per RoI) | max / mean (all levels, fused)
       roi_canonical_scale: 224     # level pooling: a box of this side goes to P4 (smaller: lower levels)
       roi_aligned: false           # RoIAlign aligned=True (half-pixel-correct sampling) on either pooler
+      roi_context_scale: 0         # > 0: also pool each RoI enlarged this many times, fused by a 1x1 conv
       roi_batch_size_per_image: 512  # proposals sampled per image for the RoI losses
       roi_positive_fraction: 0.25  # the most of them that may be positives
       score_thresh: 0.05           # inference post-processing only (sweep it with sweep_postprocess.py)
@@ -143,6 +144,7 @@ DEFAULTS = {
     'roi_pooling': 'level',
     'roi_canonical_scale': 224,
     'roi_aligned': False,
+    'roi_context_scale': 0.0,
     'roi_batch_size_per_image': 512,
     'roi_positive_fraction': 0.25,
     'name': None,
@@ -197,7 +199,7 @@ _MODEL_KEYS = ('detail_stem', 'fusion_layers', 'input_adapter', 'wst_stem', 'wst
                'vit_adapter', 'box_similarity', 'nwd_constant', 'rescore', 'rescore_power', 'iou_aware', 'iou_alpha',
                'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale',
                'roi_batch_size_per_image', 'roi_positive_fraction', 'giou_alpha', 'soft_nms_sigma', 'roi_aligned',
-               'rpn_size_adaptive', 'rpn_centred_anchors')
+               'roi_context_scale', 'rpn_size_adaptive', 'rpn_centred_anchors')
 _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'unfrozen_lr',
                'cls_lr', 'ema_decay', 'lora_plus_ratio', 'warmup_epochs', 'wd_exclude_1d', 'weight_decay', 'eval_every', 'workers',
                'seed')

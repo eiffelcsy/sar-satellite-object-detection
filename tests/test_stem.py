@@ -533,3 +533,31 @@ def test_centred_anchors_sit_on_cell_centres_and_train():
     model.train()
     _, _, losses = model(IMAGES, TARGETS)
     assert torch.isfinite(losses['loss_rpn_box_reg'])
+
+
+def test_context_roi_align_starts_as_the_wrapped_pooler_and_reads_outside_the_box():
+    from sarbench.model import ContextRoIAlign, FusedRoIAlign
+    pooler = FusedRoIAlign(['0'], (1, 2), 1, fuse='max', aligned=True)
+    context = ContextRoIAlign(pooler, scale=3.0, channels=2)
+    assert sum(p.numel() for p in context.parameters()) == 2 * 2 * 2 + 2
+    features = {'0': torch.arange(32.).repeat(32, 1)[None, None].repeat(1, 2, 1, 1)}  # value = column index (P2)
+    boxes, shapes = [torch.tensor([[40., 40., 48., 48.], [0., 0., 8., 8.]])], [(128, 128)]
+    assert torch.equal(context(features, boxes, shapes), pooler(features, boxes, shapes))  # identity at init
+    enlarged = context.enlarge(boxes, shapes)[0]
+    assert enlarged.tolist() == [[32., 32., 56., 56.], [0., 0., 16., 16.]]  # 3x around the centre, clipped
+    with torch.no_grad():  # route the context channels only: the two samples spread to the wider window
+        context.fuse.weight.zero_()
+        context.fuse.weight[:, 2:, 0, 0] = torch.eye(2)
+    own = pooler(features, boxes[:1], shapes)[0, 0, 0].tolist()
+    wide = context(features, boxes[:1], shapes)[0, 0, 0].tolist()
+    assert own == pytest.approx([10., 11.]) and wide == pytest.approx([9., 12.])
+
+
+def test_roi_context_scale_wraps_either_pooler_and_adds_only_the_fuse_conv():
+    from sarbench.model import ContextRoIAlign
+    for pooling in ('level', 'max'):
+        plain = MultiTaskModel(_StubBackbone(), roi_pooling=pooling)
+        model = MultiTaskModel(_StubBackbone(), roi_pooling=pooling, roi_context_scale=3.0)
+        assert isinstance(model.roi_heads.box_roi_pool, ContextRoIAlign)
+        extra = sum(p.numel() for p in model.parameters()) - sum(p.numel() for p in plain.parameters())
+        assert extra == 512 * 256 + 256

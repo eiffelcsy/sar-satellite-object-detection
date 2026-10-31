@@ -216,6 +216,39 @@ class AlignedMultiScaleRoIAlign(MultiScaleRoIAlign):
         return result
 
 
+class ContextRoIAlign(nn.Module):
+    """Pool each RoI twice, as itself and as the same box enlarged `scale` times around its centre (clipped to the
+    image), and fuse the two with a 1x1 conv (2C -> C channels) so the box head keeps its input size.
+
+    Inside a ~10 px box a bridge is a bright line like a road; what makes it a bridge (water on both sides, land at
+    both ends) lies outside the box, where the plain pooler never looks. The conv starts as the identity on the RoI's
+    own channels and zero on the context ones, so training begins exactly at the wrapped pooler.
+    2C x C + C parameters (~0.13 M at C = 256).
+    """
+
+    def __init__(self, pooler, scale=3.0, channels=256):
+        super().__init__()
+        self.pooler, self.scale = pooler, scale
+        self.fuse = nn.Conv2d(2 * channels, channels, 1)
+        with torch.no_grad():
+            self.fuse.weight.zero_()
+            self.fuse.weight[:, :channels, 0, 0] = torch.eye(channels)
+            self.fuse.bias.zero_()
+
+    def enlarge(self, boxes, image_shapes):
+        enlarged = []
+        for b, (height, width) in zip(boxes, image_shapes):
+            centre, half = (b[:, :2] + b[:, 2:]) / 2, (b[:, 2:] - b[:, :2]) * self.scale / 2
+            limit = b.new_tensor([width, height])
+            enlarged.append(torch.cat([(centre - half).clamp(min=0), torch.minimum(centre + half, limit)], dim=1))
+        return enlarged
+
+    def forward(self, features, boxes, image_shapes):
+        own = self.pooler(features, boxes, image_shapes)
+        context = self.pooler(features, self.enlarge(boxes, image_shapes), image_shapes)
+        return self.fuse(torch.cat([own, context], dim=1))
+
+
 class CenterHeatmapHead(nn.Module):
     """Training-only auxiliary supervision of the stride-4 level (CenterNet, Zhou et al., 2019).
 
@@ -272,7 +305,7 @@ class MultiTaskModel(nn.Module):
                  iou_aware=False, iou_alpha=0.5, heatmap_aux=False, cls_detach=False, cls_input='mean',
                  roi_pooling='level', roi_canonical_scale=224, roi_batch_size_per_image=512,
                  roi_positive_fraction=0.25, giou_alpha=1.0, soft_nms_sigma=0.0, roi_aligned=False,
-                 rpn_size_adaptive=None, rpn_centred_anchors=False):
+                 rpn_size_adaptive=None, rpn_centred_anchors=False, roi_context_scale=0.0):
         super().__init__()
         if rescore not in RESCORE_MODES:
             raise ValueError(f"unknown rescore mode '{rescore}'; available: {', '.join(RESCORE_MODES)}")
@@ -332,6 +365,9 @@ class MultiTaskModel(nn.Module):
         else:
             roi_pool = FusedRoIAlign(['0', '1', '2', '3'], roi_output_size, roi_sampling_ratio, fuse=roi_pooling,
                                      aligned=roi_aligned)
+        # roi_context_scale > 0: also pool each RoI enlarged that many times and fuse it in (ContextRoIAlign).
+        if roi_context_scale:
+            roi_pool = ContextRoIAlign(roi_pool, roi_context_scale)
         self.roi_heads = self._build_roi_heads(roi_pool, roi_output_size, num_classes, head, head_params or {},
                                                giou_weight, score_thresh, nms_thresh, detections_per_img,
                                                iou_aware, iou_alpha, roi_batch_size_per_image,
@@ -474,7 +510,8 @@ def build_model(args):
                            roi_batch_size_per_image=args.roi_batch_size_per_image,
                            roi_positive_fraction=args.roi_positive_fraction, giou_alpha=args.giou_alpha,
                            soft_nms_sigma=args.soft_nms_sigma, roi_aligned=args.roi_aligned,
-                           rpn_size_adaptive=args.rpn_size_adaptive, rpn_centred_anchors=args.rpn_centred_anchors)
+                           rpn_size_adaptive=args.rpn_size_adaptive, rpn_centred_anchors=args.rpn_centred_anchors,
+                           roi_context_scale=args.roi_context_scale)
     return model, pretrained_ids
 
 

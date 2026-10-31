@@ -1,0 +1,15 @@
+# K19 (the bridge / playground stack): k17 (bridge / playground images repeated with nothing skipped, no copy-paste
+# on bridges) + k14 (size-aware RPN positives) + context RoI pooling (each RoI also pooled at 2x its size, fused by a
+# 1x1 conv). k14 alone raised bridge proposal recall (@.5 .595 -> .633, @.75 .175 -> .213; wind turbine @.75
+# .647 -> .817) but the RoI head, which only sees inside a ~10 px box where a bridge looks like a road, scored them
+# lower (bridge AP .054 -> .044). The context branch lets the head see the water and banks around the box, so the
+# extra proposals can turn into AP; k17 gives it twice the bridge / playground examples to learn that from.
+# Copy-paste also skips wind turbines (k6, no copy-paste: wind turbine AP +2.8 over j1; ship -6.2, so it stays on).
+# +0.13 M trainable parameters (~38.99 M); ~5 h like k17 (+26% steps per epoch). Compare with j1 and k17.
+base: k17_repeat_hard.yaml
+name: giou_k19_bridge_stack
+model:
+  rpn_size_adaptive: {floor: 0.25, base: 0.2, slope: 0.15, ref: 12}
+  roi_context_scale: 2.0
+data:
+  copy_paste_exclude: [bridge, wind_turbine]

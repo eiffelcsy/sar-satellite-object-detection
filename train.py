@@ -141,7 +141,7 @@ def parse_args(argv=None):
                 'rpn_bg_iou_thresh', 'ema_decay', 'vit_adapter', 'box_similarity', 'nwd_constant', 'iou_aware',
                 'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale',
                 'roi_batch_size_per_image', 'roi_positive_fraction', 'copy_paste_small', 'giou_alpha', 'roi_aligned',
-                'rpn_size_adaptive', 'rpn_centred_anchors', 'class_sampling_weights',
+                'roi_context_scale', 'rpn_size_adaptive', 'rpn_centred_anchors', 'class_sampling_weights',
                 'class_sampling_mode', 'copy_paste_exclude'):
         setattr(args, key, cfg[key])
     if args.predict is not None and args.load is None:
