@@ -210,9 +210,9 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # srun --gres=gpu:1 python train.py --config configs/ablations/k10_scale_jitter.yaml --data "$DATA" --wandb --workers 4
 
 # W: half-pixel-correct RoIAlign (aligned=True) in j1's fused pooler, one change. Compare with j1 (AP75, AP_small).
-srun --gres=gpu:1 python train.py --config configs/ablations/k11_roi_aligned.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/k11_roi_aligned.yaml --data "$DATA" --wandb --workers 4
 # Only if k11 beats j1: k11 + the P2 stem aligned with the ViT path. Compare with k11.
-srun --gres=gpu:1 python train.py --config configs/ablations/k12_roi_stem_aligned.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/k12_roi_stem_aligned.yaml --data "$DATA" --wandb --workers 4
 
 # X: exact 90-degree rotations alone, one change on j1. Compare with j1 (and k10, scale jitter alone).
 # srun --gres=gpu:1 python train.py --config configs/ablations/k13_rot90.yaml --data "$DATA" --wandb --workers 4
@@ -226,5 +226,5 @@ srun --gres=gpu:1 python train.py --config configs/ablations/k12_roi_stem_aligne
 # srun --gres=gpu:1 python train.py --config configs/ablations/k16_oversample_hard.yaml     --data "$DATA" --wandb --workers 4
 
 # Z: k16 without skipped images: every image once per epoch + one extra copy of each bridge / playground image
-#    (+26% steps per epoch, ~5 h). Compare with j1 and k16.
-# srun --gres=gpu:1 python train.py --config configs/ablations/k17_repeat_hard.yaml --data "$DATA" --wandb --workers 4
+#    (+26% steps per epoch, ~5 h), and no copy-paste on bridge images. Compare with j1 and k16.
+srun --gres=gpu:1 python train.py --config configs/ablations/k17_repeat_hard.yaml --data "$DATA" --wandb --workers 4

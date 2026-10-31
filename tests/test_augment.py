@@ -181,3 +181,30 @@ def test_repeat_factor_sampler_keeps_every_image_and_adds_the_repeats():
     assert len(fractional) == 5 and all(counts[i] >= 1 for i in range(4)) and counts[1] + counts[2] == 3
     with pytest.raises(ValueError):
         RepeatFactorSampler([1.0, -1.0])
+
+
+def test_copy_paste_exclude_skips_the_class_and_rejects_unknown_names(tmp_path):
+    import json
+    import pytest
+    from PIL import Image
+    from sarbench.data import SARMultiTask
+    (tmp_path / 'images').mkdir()
+    labels = [0, 0, 1, 1]  # aircraft x2, bridge x2; every image has two objects
+    for i in range(1, 5):
+        Image.new('L', (64, 64)).save(tmp_path / 'images' / f'{i:05d}.png')
+    (tmp_path / 'labels.csv').write_text('image_id,file_name,label\n' + ''.join(
+        f'{i},images/{i:05d}.png,{label}\n' for i, label in enumerate(labels, 1)))
+    (tmp_path / 'instances.json').write_text(json.dumps({
+        'images': [{'id': i, 'file_name': f'images/{i:05d}.png', 'width': 64, 'height': 64} for i in range(1, 5)],
+        'annotations': [{'id': 10 * i + k, 'image_id': i, 'category_id': labels[i - 1] + 1,
+                         'bbox': [4 + 30 * k, 4, 6, 6], 'area': 36, 'iscrowd': 0}
+                        for i in range(1, 5) for k in range(2)],
+        'categories': [{'id': 1, 'name': 'aircraft'}, {'id': 2, 'name': 'bridge'}]}))
+    common = dict(train=True, size=64, val_fraction=0.0, copy_paste=1.0, copy_paste_same_class=True)
+    dataset = SARMultiTask(tmp_path, 'train', copy_paste_exclude=['bridge'], **common)
+    assert all(len(dataset[i][2]['boxes']) == 2 for i in (2, 3) for _ in range(5))  # bridges: never pasted into
+    assert any(len(dataset[i][2]['boxes']) > 2 for i in (0, 1) for _ in range(5))  # aircraft keep copy-paste
+    mixed = SARMultiTask(tmp_path, 'train', copy_paste_exclude=['bridge'], **{**common, 'copy_paste_same_class': False})
+    assert all(set(mixed[i][2]['labels'].tolist()) == {1} for i in (0, 1) for _ in range(5))  # no bridge donors
+    with pytest.raises(ValueError):
+        SARMultiTask(tmp_path, 'train', copy_paste_exclude=['bridges'], **common)

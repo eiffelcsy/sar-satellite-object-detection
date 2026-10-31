@@ -81,9 +81,10 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
             # validation and saved as model.pt.
     data: {root: null, val_fraction: 0.1, limit: null, mosaic: 0.0, copy_paste: 0.0, copy_paste_margin: 0,
            copy_paste_same_class: false, copy_paste_small: null, scale_jitter: null, rotation90: false,
-           class_sampling_weights: null, class_sampling_mode: weighted}
+           class_sampling_weights: null, class_sampling_mode: weighted, copy_paste_exclude: null}
           # copy_paste_small: {prob, donors, max_objects, min_small_fraction} stronger copy-paste for images of
           # small-object classes (SARMultiTask); null = off
+          # copy_paste_exclude: [class name, ...] whose images get no copy-paste and whose objects are never pasted
           # class_sampling_weights: {class name: weight}, e.g. {bridge: 2.0}: training images of that class are drawn
           # that many times as often (with replacement; same images per epoch); null = plain shuffling
           # class_sampling_mode: weighted (above) or repeat: every image once per epoch, and an image of weight w
@@ -170,6 +171,7 @@ DEFAULTS = {
     'copy_paste_margin': 0,
     'copy_paste_same_class': False,
     'copy_paste_small': None,
+    'copy_paste_exclude': None,
     'class_sampling_weights': None,
     'class_sampling_mode': 'weighted',
     'scale_jitter': None,
@@ -202,6 +204,7 @@ _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'ba
 _DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'split_seed': 'split_seed', 'limit': 'limit',
               'mosaic': 'mosaic', 'copy_paste': 'copy_paste', 'copy_paste_margin': 'copy_paste_margin',
               'copy_paste_same_class': 'copy_paste_same_class', 'copy_paste_small': 'copy_paste_small',
+              'copy_paste_exclude': 'copy_paste_exclude',
               'scale_jitter': 'scale_jitter', 'rotation90': 'rotation90',
               'class_sampling_weights': 'class_sampling_weights', 'class_sampling_mode': 'class_sampling_mode'}
 _PREPROCESS_KEYS = {'pseudo_rgb': 'pseudo_rgb', 'mode': 'pseudo_rgb_mode', 'edge': 'edge',

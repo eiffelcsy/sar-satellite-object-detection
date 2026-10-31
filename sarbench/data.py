@@ -234,7 +234,7 @@ class SARMultiTask(Dataset):
     def __init__(self, root, split, train=False, size=512, limit=None, val_fraction=0.1, seed=0,
                  preprocess=None, cache_dir=None, mosaic=0.0, copy_paste=0.0, copy_paste_max_iou=0.3,
                  copy_paste_margin=0, copy_paste_same_class=False, copy_paste_small=None, scale_jitter=None,
-                 rotation90=False):
+                 rotation90=False, copy_paste_exclude=None):
         self.root = Path(root)
         self.train = train
         self.size = size
@@ -251,6 +251,10 @@ class SARMultiTask(Dataset):
         # The other classes keep `copy_paste`. None disables it. `min_small_fraction` (0.5) picks the classes.
         self.copy_paste_small = dict(copy_paste_small) if copy_paste_small else None
         self.small_object_labels = set()
+        # Class names whose images get no copy-paste and whose objects are never pasted (e.g. bridges, which need
+        # water under them and land at both ends: a randomly placed crop puts them on land or in open water).
+        self.copy_paste_exclude = list(copy_paste_exclude or [])
+        self.excluded_labels = set()
         self.rotation90 = rotation90  # random 0/90/180/270-degree rotation (train only)
         self.scale_jitter = scale_jitter  # (lo, hi) scale range applied after the resize, or None/False
         self.image_dir = None
@@ -279,6 +283,8 @@ class SARMultiTask(Dataset):
         self.annotations = defaultdict(list)  # COCO image id -> its boxes
         for ann in coco['annotations']:
             self.annotations[ann['image_id']].append(ann)
+        if self.copy_paste_exclude:
+            self.excluded_labels = set(self._labels_of(self.copy_paste_exclude, 'copy_paste_exclude'))
         if self.copy_paste_small:
             self.small_object_labels = self._small_object_labels(self.copy_paste_small.get('min_small_fraction', 0.5))
         flips = [v2.RandomHorizontalFlip(), v2.RandomVerticalFlip()] if train else []
@@ -301,12 +307,21 @@ class SARMultiTask(Dataset):
 
     def sampling_weights(self, weights_by_name):
         """One weight per row: `weights_by_name[class name]` for images of that class, 1 otherwise."""
-        names = {c['id'] - 1: c['name'] for c in json.loads(self.instances_json.read_text())['categories']}
-        unknown = set(weights_by_name) - set(names.values())
-        if unknown:
-            raise ValueError(f"unknown class in class_sampling_weights: {sorted(unknown)}; "
-                             f"available: {', '.join(names.values())}")
+        self._labels_of(weights_by_name, 'class_sampling_weights')  # rejects unknown names
+        names = self._class_names()
         return [float(weights_by_name.get(names[row['label']], 1.0)) for row in self.rows]
+
+    def _class_names(self):
+        """Image label (0..8) -> class name, from instances.json."""
+        return {c['id'] - 1: c['name'] for c in json.loads(self.instances_json.read_text())['categories']}
+
+    def _labels_of(self, class_names, option):
+        """Image labels of `class_names`; raises ValueError naming `option` on an unknown name."""
+        labels = {name: label for label, name in self._class_names().items()}
+        unknown = set(class_names) - set(labels)
+        if unknown:
+            raise ValueError(f"unknown class in {option}: {sorted(unknown)}; available: {', '.join(labels)}")
+        return [labels[name] for name in class_names]
 
     def _small_object_labels(self, min_fraction):
         """Image labels whose objects (over these rows) are at least `min_fraction` COCO-small (area < 32^2 px)."""
@@ -353,7 +368,10 @@ class SARMultiTask(Dataset):
 
     def _paste(self, image, boxes, labels, label, donors=1, max_objects=3):
         """Copy-paste from up to `donors` donor images (of `label` with copy_paste_same_class), `max_objects` in all."""
-        pool = self.rows_by_label[label] if self.copy_paste_same_class else range(len(self))
+        if self.copy_paste_same_class:
+            pool = self.rows_by_label[label]
+        else:  # any image, except those of excluded classes (their objects are never pasted)
+            pool = [index for index, row in enumerate(self.rows) if row['label'] not in self.excluded_labels]
         start = len(boxes)
         for _ in range(donors):
             remaining = max_objects - (len(boxes) - start)
@@ -372,7 +390,9 @@ class SARMultiTask(Dataset):
                                                 for _ in range(3)]
             image, boxes, labels = mosaic_tiles(tiles, self.size)
         label = self.rows[i]['label']
-        if self.train and self.copy_paste_small and label in self.small_object_labels:
+        if label in self.excluded_labels:
+            pass  # copy_paste_exclude: no pasting into this image
+        elif self.train and self.copy_paste_small and label in self.small_object_labels:
             if random.random() < self.copy_paste_small.get('prob', 1.0):  # several donors, up to max_objects
                 image, boxes, labels = self._paste(image, boxes, labels, label,
                                                    self.copy_paste_small.get('donors', 4),

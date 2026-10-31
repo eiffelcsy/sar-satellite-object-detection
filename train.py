@@ -142,7 +142,7 @@ def parse_args(argv=None):
                 'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale',
                 'roi_batch_size_per_image', 'roi_positive_fraction', 'copy_paste_small', 'giou_alpha', 'roi_aligned',
                 'rpn_size_adaptive', 'rpn_centred_anchors', 'class_sampling_weights',
-                'class_sampling_mode'):
+                'class_sampling_mode', 'copy_paste_exclude'):
         setattr(args, key, cfg[key])
     if args.predict is not None and args.load is None:
         p.error('--predict needs --load with the trained weights')
@@ -196,7 +196,7 @@ def make_loader(args, split):
                            preprocess=build_preprocess(args), cache_dir=args.preprocess_cache,
                            mosaic=args.mosaic, copy_paste=args.copy_paste,
                            copy_paste_margin=args.copy_paste_margin, copy_paste_same_class=args.copy_paste_same_class,
-                           copy_paste_small=args.copy_paste_small,
+                           copy_paste_small=args.copy_paste_small, copy_paste_exclude=args.copy_paste_exclude,
                            scale_jitter=args.scale_jitter, rotation90=args.rotation90)
     sampler = None
     if train and args.class_sampling_weights:
