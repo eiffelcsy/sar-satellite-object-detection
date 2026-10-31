@@ -1,0 +1,9 @@
+# K17 (repeat the weakest classes, nothing skipped): k16's fix, but every j1 image is still seen once per epoch and
+# bridge / playground images get one extra copy each (RepeatFactorSampler, LVIS repeat-factor sampling). The epoch
+# grows from ~8.5k to ~10.6k images (+26% steps and time, ~5 h) with the same number of epochs, so other classes see
+# exactly j1's data. Compare with j1_roi_fused (bridge / playground AP, other classes hold) and with k16 (weighted
+# draws at j1's epoch length): if k17 wins where k16 didn't, the cost of k16 was the skipped images, not the repeats.
+base: k16_oversample_hard.yaml
+name: giou_k17_repeat_hard
+data:
+  class_sampling_mode: repeat

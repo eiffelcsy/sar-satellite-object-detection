@@ -103,6 +103,7 @@ def test_base_is_the_dora_giou_recipe():
     ('k14_rpn_size_adaptive', 'j1_roi_fused', {'rpn_size_adaptive'}),
     ('k15_rpn_centred_anchors', 'j1_roi_fused', {'rpn_centred_anchors'}),
     ('k16_oversample_hard', 'j1_roi_fused', {'class_sampling_weights'}),
+    ('k17_repeat_hard', 'k16_oversample_hard', {'class_sampling_mode'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'

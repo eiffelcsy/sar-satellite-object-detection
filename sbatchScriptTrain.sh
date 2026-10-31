@@ -224,3 +224,7 @@ srun --gres=gpu:1 python train.py --config configs/ablations/k12_roi_stem_aligne
 # srun --gres=gpu:1 python train.py --config configs/ablations/k14_rpn_size_adaptive.yaml   --data "$DATA" --wandb --workers 4
 # srun --gres=gpu:1 python train.py --config configs/ablations/k15_rpn_centred_anchors.yaml --data "$DATA" --wandb --workers 4
 # srun --gres=gpu:1 python train.py --config configs/ablations/k16_oversample_hard.yaml     --data "$DATA" --wandb --workers 4
+
+# Z: k16 without skipped images: every image once per epoch + one extra copy of each bridge / playground image
+#    (+26% steps per epoch, ~5 h). Compare with j1 and k16.
+# srun --gres=gpu:1 python train.py --config configs/ablations/k17_repeat_hard.yaml --data "$DATA" --wandb --workers 4

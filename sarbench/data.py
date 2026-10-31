@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from torchvision import tv_tensors
 from torchvision.ops import box_convert
 from torchvision.transforms import v2
@@ -383,6 +383,32 @@ class SARMultiTask(Dataset):
             boxes, labels = drop_degenerate_boxes(boxes, labels)
         target = {'boxes': boxes, 'labels': labels, 'image_id': image_id, 'orig_size': orig_size}
         return image, self.rows[i]['label'], target
+
+
+class RepeatFactorSampler(Sampler):
+    """Every image once per epoch plus repeats: image i appears floor(w_i) times, and the fractional parts add
+    round(sum of fractions) more draws (weighted, without replacement), so each epoch has the same length.
+
+    Unlike WeightedRandomSampler, no image is ever skipped; the epoch grows instead (LVIS repeat-factor sampling).
+    """
+
+    def __init__(self, weights):
+        weights = torch.as_tensor(weights, dtype=torch.float64)
+        if (weights < 0).any():
+            raise ValueError('repeat factors must be >= 0')
+        self.whole = weights.floor().long()
+        self.frac = weights - self.whole
+        self.extra = int(round(self.frac.sum().item()))
+        self.length = int(self.whole.sum().item()) + self.extra
+
+    def __len__(self):
+        return self.length
+
+    def __iter__(self):
+        indices = torch.repeat_interleave(torch.arange(len(self.whole)), self.whole)
+        if self.extra:
+            indices = torch.cat([indices, torch.multinomial(self.frac, self.extra, replacement=False)])
+        yield from indices[torch.randperm(len(indices))].tolist()
 
 
 def collate(batch):

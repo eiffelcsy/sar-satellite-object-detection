@@ -168,6 +168,7 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `k14_rpn_size_adaptive` | CFINet size-aware RPN positive IoU (0.25 for tiny boxes, 0.7 for large) | j1 | 123.93 | 38.86 |
 | `k15_rpn_centred_anchors` | anchors centred on their feature cell, (j + 0.5) x stride | j1 | 123.93 | 38.86 |
 | `k16_oversample_hard` | bridge and playground images sampled 2x (same steps per epoch) | j1 | 123.93 | 38.86 |
+| `k17_repeat_hard` | every image once + bridge and playground images repeated (epoch +26%) | k16 | 123.93 | 38.86 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.

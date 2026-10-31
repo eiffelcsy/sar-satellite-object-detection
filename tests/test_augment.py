@@ -165,3 +165,19 @@ def test_class_sampling_weights_follow_the_image_class_and_reject_unknown_names(
     assert dataset.sampling_weights({'bridge': 2.0, 'playground': 3.0}) == [1.0, 2.0, 2.0, 3.0]
     with pytest.raises(ValueError):
         dataset.sampling_weights({'bridges': 2.0})
+
+
+def test_repeat_factor_sampler_keeps_every_image_and_adds_the_repeats():
+    from collections import Counter
+    import pytest
+    from sarbench.data import RepeatFactorSampler
+    sampler = RepeatFactorSampler([1.0, 2.0, 2.0, 1.0])
+    assert len(sampler) == 6
+    for _ in range(3):
+        drawn = list(sampler)
+        assert len(drawn) == len(sampler) and Counter(drawn) == {0: 1, 1: 2, 2: 2, 3: 1}
+    fractional = RepeatFactorSampler([1.0, 1.5, 1.5, 1.0])  # the two halves add one extra draw
+    counts = Counter(list(fractional))
+    assert len(fractional) == 5 and all(counts[i] >= 1 for i in range(4)) and counts[1] + counts[2] == 3
+    with pytest.raises(ValueError):
+        RepeatFactorSampler([1.0, -1.0])

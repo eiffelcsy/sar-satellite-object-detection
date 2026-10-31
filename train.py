@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from sarbench.channels import PseudoRGB
 from sarbench.config import DEFAULTS, load_config
-from sarbench.data import (SARImages, SARMultiTask, collate, collate_images, split_available,
+from sarbench.data import (RepeatFactorSampler, SARImages, SARMultiTask, collate, collate_images, split_available,
                            to_original_xywh)
 from sarbench.adapters import dora_up_weights
 from sarbench.ema import ModelEMA
@@ -141,7 +141,8 @@ def parse_args(argv=None):
                 'rpn_bg_iou_thresh', 'ema_decay', 'vit_adapter', 'box_similarity', 'nwd_constant', 'iou_aware',
                 'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale',
                 'roi_batch_size_per_image', 'roi_positive_fraction', 'copy_paste_small', 'giou_alpha', 'roi_aligned',
-                'rpn_size_adaptive', 'rpn_centred_anchors', 'class_sampling_weights'):
+                'rpn_size_adaptive', 'rpn_centred_anchors', 'class_sampling_weights',
+                'class_sampling_mode'):
         setattr(args, key, cfg[key])
     if args.predict is not None and args.load is None:
         p.error('--predict needs --load with the trained weights')
@@ -198,8 +199,14 @@ def make_loader(args, split):
                            copy_paste_small=args.copy_paste_small,
                            scale_jitter=args.scale_jitter, rotation90=args.rotation90)
     sampler = None
-    if train and args.class_sampling_weights:  # oversample some classes' images; an epoch keeps len(dataset) draws
-        sampler = WeightedRandomSampler(dataset.sampling_weights(args.class_sampling_weights), len(dataset))
+    if train and args.class_sampling_weights:
+        weights = dataset.sampling_weights(args.class_sampling_weights)
+        if args.class_sampling_mode == 'repeat':  # every image once, plus repeats: the epoch grows
+            sampler = RepeatFactorSampler(weights)
+        elif args.class_sampling_mode == 'weighted':  # drawn with replacement; an epoch keeps len(dataset) draws
+            sampler = WeightedRandomSampler(weights, len(dataset))
+        else:
+            raise ValueError(f'class_sampling_mode must be weighted or repeat, not {args.class_sampling_mode!r}')
     return DataLoader(dataset, args.batch_size, shuffle=train and sampler is None, sampler=sampler,
                       num_workers=args.workers, collate_fn=collate,
                       persistent_workers=train and args.workers > 0)  # training workers live across epochs
