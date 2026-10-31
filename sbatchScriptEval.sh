@@ -141,13 +141,13 @@ MODEL=runs/giou_d17_full_train_j1_200ep/model.pt
 # 12) Per-class score-threshold sweep on j1: the sweep now prints per-class AP for every setting, so check whether
 #     the very low thresholds lift bridge (AP .052, recall@.5 .18) and playground (.165, .31), whose true boxes score
 #     low. NMS 0.8 as in section 11; change it to your section 10 winner.
-srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/j1_roi_fused.yaml \
-  --load runs/giou_j1_roi_fused/model.pt --data "$DATA" --workers 4 \
-  --score-thresh 0.0001 0.00001 --nms-thresh 0.8
+srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/k15_rpn_centred_anchors.yaml \
+  --load runs/giou_k15_rpn_centred_anchors/model.pt --data "$DATA" --workers 4 \
+  --score-thresh 0.00001 --nms-thresh 0.8
 
 # 13) Where GT boxes are lost on j1 (held-out split): per class, the share never proposed by the RPN vs proposed but
 #     not detected as its class by the RoI head. Run at the low score threshold so the head's low-ranked boxes count.
 #     Writes runs/giou_j1_roi_fused/recall_diagnosis.json (one record per GT box: size, aspect, IoUs, score).
-srun --gres=gpu:1 python diagnose_recall.py --config configs/ablations/j1_roi_fused.yaml \
-  --load runs/giou_j1_roi_fused/model.pt --data "$DATA" --workers 4 \
-  --score-thresh 0.0001 --nms-thresh 0.8 --top-k 300
+# srun --gres=gpu:1 python diagnose_recall.py --config configs/ablations/j1_roi_fused.yaml \
+#   --load runs/giou_j1_roi_fused/model.pt --data "$DATA" --workers 4 \
+#   --score-thresh 0.0001 --nms-thresh 0.8 --top-k 300
