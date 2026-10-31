@@ -152,6 +152,8 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `d15_full_train_j0_250ep` | final candidate: d14 with j0's augmentation | d14 | 123.93 | 38.86 |
 | `d16_full_train_j1_250ep` | final candidate: d15 with j1's fused RoI pooling | d15 | 123.93 | 38.86 |
 | `d17_full_train_j1_200ep` | final candidate: d16 at 200 epochs instead of 250 | d16 | 123.93 | 38.86 |
+| `d18_full_train_j1_250ep_seed1` | final candidate: d16 with training seed 1 (second draw) | d16 | 123.93 | 38.86 |
+| `d19_full_train_j1_iou_aware_250ep` | final candidate: d16 + k3's IoU-aware ranking (only if section 14 wins) | d16 | 123.94 | 38.87 |
 | `k1_copy_paste_small` | small-object classes always copy-pasted, up to 4 donors / 8 objects | j1 | 123.93 | 38.86 |
 | `k2_roi_sparse` | RoI sampling 256 per image, up to half positives (instead of 512 / 0.25) | j1 | 123.93 | 38.86 |
 | `k3_iou_aware` | h4 on j1: IoU branch on the RoI head, detections ranked by score x IoU^0.5 | j1 | 123.94 | 38.87 |
@@ -169,6 +171,7 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `k15_rpn_centred_anchors` | anchors centred on their feature cell, (j + 0.5) x stride | j1 | 123.93 | 38.86 |
 | `k16_oversample_hard` | bridge and playground images sampled 2x (same steps per epoch) | j1 | 123.93 | 38.86 |
 | `k17_repeat_hard` | every image once + bridge and playground images repeated (epoch +26%); no copy-paste on bridges | k16 | 123.93 | 38.86 |
+| `k18_repeat_hard_centred_aligned` | k17 + anchors on cell centres (k15) + RoIAlign aligned=True (k11) | k17 | 123.93 | 38.86 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.

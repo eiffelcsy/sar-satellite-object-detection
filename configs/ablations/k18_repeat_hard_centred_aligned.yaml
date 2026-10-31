@@ -1,0 +1,11 @@
+# K18 (the bridge / playground stack): k17 (bridge / playground images repeated with nothing skipped, no copy-paste
+# on bridges) + k15 (anchors on cell centres) + k11 (RoIAlign aligned=True). Each targets a different place bridges
+# are lost on j1: k17 the training signal (both stages), k15 the RPN (40% of bridges never proposed, half of those at
+# proposal IoU 0.3-0.5), k11 the RoI head (half-cell offset on ~9 px boxes). k15 and k11 are both half-cell fixes, at
+# the anchors and at the pooler, so the geometry agrees end to end. No new parameters; ~5 h like k17 (+26% steps per
+# epoch). Compare with k17 (same epoch length); k15 and k11 against j1 give the parts alone.
+base: k17_repeat_hard.yaml
+name: giou_k18_repeat_hard_centred_aligned
+model:
+  rpn_centred_anchors: true
+  roi_aligned: true

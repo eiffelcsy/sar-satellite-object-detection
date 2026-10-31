@@ -151,3 +151,10 @@ srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/k6_no_c
 # srun --gres=gpu:1 python diagnose_recall.py --config configs/ablations/j1_roi_fused.yaml \
 #   --load runs/giou_j1_roi_fused/model.pt --data "$DATA" --workers 4 \
 #   --score-thresh 0.0001 --nms-thresh 0.8 --top-k 300
+
+# 14) Decides the second final run: k3 (IoU branch) at j1's tuned post-processing, across IoU ranking exponents
+#     (alpha 0 = k3 ranked by class score alone). Compare the best row with j1 at score 1e-5 / NMS 0.8 (mAP .4758):
+#     clearly higher (> +0.5) -> d16 + iou_aware at that alpha; otherwise a second seed of d16.
+# srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/k3_iou_aware.yaml \
+#   --load runs/giou_k3_iou_aware/model.pt --data "$DATA" --workers 4 \
+#   --score-thresh 0.00001 --nms-thresh 0.8 --iou-alpha 0 0.25 0.5 1 2

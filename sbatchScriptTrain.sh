@@ -227,4 +227,6 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 
 # Z: k16 without skipped images: every image once per epoch + one extra copy of each bridge / playground image
 #    (+26% steps per epoch, ~5 h), and no copy-paste on bridge images. Compare with j1 and k16.
-srun --gres=gpu:1 python train.py --config configs/ablations/k17_repeat_hard.yaml --data "$DATA" --wandb --workers 4
+# srun --gres=gpu:1 python train.py --config configs/ablations/k17_repeat_hard.yaml --data "$DATA" --wandb --workers 4
+# k17 + centred anchors (k15) + aligned RoIAlign (k11). Compare with k17.
+# srun --gres=gpu:1 python train.py --config configs/ablations/k18_repeat_hard_centred_aligned.yaml --data "$DATA" --wandb --workers 4

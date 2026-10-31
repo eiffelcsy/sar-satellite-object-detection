@@ -1,0 +1,9 @@
+# D19 (final candidate, IoU-aware ranking): d16 + k3's IoU branch on the RoI head, detections ranked by
+# score x IoU^alpha. k3 matched j1 at alpha 0.5 (mAP .461 vs .463, AP_large +1.8) before any alpha tuning; launch
+# only if sbatchScriptEval.sh section 14 shows k3 clearly above j1 (> +0.5 mAP) at score 1e-5 / NMS 0.8, and set
+# iou_alpha to that sweep's best. Otherwise run d18 instead. ~12 h. Zips: section 9 (NAME=d19_full_train_j1_iou_aware_250ep).
+base: d16_full_train_j1_250ep.yaml
+name: giou_d19_full_train_j1_iou_aware_250ep
+model:
+  iou_aware: true
+  iou_alpha: 0.5

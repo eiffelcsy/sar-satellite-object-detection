@@ -104,6 +104,9 @@ def test_base_is_the_dora_giou_recipe():
     ('k15_rpn_centred_anchors', 'j1_roi_fused', {'rpn_centred_anchors'}),
     ('k16_oversample_hard', 'j1_roi_fused', {'class_sampling_weights'}),
     ('k17_repeat_hard', 'k16_oversample_hard', {'class_sampling_mode', 'copy_paste_exclude'}),
+    ('k18_repeat_hard_centred_aligned', 'k17_repeat_hard', {'rpn_centred_anchors', 'roi_aligned'}),
+    ('d18_full_train_j1_250ep_seed1', 'd16_full_train_j1_250ep', {'seed'}),
+    ('d19_full_train_j1_iou_aware_250ep', 'd16_full_train_j1_250ep', {'iou_aware'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'
