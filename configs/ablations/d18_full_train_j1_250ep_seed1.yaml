@@ -1,9 +1,0 @@
-# D18 (final candidate, second draw of the best recipe): d16 with training seed 1. No single k ablation beat j1 by
-# more than run-to-run noise (best: k4 / k11 within 0.2 mAP; k14 / k15 / k16 / k10 below), so the safest gain left is
-# a second independent run of the same recipe: submit both and keep the better Codabench score. If d17 (200 epochs)
-# beats d16 on Codabench, set train.epochs to 200 here before launching. ~12 h. Make the zips with
-# sbatchScriptEval.sh section 9 (NAME=d18_full_train_j1_250ep_seed1), score 1e-5 / NMS 0.8.
-base: d16_full_train_j1_250ep.yaml
-name: giou_d18_full_train_j1_250ep_seed1
-train:
-  seed: 1
