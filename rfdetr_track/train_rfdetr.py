@@ -5,7 +5,9 @@ Unlike the Faster R-CNN track, every weight is trained and the box regression st
 model. Variants (all under the 40 M trainable budget; the script checks): small (512 px native), medium, large.
 Training runs at a fixed 512 px (`multi_scale` off, so no image is ever larger than the 512 px limit) with
 RF-DETR's EMA. The run writes checkpoint_best_ema.pth / checkpoint_best_total.pth and last.ckpt to --output;
-`--resume` continues from last.ckpt after a time-limit kill.
+`--resume` continues from last.ckpt after a time-limit kill, or extends a finished run: pass a larger --epochs
+(the optimizer, EMA and epoch count come from last.ckpt; the schedule, incl. --lr-drop, from these arguments).
+The LR schedule is RF-DETR's step decay: full LR, then 10x lower from epoch --lr-drop on.
 
 Example: python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_raw --output runs/rfdetr_small_raw
 """
@@ -30,6 +32,8 @@ def main():
     p.add_argument('--weight-decay', type=float, default=1e-4)
     p.add_argument('--drop-path', type=float, default=0.0)
     p.add_argument('--warmup-epochs', type=float, default=1.0)
+    p.add_argument('--lr-drop', type=int, default=100,
+                   help='epoch from which the LR is 10x lower (RF-DETR default 100: never reached in a shorter run)')
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--resume', action='store_true', help='continue from <output>/last.ckpt if it exists')
     p.add_argument('--wandb', action='store_true')
@@ -59,7 +63,8 @@ def main():
     model.train(dataset_dir=str(args.dataset), output_dir=str(args.output), resolution=args.resolution,
                 epochs=args.epochs, batch_size=args.batch_size, grad_accum_steps=args.grad_accum, lr=args.lr,
                 lr_encoder=args.lr_encoder, weight_decay=args.weight_decay, drop_path=args.drop_path,
-                warmup_epochs=args.warmup_epochs, num_workers=args.workers, multi_scale=False,
+                warmup_epochs=args.warmup_epochs, lr_scheduler='step', lr_scheduler_kwargs={'lr_drop': args.lr_drop},
+                num_workers=args.workers, multi_scale=False,
                 expanded_scales=False, use_ema=True, resume=resume, wandb=args.wandb, project=args.project,
                 run=args.output.name, log_per_class_metrics=True)
 

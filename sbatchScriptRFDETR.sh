@@ -64,8 +64,16 @@ srun python rfdetr_track/export_dataset.py --data "$DATA" --out rfdetr_data/held
 
 # R2) RF-DETR Small (DINOv2 ViT-S windowed, 512 px native, COCO-pretrained, every weight trained) on the held-out
 #     split. --resume: resubmit unchanged after a time-limit kill (continues from last.ckpt).
+# srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_raw \
+#   --output runs/rfdetr_small_raw --variant small --epochs 60 --batch-size 16 --workers 4 --resume --wandb
+
+# R2b) Extend R2 (60 epochs, all at full LR: RF-DETR's default drop is at epoch 100) by 25 epochs to 85, with the
+#      LR 10x lower from epoch 70 (10 more at full LR, then 15 low): continues from runs/rfdetr_small_raw/last.ckpt
+#      (optimizer, EMA, epoch 60) and keeps updating checkpoint_best_*.pth there. Then rerun sbatchScriptEval.sh
+#      section 16. Stops if last.ckpt is missing (--resume would otherwise train 85 epochs from scratch).
+test -f runs/rfdetr_small_raw/last.ckpt || { echo "runs/rfdetr_small_raw/last.ckpt not found: nothing to extend"; exit 1; }
 srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_raw \
-  --output runs/rfdetr_small_raw --variant small --epochs 60 --batch-size 16 --workers 4 --resume --wandb
+  --output runs/rfdetr_small_raw --variant small --epochs 85 --lr-drop 70 --batch-size 16 --workers 4 --resume --wandb
 
 # R3) Held-out metrics, comparable with the Faster R-CNN runs (j1 .4758 / k19 .4817 mAP, per-class AP). Try
 #     --single-class (all boxes take the image class) too.
