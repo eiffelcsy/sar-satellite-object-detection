@@ -73,7 +73,7 @@ srun python rfdetr_track/export_dataset.py --data "$DATA" --out rfdetr_data/held
 #      section 16. Stops if last.ckpt is missing (--resume would otherwise train 85 epochs from scratch).
 test -f runs/rfdetr_small_raw/last.ckpt || { echo "runs/rfdetr_small_raw/last.ckpt not found: nothing to extend"; exit 1; }
 srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_raw \
-  --output runs/rfdetr_small_raw --variant small --epochs 85 --lr-drop 70 --batch-size 16 --workers 4 --resume --wandb
+  --output runs/rfdetr_small_raw --variant small --epochs 80 --lr-drop 65 --batch-size 16 --workers 4 --resume --wandb
 
 # R3) Held-out metrics, comparable with the Faster R-CNN runs (j1 .4758 / k19 .4817 mAP, per-class AP). Try
 #     --single-class (all boxes take the image class) too.
