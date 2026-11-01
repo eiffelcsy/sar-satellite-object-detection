@@ -227,9 +227,15 @@ as with the ViT; the ViT-only ones (`fusion_layers`, `vit_adapter`, `cls_input: 
 
 **RF-DETR track** (`rfdetr_track/`, `sbatchScriptRFDETR.sh`, its own `.venv-rfdetr`). A detection-pretrained
 detector trained entirely: `export_dataset.py` writes the data in RF-DETR's layout with train.py's held-out split,
-`train_rfdetr.py` fine-tunes RF-DETR Small / Medium at a fixed 512 px (checks the parameter budget, `--resume`),
-and `predict_rfdetr.py` scores the held-out split like train.py (per-class AP) or writes the submission zips. The
-image class is the class of the highest-scoring box.
+`train_rfdetr.py` fine-tunes RF-DETR Small / Medium / Large at a fixed 512 px (checks the parameter budget,
+`--resume`), and `predict_rfdetr.py` scores the held-out split like train.py (per-class AP) or writes the submission
+zips. The image class is the class of the highest-scoring box (or of the largest summed box score, or the image
+classifier's), and it can down-weight boxes of other classes; a held-out sweep picks the post-processing by delta-m.
+`export_dataset.py --repeat bridge=2 playground=2` oversamples hard classes as k17 does, and `--input amp_log_edge`
+uses the no-BM3D pseudo-RGB. `fusion.py` adds, through `train_rfdetr.py` flags: a frozen DINOv3 ViT-B fused into the
+projector output by zero-init 1x1 convs (`--dino`), DoRA / Convpass on it (`--dino-dora-rank`, `--dino-convpass-dim`),
+an image classifier on its tokens (`--image-cls-weight`), and a stride-8 P3 level with the pretrained P4-only weights
+remapped (`--p3`).
 
 **Post-processing.** `sweep_postprocess.py` (same flags as `train.py`, plus `--score-thresh` / `--nms-thresh` lists)
 re-scores a saved model on the held-out split for each score threshold x NMS IoU (x image-class re-scoring, below),

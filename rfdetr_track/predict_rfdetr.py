@@ -3,7 +3,8 @@ per-class AP) or a Codabench submission zip for the unlabelled val / test images
 
 The image class (macro-F1) comes from the detections, since every image holds one class: the class of the
 highest-scoring box (`--label-mode top`) or the class with the largest summed box score (`sum`, so one stray
-confident box cannot flip it). The image class is then a prior on the boxes: `--other-class-scale s` multiplies the
+confident box cannot flip it), or, for a run trained with --image-cls-weight (fusion.json next to the checkpoint),
+the image classifier's argmax (`cls`, the default there). The image class is then a prior on the boxes: `--other-class-scale s` multiplies the
 scores of boxes of every other class by s (1 = off, 0 = drop them), and `--single-class` relabels every box to it.
 One 512 px pass per image, no test-time augmentation.
 
@@ -25,9 +26,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import torch
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from make_submission import write_submission  # noqa: E402
 from sarbench.data import _course_train_dir, _holdout  # noqa: E402
 
@@ -59,13 +62,19 @@ def valid_detections(detections, names):
     return xyxy[keep], classes, detections.confidence[keep]
 
 
-def image_predictions(boxes, classes, scores, threshold, label_mode, other_scale, single_class, max_dets):
-    """valid_detections output -> (image label 0-8, boxes, classes, scores), the top max_dets after the prior."""
+def image_predictions(boxes, classes, scores, threshold, label_mode, other_scale, single_class, max_dets,
+                      cls_label=None):
+    """valid_detections output -> (image label 0-8, boxes, classes, scores), the top max_dets after the prior.
+    `cls_label`: the image classifier's label, used by label_mode 'cls'."""
+    if label_mode == 'cls' and cls_label is None:
+        raise ValueError("label mode 'cls' needs a checkpoint trained with an image classifier")
     kept = scores >= threshold
     boxes, classes, scores = boxes[kept], classes[kept], scores[kept]
     if not len(scores):
-        return 0, boxes, classes, scores
-    if label_mode == 'sum':
+        return (cls_label if label_mode == 'cls' else 0), boxes, classes, scores
+    if label_mode == 'cls':
+        label = cls_label
+    elif label_mode == 'sum':
         label = int(np.argmax(np.bincount(classes, weights=scores, minlength=len(CLASSES))))
     else:
         label = int(classes[np.argmax(scores)])
@@ -82,8 +91,9 @@ def collect(raw, images, setting, single_class, max_dets):
     """Apply one (threshold, label_mode, other_scale) setting to every image: labels, COCO detections, and the
     write_submission records."""
     labels, detections, sub_preds = [], [], {}
-    for im, (boxes, classes, scores) in zip(images, raw):
-        label, boxes, classes, scores = image_predictions(boxes, classes, scores, *setting, single_class, max_dets)
+    for im, (boxes, classes, scores, cls_label) in zip(images, raw):
+        label, boxes, classes, scores = image_predictions(boxes, classes, scores, *setting, single_class, max_dets,
+                                                          cls_label)
         labels.append(label)
         sx, sy = 512 / im['width'], 512 / im['height']  # write_submission takes 512 px input-space boxes
         sub_preds[im['file_name']] = (label, (boxes * [sx, sy, sx, sy]).tolist(), classes.tolist(), scores.tolist())
@@ -105,8 +115,9 @@ def main():
     p.add_argument('--split', default='val', help='submission_<split>.zip')
     p.add_argument('--input', choices=['raw', 'amp_log_edge'], default='raw', help='as export_dataset.py')
     p.add_argument('--threshold', type=float, nargs='+', default=[0.001], help='keep boxes scoring at least this')
-    p.add_argument('--label-mode', choices=['top', 'sum'], nargs='+', default=['top'],
-                   help='image class: top-scoring box, or largest summed box score per class')
+    p.add_argument('--label-mode', choices=['top', 'sum', 'cls'], nargs='+', default=None,
+                   help='image class: top-scoring box, largest summed box score per class, or the image classifier '
+                        '(default: cls when the checkpoint has one, else top)')
     p.add_argument('--other-class-scale', type=float, nargs='+', default=[1.0],
                    help='multiply the scores of boxes not of the image class (1 = off, 0 = drop them)')
     p.add_argument('--max-dets', type=int, default=100, help='per image, as COCO scores')
@@ -115,16 +126,27 @@ def main():
     args = p.parse_args()
     if (args.data is None) == (args.images_json is None):
         raise SystemExit('pass exactly one of --data (held-out metrics) or --images-json (submission)')
-    settings = [(t, m, o) for t in args.threshold for m in args.label_mode for o in args.other_class_scale]
-    if args.images_json is not None and len(settings) > 1:
-        raise SystemExit('a submission takes one --threshold / --label-mode / --other-class-scale; '
-                         'sweep them with --data first')
 
+    import fusion
+    spec = fusion.install(fusion.load_spec(args.checkpoint.parent))  # the run's DINOv3 branch, if it had one
     from rfdetr import RFDETR
     model = RFDETR.from_checkpoint(str(args.checkpoint))
     names = model.class_names
     if not set(names) <= set(CLASSES):
         raise SystemExit(f'checkpoint classes {names} are not the course classes')
+    has_cls = bool(spec and spec['image_cls_weight'])
+    if args.label_mode is None:
+        args.label_mode = ['cls'] if has_cls else ['top']
+    if 'cls' in args.label_mode and not has_cls:
+        raise SystemExit(f"--label-mode cls: {args.checkpoint.parent} has no fusion.json with an image classifier")
+    settings = [(t, m, o) for t in args.threshold for m in args.label_mode for o in args.other_class_scale]
+    if args.images_json is not None and len(settings) > 1:
+        raise SystemExit('a submission takes one --threshold / --label-mode / --other-class-scale; '
+                         'sweep them with --data first')
+    captured = []  # image-classifier logits of each forward pass, in batch order
+    if has_cls:
+        model.model.model.backbone[0].register_forward_hook(
+            lambda module, inputs, output: captured.append(module._image_logits.detach().float().cpu()))
 
     if args.data is not None:
         train_dir = _course_train_dir(args.data)
@@ -150,7 +172,15 @@ def main():
         inputs = [load_image(path, args.input) for path in paths[start:start + args.batch]]
         outputs = model.predict(inputs, threshold=min(args.threshold), include_source_image=False)
         outputs = outputs if isinstance(outputs, list) else [outputs]
-        raw += [valid_detections(out, names) for out in outputs]
+        if has_cls:
+            logits = torch.cat(captured)
+            captured.clear()
+            if len(logits) != len(outputs):
+                raise RuntimeError(f'{len(logits)} classifier outputs for {len(outputs)} images')
+            cls_labels = [CLASSES.index(names[int(k)]) for k in logits.argmax(dim=1)]
+        else:
+            cls_labels = [None] * len(outputs)
+        raw += [(*valid_detections(out, names), c) for out, c in zip(outputs, cls_labels)]
         print(f'{min(start + args.batch, len(images))}/{len(images)} images', flush=True)
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -167,7 +197,8 @@ def main():
             print(f'threshold {setting[0]:g} label {setting[1]} other-class x{setting[2]:g}: ' +
                   ' '.join(f'{k} {metrics[k]:.4f}' for k in ('delta_m', 'macro_f1', 'mAP', 'AP50', 'AP75')),
                   flush=True)
-        (best, metrics, detections, sub_preds) = max(results, key=lambda r: r[1]['delta_m'])
+        # nan (e.g. a split missing a class) ranks last
+        (best, metrics, detections, sub_preds) = max(results, key=lambda r: np.nan_to_num(r[1]['delta_m'], nan=-np.inf))
         print(f'best: --threshold {best[0]:g} --label-mode {best[1]} --other-class-scale {best[2]:g}')
         print(' '.join(f'{k} {metrics[k]:.4f}' for k in ('delta_m', 'macro_f1', 'mAP', 'AP50', 'AP75', 'AP_small',
                                                           'AP_medium', 'AP_large')))

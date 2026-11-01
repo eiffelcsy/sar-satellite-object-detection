@@ -185,16 +185,20 @@ MODEL=runs/giou_d17_full_train_j1_200ep/model.pt
 module load Python/3.12.8-GCCcore-13.3.0
 deactivate; source .venv-rfdetr/bin/activate
 # Which run: its best EMA checkpoint (or checkpoint_best_total.pth), the input it was trained on (export_dataset.py's
-# --input: raw or amp_log_edge) and a tag for the output dirs.
-# RF=runs/rfdetr_small_raw/checkpoint_best_ema.pth; INPUT=raw; TAG=rfdetr_small
-RF=runs/rfdetr_large_ale_repeat/checkpoint_best_ema.pth; INPUT=amp_log_edge; TAG=rfdetr_large_ale_repeat
+# --input: raw or amp_log_edge), a tag for the output dirs, and the image-label modes to sweep (cls only for the runs
+# trained with an image classifier, R7-R9; their DINOv3 settings come from fusion.json next to the checkpoint).
+# RF=runs/rfdetr_small_raw/checkpoint_best_ema.pth; INPUT=raw; TAG=rfdetr_small; LABELS="top sum"
+RF=runs/rfdetr_large_ale_repeat/checkpoint_best_ema.pth; INPUT=amp_log_edge; TAG=rfdetr_large_ale_repeat; LABELS="top sum"
+# RF=runs/rfdetr_large_ale_repeat_dino/checkpoint_best_ema.pth; INPUT=amp_log_edge; TAG=rfdetr_large_ale_repeat_dino; LABELS="cls top sum"
+# RF=runs/rfdetr_large_ale_repeat_dino_dora/checkpoint_best_ema.pth; INPUT=amp_log_edge; TAG=rfdetr_large_ale_repeat_dino_dora; LABELS="cls top sum"
+# RF=runs/rfdetr_large_ale_repeat_dino_dora_p3/checkpoint_best_ema.pth; INPUT=amp_log_edge; TAG=rfdetr_large_ale_repeat_dino_dora_p3; LABELS="cls top sum"
 #     a) Held-out sweep (same split and scoring as train.py; compare with k19 mAP .4817 / F1 .9595): one prediction
 #        pass, then every threshold x image-label mode x other-class score scale, ranked by delta-m. The image class
 #        is a prior on the boxes: other-class boxes get their scores scaled (1 = off, 0 = dropped). The best setting's
 #        metrics, predictions and zip go to --out; metrics.json holds the whole sweep under "sweep".
 HELDOUT=runs/eval_heldout_$TAG/sweep
 srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --input "$INPUT" --data "$DATA" --out "$HELDOUT" \
-  --threshold 0.001 0.0001 0.00001 --label-mode top sum --other-class-scale 1 0.3 0.1 0.03 0 || exit 1
+  --threshold 0.001 0.0001 0.00001 --label-mode $LABELS --other-class-scale 1 0.3 0.1 0.03 0 || exit 1
 #     b) Official val (and test) predictions -> submission zips, at a)'s best setting (read from its metrics.json).
 BEST=$(python -c "import json; b = json.load(open('$HELDOUT/metrics.json'))['best']; print(f\"--threshold {b['threshold']} --label-mode {b['label_mode']} --other-class-scale {b['other_class_scale']}\")")
 echo "RF-DETR post-processing from the held-out sweep: $BEST"
