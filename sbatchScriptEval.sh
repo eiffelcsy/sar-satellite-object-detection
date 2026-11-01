@@ -66,10 +66,10 @@ MODEL=runs/giou_d17_full_train_j1_200ep/model.pt
 #   --data "$DATA" --out runs/eval_heldout
 
 # 2) Official val split (unlabelled val/images.json): predictions only -> submission_val.zip
-# srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
-#   --score-thresh 0.00001 --nms-thresh 0.8 \
-#   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
-#   --preprocess-cache preprocess_cache/val
+srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
+  --score-thresh 0.00001 --nms-thresh 0.85 \
+  --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
+  --preprocess-cache preprocess_cache/val
 
 # 3) Official test split (unlabelled test/images.json): predictions only -> submission_test.zip
 # srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
@@ -164,17 +164,17 @@ MODEL=runs/giou_d17_full_train_j1_200ep/model.pt
 #     a) Post-processing check on the held-out split, with per-class AP: confirm 1e-5 / NMS 0.8 is still best for
 #        this model (context pooling and size-aware RPN positives change the scores). Compare with j1 (mAP .4758,
 #        bridge .054, playground .171) and k17.
-K19=configs/ablations/k19_bridge_stack.yaml
-K19_MODEL=runs/giou_k19_bridge_stack/model.pt
+# K19=configs/ablations/k19_bridge_stack.yaml
+# K19_MODEL=runs/giou_k19_bridge_stack/model.pt
 # srun --gres=gpu:1 python sweep_postprocess.py --config "$K19" --load "$K19_MODEL" --data "$DATA" --workers 4 \
 #   --score-thresh 0.0001 0.00001 --nms-thresh 0.75 0.8 0.85
 #     b) Where bridges / playgrounds are still lost (RPN vs RoI head); compare "lost head" with j1 (.337 / .353).
 # srun --gres=gpu:1 python diagnose_recall.py --config "$K19" --load "$K19_MODEL" --data "$DATA" --workers 4 \
 #   --score-thresh 0.00001 --nms-thresh 0.8 --top-k 300
-#     c) Official val and test predictions -> submission zips. Change --score-thresh / --nms-thresh to a)'s winner.
-srun --gres=gpu:1 python train.py --config "$K19" --load "$K19_MODEL" --score-thresh 0.00001 --nms-thresh 0.85 \
-  --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val_k19/ \
-  --preprocess-cache preprocess_cache/val
-# srun --gres=gpu:1 python train.py --config "$K19" --load "$K19_MODEL" --score-thresh 0.00001 --nms-thresh 0.8 \
+#     c) Official val and test predictions -> submission zips, at a)'s winner (1e-5 / NMS 0.85: mAP .4817).
+# srun --gres=gpu:1 python train.py --config "$K19" --load "$K19_MODEL" --score-thresh 0.00001 --nms-thresh 0.85 \
+#   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val_k19/ \
+#   --preprocess-cache preprocess_cache/val
+# srun --gres=gpu:1 python train.py --config "$K19" --load "$K19_MODEL" --score-thresh 0.00001 --nms-thresh 0.85 \
 #   --predict "$ROOT/test/images.json" --predict-split test --out runs/eval_test_k19/ \
 #   --preprocess-cache preprocess_cache/test
