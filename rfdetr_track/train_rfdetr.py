@@ -37,6 +37,9 @@ def main():
     args = p.parse_args()
     if args.resolution > 512:
         raise SystemExit('the competition limit is 512 px')
+    if not (args.dataset / 'train' / '_annotations.coco.json').exists():
+        raise SystemExit(f'{args.dataset} has no train/_annotations.coco.json: run rfdetr_track/export_dataset.py '
+                         f'--out {args.dataset} first (sbatchScriptRFDETR.sh step R1)')
 
     import rfdetr
     model = getattr(rfdetr, VARIANTS[args.variant])()  # downloads the pretrained weights on first use

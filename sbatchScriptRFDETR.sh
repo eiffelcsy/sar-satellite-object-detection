@@ -54,9 +54,10 @@ source .venv-rfdetr/bin/activate
 ROOT=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data
 DATA="$ROOT/train"
 
-# R1) Export the course data in RF-DETR's layout, same held-out split as train.py (CPU only, a few minutes;
-#     raw links the images, amp_log_edge writes no-BM3D pseudo-RGB PNGs). Run once per input / split.
-# srun python rfdetr_track/export_dataset.py --data "$DATA" --out rfdetr_data/heldout_raw
+# R1) Export the course data in RF-DETR's layout, same held-out split as train.py (CPU only, under a minute for
+#     raw, which links the images; amp_log_edge writes no-BM3D pseudo-RGB PNGs). It must run before R2; it skips
+#     files that already exist, so leaving it on is harmless.
+srun python rfdetr_track/export_dataset.py --data "$DATA" --out rfdetr_data/heldout_raw
 # srun python rfdetr_track/export_dataset.py --data "$DATA" --out rfdetr_data/full_raw --val-fraction 0
 
 # R2) RF-DETR Small (DINOv2 ViT-S windowed, 512 px native, COCO-pretrained, every weight trained) on the held-out
