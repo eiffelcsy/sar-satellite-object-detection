@@ -141,16 +141,16 @@ MODEL=runs/giou_d17_full_train_j1_200ep/model.pt
 # 12) Per-class score-threshold sweep on j1: the sweep now prints per-class AP for every setting, so check whether
 #     the very low thresholds lift bridge (AP .052, recall@.5 .18) and playground (.165, .31), whose true boxes score
 #     low. NMS 0.8 as in section 11; change it to your section 10 winner.
-srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/k14_rpn_size_adaptive.yaml \
-  --load runs/giou_k14_rpn_size_adaptive/model.pt --data "$DATA" --workers 4 \
-  --score-thresh 0.00001 --nms-thresh 0.8
+# srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/k14_rpn_size_adaptive.yaml \
+#   --load runs/giou_k14_rpn_size_adaptive/model.pt --data "$DATA" --workers 4 \
+#   --score-thresh 0.00001 --nms-thresh 0.8
 
 # 13) Where GT boxes are lost on j1 (held-out split): per class, the share never proposed by the RPN vs proposed but
 #     not detected as its class by the RoI head. Run at the low score threshold so the head's low-ranked boxes count.
 #     Writes runs/giou_j1_roi_fused/recall_diagnosis.json (one record per GT box: size, aspect, IoUs, score).
-srun --gres=gpu:1 python diagnose_recall.py --config configs/ablations/k14_rpn_size_adaptive.yaml \
-  --load runs/giou_k14_rpn_size_adaptive/model.pt --data "$DATA" --workers 4 \
-  --score-thresh 0.00001 --nms-thresh 0.8 --top-k 300
+# srun --gres=gpu:1 python diagnose_recall.py --config configs/ablations/k14_rpn_size_adaptive.yaml \
+#   --load runs/giou_k14_rpn_size_adaptive/model.pt --data "$DATA" --workers 4 \
+#   --score-thresh 0.00001 --nms-thresh 0.8 --top-k 300
 
 # 14) Decides the second final run: k3 (IoU branch) at j1's tuned post-processing, across IoU ranking exponents
 #     (alpha 0 = k3 ranked by class score alone). Compare the best row with j1 at score 1e-5 / NMS 0.8 (mAP .4758):
@@ -158,3 +158,23 @@ srun --gres=gpu:1 python diagnose_recall.py --config configs/ablations/k14_rpn_s
 # srun --gres=gpu:1 python sweep_postprocess.py --config configs/ablations/k3_iou_aware.yaml \
 #   --load runs/giou_k3_iou_aware/model.pt --data "$DATA" --workers 4 \
 #   --score-thresh 0.00001 --nms-thresh 0.8 --iou-alpha 0 0.25 0.5 1 2
+
+# 15) k19 (the bridge / playground stack, trained with the held-out split) as the submission model. Always pass its
+#     config: it builds the context RoI pooler (roi_context_scale) that model.pt's weights need.
+#     a) Post-processing check on the held-out split, with per-class AP: confirm 1e-5 / NMS 0.8 is still best for
+#        this model (context pooling and size-aware RPN positives change the scores). Compare with j1 (mAP .4758,
+#        bridge .054, playground .171) and k17.
+K19=configs/ablations/k19_bridge_stack.yaml
+K19_MODEL=runs/giou_k19_bridge_stack/model.pt
+srun --gres=gpu:1 python sweep_postprocess.py --config "$K19" --load "$K19_MODEL" --data "$DATA" --workers 4 \
+  --score-thresh 0.0001 0.00001 --nms-thresh 0.75 0.8 0.85
+#     b) Where bridges / playgrounds are still lost (RPN vs RoI head); compare "lost head" with j1 (.337 / .353).
+srun --gres=gpu:1 python diagnose_recall.py --config "$K19" --load "$K19_MODEL" --data "$DATA" --workers 4 \
+  --score-thresh 0.00001 --nms-thresh 0.8 --top-k 300
+#     c) Official val and test predictions -> submission zips. Change --score-thresh / --nms-thresh to a)'s winner.
+# srun --gres=gpu:1 python train.py --config "$K19" --load "$K19_MODEL" --score-thresh 0.00001 --nms-thresh 0.8 \
+#   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val_k19/ \
+#   --preprocess-cache preprocess_cache/val
+# srun --gres=gpu:1 python train.py --config "$K19" --load "$K19_MODEL" --score-thresh 0.00001 --nms-thresh 0.8 \
+#   --predict "$ROOT/test/images.json" --predict-split test --out runs/eval_test_k19/ \
+#   --preprocess-cache preprocess_cache/test
