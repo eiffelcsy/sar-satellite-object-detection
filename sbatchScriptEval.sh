@@ -185,16 +185,17 @@ MODEL=runs/giou_d17_full_train_j1_200ep/model.pt
 module load Python/3.12.8-GCCcore-13.3.0
 deactivate; source .venv-rfdetr/bin/activate
 RF=runs/rfdetr_small_raw/checkpoint_best_ema.pth   # or checkpoint_best_total.pth
-#     a) Held-out metrics (same split and scoring as train.py; compare with k19 mAP .4817 / F1 .9595), at two score
-#        cut-offs, then with every box relabelled to the image class.
-# srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" \
-#   --out runs/eval_heldout_rfdetr_small/t1e-3 --threshold 0.001
-# srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" \
-#   --out runs/eval_heldout_rfdetr_small/t1e-5 --threshold 0.00001
-# srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" \
-#   --out runs/eval_heldout_rfdetr_small/t1e-3_single --threshold 0.001 --single-class
-#     b) Official val and test predictions -> submission zips, with a)'s best --threshold / --single-class.
-srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --threshold 0.001 \
+#     a) Held-out sweep (same split and scoring as train.py; compare with k19 mAP .4817 / F1 .9595): one prediction
+#        pass, then every threshold x image-label mode x other-class score scale, ranked by delta-m. The image class
+#        is a prior on the boxes: other-class boxes get their scores scaled (1 = off, 0 = dropped). The best setting's
+#        metrics, predictions and zip go to --out; metrics.json holds the whole sweep under "sweep".
+HELDOUT=runs/eval_heldout_rfdetr_small/sweep
+srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" --out "$HELDOUT" \
+  --threshold 0.001 0.0001 0.00001 --label-mode top sum --other-class-scale 1 0.3 0.1 0.03 0 || exit 1
+#     b) Official val (and test) predictions -> submission zips, at a)'s best setting (read from its metrics.json).
+BEST=$(python -c "import json; b = json.load(open('$HELDOUT/metrics.json'))['best']; print(f\"--threshold {b['threshold']} --label-mode {b['label_mode']} --other-class-scale {b['other_class_scale']}\")")
+echo "RF-DETR post-processing from the held-out sweep: $BEST"
+srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" $BEST \
   --images-json "$ROOT/val/images.json" --split val --out runs/eval_val_rfdetr_small
-# srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --threshold 0.001 \
+# srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" $BEST \
 #   --images-json "$ROOT/test/images.json" --split test --out runs/eval_test_rfdetr_small
