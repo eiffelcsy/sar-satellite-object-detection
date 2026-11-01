@@ -166,15 +166,15 @@ MODEL=runs/giou_d17_full_train_j1_200ep/model.pt
 #        bridge .054, playground .171) and k17.
 K19=configs/ablations/k19_bridge_stack.yaml
 K19_MODEL=runs/giou_k19_bridge_stack/model.pt
-srun --gres=gpu:1 python sweep_postprocess.py --config "$K19" --load "$K19_MODEL" --data "$DATA" --workers 4 \
-  --score-thresh 0.0001 0.00001 --nms-thresh 0.75 0.8 0.85
+# srun --gres=gpu:1 python sweep_postprocess.py --config "$K19" --load "$K19_MODEL" --data "$DATA" --workers 4 \
+#   --score-thresh 0.0001 0.00001 --nms-thresh 0.75 0.8 0.85
 #     b) Where bridges / playgrounds are still lost (RPN vs RoI head); compare "lost head" with j1 (.337 / .353).
-srun --gres=gpu:1 python diagnose_recall.py --config "$K19" --load "$K19_MODEL" --data "$DATA" --workers 4 \
-  --score-thresh 0.00001 --nms-thresh 0.8 --top-k 300
+# srun --gres=gpu:1 python diagnose_recall.py --config "$K19" --load "$K19_MODEL" --data "$DATA" --workers 4 \
+#   --score-thresh 0.00001 --nms-thresh 0.8 --top-k 300
 #     c) Official val and test predictions -> submission zips. Change --score-thresh / --nms-thresh to a)'s winner.
-# srun --gres=gpu:1 python train.py --config "$K19" --load "$K19_MODEL" --score-thresh 0.00001 --nms-thresh 0.8 \
-#   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val_k19/ \
-#   --preprocess-cache preprocess_cache/val
+srun --gres=gpu:1 python train.py --config "$K19" --load "$K19_MODEL" --score-thresh 0.00001 --nms-thresh 0.8 \
+  --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val_k19/ \
+  --preprocess-cache preprocess_cache/val
 # srun --gres=gpu:1 python train.py --config "$K19" --load "$K19_MODEL" --score-thresh 0.00001 --nms-thresh 0.8 \
 #   --predict "$ROOT/test/images.json" --predict-split test --out runs/eval_test_k19/ \
 #   --preprocess-cache preprocess_cache/test
