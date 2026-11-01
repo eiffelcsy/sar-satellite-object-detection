@@ -39,8 +39,10 @@ def image_predictions(detections, names, max_dets, single_class):
     """supervision Detections (original pixels) -> (image label 0-8, boxes xyxy, classes 0-8, scores), top max_dets.
 
     The head has len(names) + 1 outputs (the last is the no-object slot, never a training label), and RF-DETR's
-    top-k runs over all of them, so a low threshold can return that slot: its boxes are dropped."""
-    keep = np.flatnonzero(detections.class_id < len(names))
+    top-k runs over all of them, so a low threshold can return that slot: its boxes are dropped. So are boxes
+    clipped to zero width or height at the image edge, which the submission rejects."""
+    xyxy = detections.xyxy
+    keep = np.flatnonzero((detections.class_id < len(names)) & (xyxy[:, 2] > xyxy[:, 0]) & (xyxy[:, 3] > xyxy[:, 1]))
     order = keep[np.argsort(-detections.confidence[keep])][:max_dets]
     boxes = detections.xyxy[order]
     classes = np.array([CLASSES.index(names[int(c)]) for c in detections.class_id[order]], dtype=int)

@@ -187,12 +187,12 @@ deactivate; source .venv-rfdetr/bin/activate
 RF=runs/rfdetr_small_raw/checkpoint_best_ema.pth   # or checkpoint_best_total.pth
 #     a) Held-out metrics (same split and scoring as train.py; compare with k19 mAP .4817 / F1 .9595), at two score
 #        cut-offs, then with every box relabelled to the image class.
-srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" \
-  --out runs/eval_heldout_rfdetr_small/t1e-3 --threshold 0.001
-srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" \
-  --out runs/eval_heldout_rfdetr_small/t1e-5 --threshold 0.00001
-srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" \
-  --out runs/eval_heldout_rfdetr_small/t1e-3_single --threshold 0.001 --single-class
+# srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" \
+#   --out runs/eval_heldout_rfdetr_small/t1e-3 --threshold 0.001
+# srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" \
+#   --out runs/eval_heldout_rfdetr_small/t1e-5 --threshold 0.00001
+# srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" \
+#   --out runs/eval_heldout_rfdetr_small/t1e-3_single --threshold 0.001 --single-class
 #     b) Official val and test predictions -> submission zips, with a)'s best --threshold / --single-class.
 srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --threshold 0.001 \
   --images-json "$ROOT/val/images.json" --split val --out runs/eval_val_rfdetr_small
