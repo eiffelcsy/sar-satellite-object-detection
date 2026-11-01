@@ -181,6 +181,8 @@ MODEL=runs/giou_d17_full_train_j1_200ep/model.pt
 
 # 16) RF-DETR (rfdetr_track/, trained by sbatchScriptRFDETR.sh R2). It needs its own environment, so switch venvs
 #     first; the Faster R-CNN sections above need .venv. Outputs go straight into --out (no <run_name>/ subdir).
+# .venv-rfdetr was built with this module's Python (it links libpython3.12.so), so load it first.
+module load Python/3.12.8-GCCcore-13.3.0
 deactivate; source .venv-rfdetr/bin/activate
 RF=runs/rfdetr_small_raw/checkpoint_best_ema.pth   # or checkpoint_best_total.pth
 #     a) Held-out metrics (same split and scoring as train.py; compare with k19 mAP .4817 / F1 .9595), at two score

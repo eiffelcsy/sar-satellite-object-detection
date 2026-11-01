@@ -49,6 +49,8 @@
 #   python3 -m venv .venv-rfdetr && source .venv-rfdetr/bin/activate
 #   pip install "rfdetr[train]==1.11.2"
 #   python -c "from rfdetr import RFDETRSmall, RFDETRMedium; RFDETRSmall(); RFDETRMedium()"   # caches the weights
+# .venv-rfdetr was built with this module's Python (it links libpython3.12.so), so load it first.
+module load Python/3.12.8-GCCcore-13.3.0
 source .venv-rfdetr/bin/activate
 
 ROOT=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data
