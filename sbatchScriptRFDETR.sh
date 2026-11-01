@@ -95,8 +95,9 @@ DATA="$ROOT/train"
 # R6) RF-DETR Large (2026: ViT-S windowed, 4 decoder layers, 33.9M, every weight trained) at 512 px (native 704; the
 #     positional encoding is resized), on the no-BM3D pseudo-RGB input (amplitude, log-amplitude, Sobel edges) with
 #     k17's hard-class oversampling: every train image once, bridge / playground images twice (~10.6k images per
-#     epoch, +26% time). Schedule: train_rfdetr.py's defaults (100 epochs, LR 1e-4 / encoder 1.5e-4, 1 warmup
-#     epoch, LR drop at epoch 100, i.e. none). Small at 80 epochs (drop at 65): mAP .4482, bridge .035, playground .091.
+#     epoch, +26% time). Schedule: 200 epochs, LR 1e-4 / encoder 1.5e-4 (1 warmup epoch) until epoch 162, then 10x
+#     lower for the last 38: the Small run's proportion (drop at 65 of 80). 200 epochs take several 24 h jobs:
+#     resubmit unchanged, --resume continues. Small at 80 epochs (drop at 65): mAP .4482, bridge .035, playground .091.
 #     Large's COCO weights are not cached yet: on the login node, once:
 #       python -c "from rfdetr import RFDETRLarge; RFDETRLarge()"
 #     a) Export (CPU; writes ~10.4k PNGs for amp_log_edge, the repeats are links; skips files that exist).
@@ -104,4 +105,5 @@ srun python rfdetr_track/export_dataset.py --data "$DATA" --out rfdetr_data/held
   --input amp_log_edge --repeat bridge=2 playground=2
 #     b) Train. --resume: resubmit unchanged after a time-limit kill (continues from last.ckpt).
 srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_ale_repeat \
-  --output runs/rfdetr_large_ale_repeat --variant large --batch-size 16 --workers 4 --resume --wandb
+  --output runs/rfdetr_large_ale_repeat --variant large --epochs 200 --lr-drop 162 --batch-size 16 --workers 4 \
+  --resume --wandb
