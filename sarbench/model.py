@@ -1,4 +1,5 @@
-"""The multi-task model: one shared ViT backbone feeds a classification head and a Faster R-CNN detector.
+"""The multi-task model: one shared backbone (the DINOv3 ViT with a ViTDet neck, or the DINOv3 ConvNeXt with an FPN)
+feeds a classification head and a Faster R-CNN detector.
 
 Configurable pieces (`model.*` in the YAML): `detail_stem` (real stride-4 detail for P2), `fusion_layers`
 (learnable fusion of several ViT blocks before the neck), `input_adapter` (ImageNet norm + learnable 1x1 conv +
@@ -19,11 +20,12 @@ from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor, TwoMLPHead
 from torchvision.models.detection.image_list import ImageList
 from torchvision.models.detection.rpn import RegionProposalNetwork, RPNHead
-from torchvision.ops import MultiScaleRoIAlign, roi_align
+from torchvision.ops import FeaturePyramidNetwork, MultiScaleRoIAlign, roi_align
+from torchvision.ops.feature_pyramid_network import LastLevelMaxPool
 from torchvision.ops.poolers import _filter_input, _setup_scales
 
 from .adapters import adapt_backbone
-from .backbones import DINOv3
+from .backbones import DINOv3, DINOv3ConvNeXt
 from .heads import (RESCORE_MODES, CascadeRoIHeads, CentredAnchorGenerator, ConvFCBoxHead, DetRoIHeads,
                     box_similarity as make_similarity, size_adaptive_similarity)
 from .vit_adapter import ViTAdapter
@@ -69,6 +71,18 @@ class SimpleFeaturePyramid(nn.Module):
         levels = [project(rescale(x)) for rescale, project in zip(self.rescale, self.project)]
         levels.append(F.max_pool2d(levels[-1], 1, stride=2))  # stride 64, as torchvision's FPN LastLevelMaxPool
         return OrderedDict(zip(['0', '1', '2', '3', 'pool'], levels))
+
+
+class FPNNeck(nn.Module):
+    """FPN (Lin et al., 2017) over a hierarchical backbone's stride-4 / 8 / 16 / 32 maps -> 256-channel P2-P5 plus
+    a stride-64 max-pooled level, named like SimpleFeaturePyramid's outputs ('0'-'3', 'pool')."""
+
+    def __init__(self, in_channels, channels=256):
+        super().__init__()
+        self.fpn = FeaturePyramidNetwork(list(in_channels), channels, extra_blocks=LastLevelMaxPool())
+
+    def forward(self, maps):
+        return self.fpn(OrderedDict((str(i), m) for i, m in enumerate(maps)))
 
 
 class ConvStem(nn.Module):
@@ -319,13 +333,18 @@ class MultiTaskModel(nn.Module):
             raise ValueError(f"unknown cls_input '{cls_input}'; available: mean, cls_mean")
         if cls_input == 'cls_mean' and fusion_layers:
             raise ValueError('cls_input cls_mean reads the final CLS token; it does not combine with fusion_layers')
+        # A hierarchical backbone (DINOv3ConvNeXt) gives stage maps and a pooled vector: FPN neck, no ViT options.
+        self.hierarchical = getattr(backbone, 'hierarchical', False)
+        if self.hierarchical and (fusion_layers or vit_adapter or cls_input != 'mean'):
+            raise ValueError('fusion_layers, vit_adapter and cls_input cls_mean need the ViT backbone')
         self.cls_input = cls_input
         cls_dim = backbone.embed_dim * (2 if cls_input == 'cls_mean' else 1)
         self.cls_head = nn.Sequential(nn.LayerNorm(cls_dim), nn.Linear(cls_dim, num_classes))
         # cls_detach: the classifier reads the pooled tokens without back-propagating into the backbone, so DoRA,
         # Convpass and the input adapter train for detection only (mAP is worth ~3.7x macro-F1 per point in delta-m).
         self.cls_detach = cls_detach
-        self.neck = SimpleFeaturePyramid(backbone.embed_dim, patch_size=self.patch_size)
+        self.neck = (FPNNeck(backbone.channels) if self.hierarchical
+                     else SimpleFeaturePyramid(backbone.embed_dim, patch_size=self.patch_size))
         self.detail_stem = ConvStem(backbone.in_chans, **(detail_stem_params or {})) if detail_stem else None
         self.input_adapter = InputAdapter(backbone.in_chans) if input_adapter else None
         self.wst_stem = WSTStem(**(wst_params or {})) if wst_stem else None
@@ -452,7 +471,9 @@ class MultiTaskModel(nn.Module):
         backbone_images = self.input_adapter(images) if self.input_adapter is not None else images
         if self.vit_adapter is not None:  # the spatial prior runs first: its injectors act inside the backbone
             self.vit_adapter.prepare(images)
-        if self.cls_input == 'cls_mean':
+        if self.hierarchical:  # stage maps -> FPN; the classifier reads the pooled vector
+            maps, pooled = self.backbone(backbone_images)
+        elif self.cls_input == 'cls_mean':
             prefix = self.backbone.num_prefix_tokens
             all_tokens = self.backbone(backbone_images, with_prefix=True)
             tokens = all_tokens[:, prefix:]
@@ -461,8 +482,11 @@ class MultiTaskModel(nn.Module):
             tokens = self._backbone_tokens(backbone_images)
             pooled = tokens.mean(dim=1)
         logits = self.cls_head(pooled.detach() if self.cls_detach else pooled)
-        h, w = images.shape[-2] // self.patch_size, images.shape[-1] // self.patch_size  # one token per patch
-        features = self.neck(tokens.transpose(1, 2).unflatten(2, (h, w)))  # tokens as a [B, 768, h, w] map
+        if self.hierarchical:
+            features = self.neck(maps)
+        else:
+            h, w = images.shape[-2] // self.patch_size, images.shape[-1] // self.patch_size  # one token per patch
+            features = self.neck(tokens.transpose(1, 2).unflatten(2, (h, w)))  # tokens as a [B, 768, h, w] map
         if self.vit_adapter is not None:  # the SPM features (strides 4-32) added to P2-P5
             for name, extra in zip(('0', '1', '2', '3'), self.vit_adapter.outputs()):
                 features[name] = features[name] + extra.to(features[name].dtype)
@@ -487,13 +511,18 @@ class MultiTaskModel(nn.Module):
 def build_model(args):
     """DINOv3 + DoRA (+ the per-block capacity options) + heads, on the CPU. Returns (model, ids of pretrained
     backbone parameters), so the optimizer can give unfrozen pretrained weights their own learning rate."""
-    backbone = DINOv3(pretrained=args.pretrained, **args.backbone_kwargs)
-    pretrained_ids = {id(p) for p in backbone.parameters()}
-    conv = args.conv_adapters or {}
-    adapt_backbone(backbone, targets=args.peft_targets, rank=args.peft_kwargs.get('rank', 32),
-                   alpha=args.peft_kwargs.get('alpha', 32), rank_overrides=args.rank_overrides,
-                   full_blocks=args.full_blocks, conv_layers=conv.get('layers', ()), conv_dim=conv.get('dim', 128),
-                   conv_kernel=conv.get('kernel', 'dense'), conv_placement=conv.get('placement', 'sequential'))
+    if getattr(args, 'backbone_name', 'dinov3') == 'dinov3_convnext':  # trained entirely: no DoRA, no freezing
+        backbone = DINOv3ConvNeXt(pretrained=args.pretrained, **args.backbone_kwargs)
+        pretrained_ids = {id(p) for p in backbone.parameters()}  # train.unfrozen_lr
+    else:
+        backbone = DINOv3(pretrained=args.pretrained, **args.backbone_kwargs)
+        pretrained_ids = {id(p) for p in backbone.parameters()}
+        conv = args.conv_adapters or {}
+        adapt_backbone(backbone, targets=args.peft_targets, rank=args.peft_kwargs.get('rank', 32),
+                       alpha=args.peft_kwargs.get('alpha', 32), rank_overrides=args.rank_overrides,
+                       full_blocks=args.full_blocks, conv_layers=conv.get('layers', ()),
+                       conv_dim=conv.get('dim', 128), conv_kernel=conv.get('kernel', 'dense'),
+                       conv_placement=conv.get('placement', 'sequential'))
     model = MultiTaskModel(backbone, detail_stem=args.detail_stem, fusion_layers=args.fusion_layers,
                            giou_weight=args.giou_weight, roi_sampling_ratio=args.roi_sampling_ratio,
                            roi_output_size=args.roi_output_size, input_adapter=args.input_adapter,

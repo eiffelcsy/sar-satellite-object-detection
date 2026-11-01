@@ -5,3 +5,5 @@ __pycache__/
 .venv/
 *.out
 data/
+rfdetr_data/
+.venv-rfdetr/

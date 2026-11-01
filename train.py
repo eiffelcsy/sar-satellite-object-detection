@@ -17,6 +17,7 @@ from sarbench.config import DEFAULTS, load_config
 from sarbench.data import (RepeatFactorSampler, SARImages, SARMultiTask, collate, collate_images, split_available,
                            to_original_xywh)
 from sarbench.adapters import dora_up_weights
+from sarbench.checkpoint import load_checkpoint, save_checkpoint
 from sarbench.ema import ModelEMA
 from sarbench.metrics import classification_metrics, detection_metrics
 from sarbench.model import MAX_TOTAL_PARAMETERS, MAX_TRAINABLE_PARAMETERS, build_model, parameter_counts
@@ -66,6 +67,11 @@ def parse_args(argv=None):
                    help='no weight decay on 1-D parameters (biases, norm weights, DoRA magnitudes, LayerScale)')
     p.add_argument('--eval-every', type=int, default=cfg['eval_every'],
                    help='validate every N epochs, and after the last one')
+    p.add_argument('--checkpoint-every', type=int, default=cfg['checkpoint_every'],
+                   help='write <run dir>/last.pt every N epochs (0: never), so --resume can continue the run')
+    p.add_argument('--resume', action='store_true',
+                   help='continue from <run dir>/last.pt if it exists (else start fresh): resubmit the same command '
+                        'with --resume after the job hit its time limit')
     p.add_argument('--workers', type=int, default=cfg['workers'])
     p.add_argument('--limit', type=int, default=cfg['limit'],
                    help='use only the first N images of every split (quick checks)')
@@ -135,8 +141,8 @@ def parse_args(argv=None):
                    help='defaults to the run name')
     args = p.parse_args(argv)
     # Backbone, adapter and loss options come from the config only.
-    for key in ('pretrained', 'backbone_kwargs', 'peft_kwargs', 'peft_targets', 'rank_overrides', 'full_blocks',
-                'conv_adapters', 'giou_weight', 'roi_sampling_ratio', 'roi_output_size', 'wst_params',
+    for key in ('backbone_name', 'pretrained', 'backbone_kwargs', 'peft_kwargs', 'peft_targets', 'rank_overrides',
+                'full_blocks', 'conv_adapters', 'giou_weight', 'roi_sampling_ratio', 'roi_output_size', 'wst_params',
                 'loss_weights', 'head', 'head_params', 'detail_stem_params', 'rpn_fg_iou_thresh',
                 'rpn_bg_iou_thresh', 'ema_decay', 'vit_adapter', 'box_similarity', 'nwd_constant', 'iou_aware',
                 'heatmap_aux', 'cls_detach', 'cls_input', 'roi_pooling', 'roi_canonical_scale',
@@ -164,8 +170,9 @@ def run_name(args):
     return args.name or 'dinov3_dora'
 
 
-def start_wandb(args, run_dir):
-    """Return a live wandb run, or None when --wandb is off or wandb is not installed."""
+def start_wandb(args, run_dir, run_id=None):
+    """Return a live wandb run, or None when --wandb is off or wandb is not installed. With `run_id`, continue
+    that run (a --resume)."""
     if not args.wandb:
         return None
     try:
@@ -176,7 +183,7 @@ def start_wandb(args, run_dir):
     config = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
     return wandb.init(project=args.wandb_project,
                       name=args.wandb_run_name or run_name(args),
-                      dir=str(run_dir), config=config)
+                      dir=str(run_dir), config=config, id=run_id, resume='allow' if run_id else None)
 
 
 def build_preprocess(args):
@@ -275,10 +282,11 @@ def train_one_epoch(model, loader, optimizer, schedule, epoch, log_file, run=Non
 
 
 def fit(model, train_loader, val_loader, epochs, optimizer, schedule, args, log_file, run, history, start_epoch=1,
-        ema=None):
+        ema=None, checkpoint=None):
     """Train `epochs` epochs, validating every --eval-every and after the last one; appends to `history`.
 
     Validation uses the EMA weights when `ema` is given, and is skipped without a `val_loader` (val_fraction 0).
+    `checkpoint(epoch)`, when given, is called after every epoch (and its validation).
     Returns the last validation's (detections, submission records), which the caller saves.
     """
     val_detections = val_sub = None
@@ -293,6 +301,8 @@ def fit(model, train_loader, val_loader, epochs, optimizer, schedule, args, log_
             if run is not None:
                 run.log({f'val/{k}': v for k, v in val.items() if not isinstance(v, (dict, list))},
                         step=epoch * len(train_loader))
+        if checkpoint is not None:
+            checkpoint(epoch)
     return val_detections, val_sub
 
 
@@ -361,9 +371,13 @@ def main():
     torch.backends.cudnn.allow_tf32 = True
     run_dir = args.out / run_name(args)
     run_dir.mkdir(parents=True, exist_ok=True)
-    log_file = open(run_dir / 'log.txt', 'w')
+    last = run_dir / 'last.pt'
+    resume = args.resume and last.exists() and args.load is None and args.predict is None
+    log_file = open(run_dir / 'log.txt', 'a' if resume else 'w')  # a resumed run continues the same log
     log(json.dumps(vars(args), default=str), log_file)
-    run = start_wandb(args, run_dir)
+    # A resumed run continues the same wandb run: its id is in the checkpoint.
+    wandb_id = torch.load(last, map_location='cpu', weights_only=False)['extra'].get('wandb_id') if resume else None
+    run = start_wandb(args, run_dir, wandb_id)
 
     # Data
     if args.pseudo_rgb and args.preprocess_cache is None:
@@ -441,8 +455,9 @@ def main():
     det_params = [p for p in head_params if id(p) not in cls_ids]
 
     # Stage A: freeze the backbone (including DoRA) and train only the neck, RPN, RoI and class heads.
+    # Checkpoints are written in stage B only, so a resumed run skips stage A.
     history, start = [], time.time()
-    if args.stage_a_epochs:
+    if args.stage_a_epochs and not resume:
         log(f'stage A: {args.stage_a_epochs} epochs, backbone frozen, lr {args.stage_a_lr}', log_file)
         for p in model.backbone.parameters():
             p.requires_grad_(False)
@@ -468,9 +483,28 @@ def main():
     total = args.epochs * len(train_loader)
     schedule = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: lr_factor(step, warmup, total))
     ema = ModelEMA(model, args.ema_decay) if args.ema_decay > 0 else None  # over stage B's trainable weights
-    val_detections, val_sub = fit(model, train_loader, val_loader, args.epochs, optimizer, schedule, args,
-                                  log_file, run, history, start_epoch=args.stage_a_epochs + 1, ema=ema)
-    train_hours = (time.time() - start) / 3600
+    done, elapsed = args.stage_a_epochs, 0.0  # last finished epoch; training seconds in earlier jobs
+    if resume:
+        state = load_checkpoint(last, model, optimizer, schedule, ema)
+        done, history, elapsed = state['epoch'], state['history'], state['elapsed']
+        log(f'resumed from {last}: epoch {done} of {args.stage_a_epochs + args.epochs} done, '
+            f'{elapsed / 3600:.2f} h of training so far', log_file)
+    elif args.resume:
+        log(f'--resume: no {last} yet, starting from scratch', log_file)
+
+    def checkpoint(epoch):
+        if args.checkpoint_every and (epoch % args.checkpoint_every == 0
+                                      or epoch == args.stage_a_epochs + args.epochs):
+            save_checkpoint(last, model, optimizer, schedule, epoch, history, elapsed + time.time() - start, ema,
+                            extra={'wandb_id': run.id if run is not None else None})
+
+    remaining = args.stage_a_epochs + args.epochs - done
+    val_detections, val_sub = fit(model, train_loader, val_loader, remaining, optimizer, schedule, args,
+                                  log_file, run, history, start_epoch=done + 1, ema=ema, checkpoint=checkpoint)
+    if remaining == 0 and val_loader is not None:  # resumed after the last epoch: redo the final validation
+        with ema.averaged() if ema is not None else contextlib.nullcontext():
+            _, val_detections, val_sub = evaluate(model, val_loader, val_loader.dataset.instances_json)
+    train_hours = (elapsed + time.time() - start) / 3600
     if ema is not None:  # the averaged weights are the final model: test and model.pt use them
         ema.copy_to_model()
         log(f'EMA (decay {args.ema_decay}) weights copied into the model', log_file)
@@ -502,6 +536,7 @@ def main():
     if test_sub is not None:
         write_submission(*test_sub, out=run_dir / 'submission_test.zip')
     torch.save(model.state_dict(), run_dir / 'model.pt')
+    last.unlink(missing_ok=True)  # model.pt is the finished run; the checkpoint (~0.5 GB) is no longer needed
     if run is not None:
         run.finish()
 

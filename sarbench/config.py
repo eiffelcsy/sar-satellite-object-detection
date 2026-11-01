@@ -8,7 +8,9 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
                                    # it section by section; nested mappings merge, everything else replaces
     name: dinov3_dora_giou         # run name (default: dinov3_dora)
     backbone:
-      name: dinov3                 # the only backbone
+      name: dinov3                 # dinov3 (the ViT, DoRA-adapted) | dinov3_convnext (trained entirely, FPN neck;
+                                   # params.model_name defaults to facebook/dinov3-convnext-tiny-pretrain-lvd1689m,
+                                   # the peft section is ignored, its weights train at train.unfrozen_lr)
       pretrained: true
       params: {model_name: facebook/dinov3-vitb16-pretrain-lvd1689m, patch_size: 8, grad_checkpointing: true}
                                    # patch_size 8: PI-resized patch embedding, 64 x 64 tokens at 512 px
@@ -68,7 +70,8 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
     train: {epochs: 48, stage_a_epochs: 0, stage_a_lr: 2.0e-4, batch_size: 16, lr: 1.0e-4,
             backbone_lr: null, lora_plus_ratio: 1.0, unfrozen_lr: 2.0e-5, cls_lr: null, ema_decay: 0.0,
             warmup_epochs: 1,
-            wd_exclude_1d: false, weight_decay: 0.05, eval_every: 4, workers: 8, seed: 0}
+            wd_exclude_1d: false, weight_decay: 0.05, eval_every: 4, workers: 8, seed: 0, checkpoint_every: 1}
+            # checkpoint_every: write <run dir>/last.pt every N epochs (0 = never), for train.py --resume
             # lr: new modules outside the backbone (neck, RPN, RoI head, stems, input adapter);
             # cls_lr: the image classifier (default lr); backbone_lr: new backbone parameters (DoRA, Convpass;
             # default lr);
@@ -103,6 +106,7 @@ from pathlib import Path
 
 # Defaults match the argparse defaults in train.py, so an absent config (plain CLI) behaves the same.
 DEFAULTS = {
+    'backbone_name': 'dinov3',
     'pretrained': True,
     'backbone_kwargs': {'model_name': 'facebook/dinov3-vitb16-pretrain-lvd1689m'},
     'peft_kwargs': {'rank': 32, 'alpha': 32},
@@ -162,6 +166,7 @@ DEFAULTS = {
     'wd_exclude_1d': False,
     'weight_decay': 0.05,
     'eval_every': 4,
+    'checkpoint_every': 1,
     'workers': 8,
     'seed': 0,
     'data': None,
@@ -201,7 +206,8 @@ _MODEL_KEYS = ('detail_stem', 'fusion_layers', 'input_adapter', 'wst_stem', 'wst
                'roi_batch_size_per_image', 'roi_positive_fraction', 'giou_alpha', 'soft_nms_sigma', 'roi_aligned',
                'roi_context_scale', 'rpn_size_adaptive', 'rpn_centred_anchors')
 _TRAIN_KEYS = ('epochs', 'stage_a_epochs', 'stage_a_lr', 'batch_size', 'lr', 'backbone_lr', 'unfrozen_lr',
-               'cls_lr', 'ema_decay', 'lora_plus_ratio', 'warmup_epochs', 'wd_exclude_1d', 'weight_decay', 'eval_every', 'workers',
+               'cls_lr', 'ema_decay', 'lora_plus_ratio', 'warmup_epochs', 'wd_exclude_1d', 'weight_decay', 'eval_every',
+               'checkpoint_every', 'workers',
                'seed')
 _DATA_KEYS = {'root': 'data', 'val_fraction': 'val_fraction', 'split_seed': 'split_seed', 'limit': 'limit',
               'mosaic': 'mosaic', 'copy_paste': 'copy_paste', 'copy_paste_margin': 'copy_paste_margin',
@@ -241,8 +247,11 @@ def load_config(path):
     config = {key: (value.copy() if isinstance(value, (dict, list)) else value) for key, value in DEFAULTS.items()}
 
     backbone = raw.get('backbone') or {}
-    if backbone.get('name', 'dinov3') != 'dinov3':
-        raise ValueError(f"{path}: only the dinov3 backbone is supported, got {backbone['name']!r}")
+    config['backbone_name'] = backbone.get('name', 'dinov3')
+    if config['backbone_name'] not in ('dinov3', 'dinov3_convnext'):
+        raise ValueError(f"{path}: unknown backbone {backbone['name']!r}; available: dinov3, dinov3_convnext")
+    if config['backbone_name'] == 'dinov3_convnext':
+        config['backbone_kwargs'] = {'model_name': 'facebook/dinov3-convnext-tiny-pretrain-lvd1689m'}
     config['pretrained'] = bool(backbone.get('pretrained', True))
     config['backbone_kwargs'].update(backbone.get('params') or {})
 

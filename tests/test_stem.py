@@ -561,3 +561,25 @@ def test_roi_context_scale_wraps_either_pooler_and_adds_only_the_fuse_conv():
         assert isinstance(model.roi_heads.box_roi_pool, ContextRoIAlign)
         extra = sum(p.numel() for p in model.parameters()) - sum(p.numel() for p in plain.parameters())
         assert extra == 512 * 256 + 256
+
+
+def test_convnext_backbone_gives_four_strides_and_builds_an_fpn_model_within_budget():
+    pytest.importorskip('transformers', minversion='4.56')
+    from sarbench.backbones import DINOv3ConvNeXt
+    from sarbench.model import FPNNeck
+    backbone = DINOv3ConvNeXt(config={})  # randomly initialised Tiny: no download
+    maps, pooled = backbone(torch.rand(1, 1, 128, 128))  # gray is repeated to RGB
+    assert [m.shape[1:] for m in maps] == [(96, 32, 32), (192, 16, 16), (384, 8, 8), (768, 4, 4)]
+    assert pooled.shape == (1, 768)
+    model = MultiTaskModel(backbone, input_adapter=True, giou_weight=1.0, roi_pooling='max',
+                           head_params={'hidden_dim': 512}, roi_context_scale=2.0,
+                           rpn_size_adaptive={'floor': 0.25, 'base': 0.2, 'slope': 0.15, 'ref': 12})
+    assert isinstance(model.neck, FPNNeck) and model.detail_stem is None
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert trainable == sum(p.numel() for p in model.parameters()) and trainable < 40_000_000  # k21: all trained
+    model.train()
+    targets = [{'boxes': torch.tensor([[10., 10., 30., 40.]]), 'labels': torch.tensor([3])}]
+    logits, _, losses = model(torch.rand(1, 3, 256, 256), targets)
+    assert logits.shape == (1, 9) and all(torch.isfinite(v) for v in losses.values())
+    with pytest.raises(ValueError):
+        MultiTaskModel(DINOv3ConvNeXt(config={}), fusion_layers=[5, 8, 11])

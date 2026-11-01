@@ -1,7 +1,10 @@
-"""The DINOv3 backbone, built for 512 px input: images [B, 3, 512, 512] -> patch tokens [B, 1024, embed_dim]
-(or [B, 4096, embed_dim] with `patch_size: 8`).
+"""The DINOv3 backbones, built for 512 px input.
 
-It exposes `embed_dim`, `patch_size`, `num_prefix_tokens`, a `blocks` list, `adapter_targets()` (the projections that
+`DINOv3` (the ViT, adapted with DoRA): images [B, 3, 512, 512] -> patch tokens [B, 1024, embed_dim] (or
+[B, 4096, embed_dim] with `patch_size: 8`). `DINOv3ConvNeXt` (trained entirely): images -> four stage maps at strides
+4 / 8 / 16 / 32 plus a pooled image vector.
+
+The ViT exposes `embed_dim`, `patch_size`, `num_prefix_tokens`, a `blocks` list, `adapter_targets()` (the projections that
 DoRA may wrap, with their block index) and a forward that returns the final patch tokens (prefix tokens dropped).
 """
 import torch
@@ -97,3 +100,45 @@ class DINOv3(nn.Module):
             x = x.repeat(1, self.in_chans, 1, 1)
         tokens = self.dinov3(x).last_hidden_state  # [B, prefix + N, embed_dim], final norm applied
         return tokens if with_prefix else tokens[:, self.num_prefix_tokens:]
+
+
+class DINOv3ConvNeXt(nn.Module):
+    """DINOv3's ConvNeXt (distilled from the 7B ViT; Meta) through HuggingFace transformers, trained entirely.
+
+    Unlike the ViT, whose single stride-16 map the neck has to upsample for small objects, it has native stride-4 / 8
+    / 16 / 32 stage maps, for an FPN. Tiny (`facebook/dinov3-convnext-tiny-pretrain-lvd1689m`, 27.8 M) fits the 40 M
+    trainable budget with every weight trained, so the whole network adapts to SAR instead of DoRA's low-rank update.
+    The checkpoints are gated like the ViT's. `hierarchical` tells MultiTaskModel to build an FPN neck.
+    `config` (a dict of DINOv3ConvNextConfig fields) builds a randomly initialised model without downloading (tests).
+    """
+
+    hierarchical = True
+
+    def __init__(self, pretrained: bool = True, model_name: str = 'facebook/dinov3-convnext-tiny-pretrain-lvd1689m',
+                 grad_checkpointing: bool = False, config: dict | None = None, **kwargs):
+        super().__init__()
+        from transformers import DINOv3ConvNextConfig, DINOv3ConvNextModel  # lazy: keeps `import sarbench` light
+        if config is not None:
+            self.convnext = DINOv3ConvNextModel(DINOv3ConvNextConfig(**config))
+        elif pretrained:
+            self.convnext = DINOv3ConvNextModel.from_pretrained(model_name, **kwargs)
+        else:
+            self.convnext = DINOv3ConvNextModel(DINOv3ConvNextConfig.from_pretrained(model_name, **kwargs))
+        if grad_checkpointing:
+            self.convnext.gradient_checkpointing_enable()
+        self.model_name = model_name
+        self.channels = list(self.convnext.config.hidden_sizes)
+        self.embed_dim = self.channels[-1]
+        self.in_chans = self.convnext.config.num_channels
+        self.patch_size = 4  # stride of the finest map
+
+    def forward(self, x):
+        """([four stage maps [B, C_i, H / s, W / s] for s = 4, 8, 16, 32], pooled image vector [B, embed_dim])."""
+        if x.shape[1] != self.in_chans:  # gray -> the pretrained RGB channel count
+            x = x.repeat(1, self.in_chans, 1, 1)
+        out = self.convnext(x, output_hidden_states=True)
+        # hidden_states holds the stage outputs (and, depending on the transformers version, the input): take the
+        # last map of each stage width, finest first.
+        maps = [next(h for h in reversed(out.hidden_states) if h.ndim == 4 and h.shape[1] == c)
+                for c in self.channels]
+        return maps, out.pooler_output  # pooled: the layer-normed global average (DINOv3's "CLS" for ConvNeXt)

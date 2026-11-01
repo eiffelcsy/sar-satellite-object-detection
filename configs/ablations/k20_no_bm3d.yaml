@@ -1,0 +1,9 @@
+# K20 (no SAR-BM3D): k19 with the pseudo-RGB built without any despeckling: amplitude, log-amplitude and the Sobel
+# edges of the amplitude (amp_log_edge), instead of amplitude, BM3D base and the edges of that base. BM3D smooths
+# away thin linear structure, and bridges are lines a few px wide over water: bridge AP has stayed at .044-.059
+# through every model change (RPN, copy-paste, anchors, context), which points at the input. Also drops the BM3D
+# pass (the slow part of the first epoch on a fresh cache). Compare with k19 per class, bridge and playground first.
+base: k19_bridge_stack.yaml
+name: giou_k20_no_bm3d
+preprocess:
+  mode: amp_log_edge

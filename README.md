@@ -152,7 +152,7 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `d15_full_train_j0_250ep` | final candidate: d14 with j0's augmentation | d14 | 123.93 | 38.86 |
 | `d16_full_train_j1_250ep` | final candidate: d15 with j1's fused RoI pooling | d15 | 123.93 | 38.86 |
 | `d17_full_train_j1_200ep` | final candidate: d16 at 200 epochs instead of 250 | d16 | 123.93 | 38.86 |
-| `d20_full_train_k19_200ep` | final candidate: k19 (k17 + k14 + context RoI pooling) on all of train, 200 epochs | d17 | 124.06 | 38.99 |
+| `d20_full_train_k19_180ep` | final candidate: k19 (k17 + k14 + context RoI pooling) on all of train, 180 epochs | d17 | 124.06 | 38.99 |
 | `d18_full_train_j1_250ep_seed1` | final candidate: d16 with training seed 1 (second draw) | d16 | 123.93 | 38.86 |
 | `d19_full_train_j1_iou_aware_250ep` | final candidate: d16 + k3's IoU-aware ranking (only if section 14 wins) | d16 | 123.94 | 38.87 |
 | `k1_copy_paste_small` | small-object classes always copy-pasted, up to 4 donors / 8 objects | j1 | 123.93 | 38.86 |
@@ -174,6 +174,8 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `k17_repeat_hard` | every image once + bridge and playground images repeated (epoch +26%); no copy-paste on bridges | k16 | 123.93 | 38.86 |
 | `k18_repeat_hard_centred_aligned` | k17 + anchors on cell centres (k15) + RoIAlign aligned=True (k11) | k17 | 123.93 | 38.86 |
 | `k19_bridge_stack` | k17 + size-aware RPN positives (k14) + context RoI pooling (each RoI also pooled at 2x); no copy-paste on wind turbines either | k17 | 124.06 | 38.99 |
+| `k20_no_bm3d` | pseudo-RGB without SAR-BM3D (amplitude, log-amplitude, Sobel edges) | k19 | 124.06 | 38.99 |
+| `k21_convnext_tiny` | DINOv3 ConvNeXt-Tiny trained entirely + FPN (no DoRA ViT, no P2 stem), box MLP 512 | k19 | 38.00 | 38.00 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
 of the 40 M a different way. `train.py` refuses to train a model over 130 M total or 40 M trainable.
@@ -209,6 +211,25 @@ python train.py --config configs/dinov3_dora_giou.yaml \
 
 `--load` alone (without `--predict`) evaluates a saved model on the labelled split and writes its submission
 zips; `--predict` requires `--load` and skips metrics, so it needs no labels.
+
+**Checkpoints and resuming.** Training writes `<run dir>/last.pt` after every epoch (`train.checkpoint_every`,
+0 = off): the trainable weights and buffers, optimizer, LR schedule, EMA, RNG states, validation history and
+training time (~0.5 GB; the frozen backbone is rebuilt from the pretrained weights). It is written atomically and
+deleted once `model.pt` is saved. If a job hits the cluster's time limit, resubmit the same command with `--resume`:
+it continues after the last finished epoch, appends to `log.txt` and continues the same wandb run. `--resume` with
+no `last.pt` starts from scratch, so it is safe to keep on the command line.
+
+**ConvNeXt backbone** (`backbone.name: dinov3_convnext`, `k21`). DINOv3's ConvNeXt-Tiny (27.8 M, distilled from the
+7B ViT) trained entirely, with a torchvision FPN over its stride-4 / 8 / 16 / 32 maps instead of the ViTDet neck on
+the DoRA-adapted ViT. The `peft` section is ignored, the backbone trains at `train.unfrozen_lr`, and the image
+classifier reads its pooled vector. Every head option (fused / context RoI pooling, size-aware RPN, cascade) works
+as with the ViT; the ViT-only ones (`fusion_layers`, `vit_adapter`, `cls_input: cls_mean`) are refused.
+
+**RF-DETR track** (`rfdetr_track/`, `sbatchScriptRFDETR.sh`, its own `.venv-rfdetr`). A detection-pretrained
+detector trained entirely: `export_dataset.py` writes the data in RF-DETR's layout with train.py's held-out split,
+`train_rfdetr.py` fine-tunes RF-DETR Small / Medium at a fixed 512 px (checks the parameter budget, `--resume`),
+and `predict_rfdetr.py` scores the held-out split like train.py (per-class AP) or writes the submission zips. The
+image class is the class of the highest-scoring box.
 
 **Post-processing.** `sweep_postprocess.py` (same flags as `train.py`, plus `--score-thresh` / `--nms-thresh` lists)
 re-scores a saved model on the held-out split for each score threshold x NMS IoU (x image-class re-scoring, below),

@@ -87,7 +87,7 @@ def test_base_is_the_dora_giou_recipe():
     ('d15_full_train_j0_250ep', 'd14_full_train_i1_cls01_250ep', {'mosaic', 'copy_paste_same_class', 'copy_paste_margin'}),
     ('d16_full_train_j1_250ep', 'd15_full_train_j0_250ep', {'roi_pooling'}),
     ('d17_full_train_j1_200ep', 'd16_full_train_j1_250ep', {'epochs'}),
-    ('d20_full_train_k19_200ep', 'd17_full_train_j1_200ep', {'rpn_size_adaptive', 'roi_context_scale',
+    ('d20_full_train_k19_180ep', 'd17_full_train_j1_200ep', {'epochs', 'rpn_size_adaptive', 'roi_context_scale',
                                                                 'class_sampling_weights', 'class_sampling_mode',
                                                                 'copy_paste_exclude'}),
     ('k1_copy_paste_small', 'j1_roi_fused', {'copy_paste_small'}),
@@ -109,6 +109,9 @@ def test_base_is_the_dora_giou_recipe():
     ('k17_repeat_hard', 'k16_oversample_hard', {'class_sampling_mode', 'copy_paste_exclude'}),
     ('k18_repeat_hard_centred_aligned', 'k17_repeat_hard', {'rpn_centred_anchors', 'roi_aligned'}),
     ('k19_bridge_stack', 'k17_repeat_hard', {'rpn_size_adaptive', 'roi_context_scale', 'copy_paste_exclude'}),
+    ('k20_no_bm3d', 'k19_bridge_stack', {'pseudo_rgb_mode'}),
+    ('k21_convnext_tiny', 'k19_bridge_stack', {'backbone_name', 'backbone_kwargs', 'detail_stem', 'head_params',
+                                               'unfrozen_lr'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'

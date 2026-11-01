@@ -233,5 +233,14 @@ DATA=/common/scratch/users/e/eiffelchong.2023/cs701-sar-course-data/train/
 # k19, the bridge / playground stack: k17 + k14 (size-aware RPN positives) + context RoI pooling (2x box).
 #   Compare with j1 and k17 (per-class AP, diagnose_recall.py head losses).
 # srun --gres=gpu:1 python train.py --config configs/ablations/k19_bridge_stack.yaml --data "$DATA" --wandb --workers 4
-# d20: k19 on all of train at 200 epochs (~12 h). Compare with d17 on Codabench.
-srun --gres=gpu:1 python train.py --config configs/ablations/d20_full_train_k19_200ep.yaml --data "$DATA" --wandb --workers 4
+# d20: k19 on all of train at 180 epochs (fits one 24 h job). Compare with d17 on Codabench.
+#   --resume: if the job hits the time limit, resubmit this same script; it continues from
+#   runs/giou_d20_full_train_k19_180ep/last.pt (written every epoch; at most one epoch is lost).
+# srun --gres=gpu:1 python train.py --config configs/ablations/d20_full_train_k19_180ep.yaml --data "$DATA" --wandb --workers 4 --resume
+
+# AA: closing the gap to the top teams (60.8 vs our ~49 val mAP); both one change on k19, compare per class with k19.
+#   k20: pseudo-RGB without SAR-BM3D (amplitude, log-amplitude, Sobel): is despeckling erasing thin bridges?
+#   k21: DINOv3 ConvNeXt-Tiny trained entirely + FPN instead of the DoRA ViT-B (native stride-4 maps, 38.0 M).
+#   (The third, a COCO-pretrained detector trained entirely, is RF-DETR: sbatchScriptRFDETR.sh.)
+srun --gres=gpu:1 python train.py --config configs/ablations/k20_no_bm3d.yaml --data "$DATA" --wandb --workers 4 --resume
+srun --gres=gpu:1 python train.py --config configs/ablations/k21_convnext_tiny.yaml --data "$DATA" --wandb --workers 4 --resume

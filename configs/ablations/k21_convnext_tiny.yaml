@@ -1,0 +1,17 @@
+# K21 (native multi-scale backbone, trained entirely): k19's recipe on DINOv3 ConvNeXt-Tiny (27.8 M, distilled from
+# the 7B ViT) instead of the DoRA-adapted ViT-B/16, with an FPN over its stride-4/8/16/32 stage maps. Every weight
+# adapts to SAR (full fine-tuning was worth ~+13 delta-m over LoRA in the course baseline, but did not fit the budget
+# for ViT-B), and P2 is a real stride-4 map rather than the ViT's stride-16 tokens upsampled, so the P2 conv stem is
+# dropped. The box head's MLP is 512 wide (6.8 M instead of 13.9 M) to fit: 38.00 M trainable and total.
+# Backbone at 1e-4 (unfrozen_lr; ConvNeXt detection fine-tuning rates), drop path 0.1 for 9k images.
+# Compare with k19 (same recipe on the ViT).
+base: k19_bridge_stack.yaml
+name: giou_k21_convnext_tiny
+backbone:
+  name: dinov3_convnext
+  params: {model_name: facebook/dinov3-convnext-tiny-pretrain-lvd1689m, drop_path_rate: 0.1}
+model:
+  detail_stem: false
+  head_params: {hidden_dim: 512}
+train:
+  unfrozen_lr: 1.0e-4
