@@ -59,7 +59,7 @@ DATA="$ROOT/train"
 # R1) Export the course data in RF-DETR's layout, same held-out split as train.py (CPU only, under a minute for
 #     raw, which links the images; amp_log_edge writes no-BM3D pseudo-RGB PNGs). It must run before R2; it skips
 #     files that already exist, so leaving it on is harmless.
-srun python rfdetr_track/export_dataset.py --data "$DATA" --out rfdetr_data/heldout_raw
+# srun python rfdetr_track/export_dataset.py --data "$DATA" --out rfdetr_data/heldout_raw
 # srun python rfdetr_track/export_dataset.py --data "$DATA" --out rfdetr_data/full_raw --val-fraction 0
 
 # R2) RF-DETR Small (DINOv2 ViT-S windowed, 512 px native, COCO-pretrained, every weight trained) on the held-out
@@ -71,9 +71,9 @@ srun python rfdetr_track/export_dataset.py --data "$DATA" --out rfdetr_data/held
 #      LR 10x lower from epoch 70 (10 more at full LR, then 15 low): continues from runs/rfdetr_small_raw/last.ckpt
 #      (optimizer, EMA, epoch 60) and keeps updating checkpoint_best_*.pth there. Then rerun sbatchScriptEval.sh
 #      section 16. Stops if last.ckpt is missing (--resume would otherwise train 85 epochs from scratch).
-test -f runs/rfdetr_small_raw/last.ckpt || { echo "runs/rfdetr_small_raw/last.ckpt not found: nothing to extend"; exit 1; }
-srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_raw \
-  --output runs/rfdetr_small_raw --variant small --epochs 80 --lr-drop 65 --batch-size 16 --workers 4 --resume --wandb
+# test -f runs/rfdetr_small_raw/last.ckpt || { echo "runs/rfdetr_small_raw/last.ckpt not found: nothing to extend"; exit 1; }
+# srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_raw \
+#   --output runs/rfdetr_small_raw --variant small --epochs 80 --lr-drop 65 --batch-size 16 --workers 4 --resume --wandb
 
 # R3) Held-out metrics, comparable with the Faster R-CNN runs (j1 .4758 / k19 .4817 mAP, per-class AP). Try
 #     --single-class (all boxes take the image class) too.
@@ -91,3 +91,17 @@ srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/held
 #   --output runs/rfdetr_medium_raw --variant medium --epochs 60 --batch-size 16 --workers 4 --resume --wandb
 # srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/full_raw \
 #   --output runs/rfdetr_small_full --variant small --epochs 60 --batch-size 16 --workers 4 --resume --wandb
+
+# R6) RF-DETR Large (2026: ViT-S windowed, 4 decoder layers, 33.9M, every weight trained) at 512 px (native 704; the
+#     positional encoding is resized), on the no-BM3D pseudo-RGB input (amplitude, log-amplitude, Sobel edges) with
+#     k17's hard-class oversampling: every train image once, bridge / playground images twice (~10.6k images per
+#     epoch, +26% time). Schedule: train_rfdetr.py's defaults (100 epochs, LR 1e-4 / encoder 1.5e-4, 1 warmup
+#     epoch, LR drop at epoch 100, i.e. none). Small at 80 epochs (drop at 65): mAP .4482, bridge .035, playground .091.
+#     Large's COCO weights are not cached yet: on the login node, once:
+#       python -c "from rfdetr import RFDETRLarge; RFDETRLarge()"
+#     a) Export (CPU; writes ~10.4k PNGs for amp_log_edge, the repeats are links; skips files that exist).
+srun python rfdetr_track/export_dataset.py --data "$DATA" --out rfdetr_data/heldout_ale_repeat \
+  --input amp_log_edge --repeat bridge=2 playground=2
+#     b) Train. --resume: resubmit unchanged after a time-limit kill (continues from last.ckpt).
+srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_ale_repeat \
+  --output runs/rfdetr_large_ale_repeat --variant large --batch-size 16 --workers 4 --resume --wandb
