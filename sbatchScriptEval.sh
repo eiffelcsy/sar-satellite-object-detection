@@ -66,10 +66,10 @@ MODEL=runs/giou_d17_full_train_j1_200ep/model.pt
 #   --data "$DATA" --out runs/eval_heldout
 
 # 2) Official val split (unlabelled val/images.json): predictions only -> submission_val.zip
-srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
-  --score-thresh 0.00001 --nms-thresh 0.85 \
-  --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
-  --preprocess-cache preprocess_cache/val
+# srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
+#   --score-thresh 0.00001 --nms-thresh 0.85 \
+#   --predict "$ROOT/val/images.json" --predict-split val --out runs/eval_val/ \
+#   --preprocess-cache preprocess_cache/val
 
 # 3) Official test split (unlabelled test/images.json): predictions only -> submission_test.zip
 # srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
@@ -178,3 +178,21 @@ srun --gres=gpu:1 python train.py --config "$CONFIG" --load "$MODEL" \
 # srun --gres=gpu:1 python train.py --config "$K19" --load "$K19_MODEL" --score-thresh 0.00001 --nms-thresh 0.85 \
 #   --predict "$ROOT/test/images.json" --predict-split test --out runs/eval_test_k19/ \
 #   --preprocess-cache preprocess_cache/test
+
+# 16) RF-DETR (rfdetr_track/, trained by sbatchScriptRFDETR.sh R2). It needs its own environment, so switch venvs
+#     first; the Faster R-CNN sections above need .venv. Outputs go straight into --out (no <run_name>/ subdir).
+deactivate; source .venv-rfdetr/bin/activate
+RF=runs/rfdetr_small_raw/checkpoint_best_ema.pth   # or checkpoint_best_total.pth
+#     a) Held-out metrics (same split and scoring as train.py; compare with k19 mAP .4817 / F1 .9595), at two score
+#        cut-offs, then with every box relabelled to the image class.
+srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" \
+  --out runs/eval_heldout_rfdetr_small/t1e-3 --threshold 0.001
+srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" \
+  --out runs/eval_heldout_rfdetr_small/t1e-5 --threshold 0.00001
+srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --data "$DATA" \
+  --out runs/eval_heldout_rfdetr_small/t1e-3_single --threshold 0.001 --single-class
+#     b) Official val and test predictions -> submission zips, with a)'s best --threshold / --single-class.
+srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --threshold 0.001 \
+  --images-json "$ROOT/val/images.json" --split val --out runs/eval_val_rfdetr_small
+# srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --threshold 0.001 \
+#   --images-json "$ROOT/test/images.json" --split test --out runs/eval_test_rfdetr_small
