@@ -58,6 +58,10 @@ def main():
                    help='image-classifier loss weight (0 = no classifier; needs --dino)')
     p.add_argument('--p3', action='store_true', help='add a stride-8 P3 projector level')
     p.add_argument('--resume', action='store_true', help='continue from <output>/last.ckpt if it exists')
+    p.add_argument('--checkpoint-interval', type=int, default=None,
+                   help='keep a checkpoint_<epoch>.ckpt archive every N epochs (default: only at the last epoch; '
+                        "rfdetr's own default of 10 keeps 20 full checkpoints in a 200-epoch run). last.ckpt is "
+                        'rewritten every epoch either way')
     p.add_argument('--wandb', action='store_true')
     p.add_argument('--project', default='sar-satellite-object-detection')
     args = p.parse_args()
@@ -75,8 +79,9 @@ def main():
                                           'dora_targets': args.dino_dora_targets,
                                           'convpass_dim': args.dino_convpass_dim},
                                  'image_cls_weight': args.image_cls_weight})
-    saved = fusion.load_spec(args.output)
-    if args.resume and (args.output / 'last.ckpt').exists() and saved != spec:
+    resuming = args.resume and (args.output / 'last.ckpt').exists()
+    saved = fusion.load_spec(args.output) if resuming else None  # a fresh run writes its own fusion.json below
+    if resuming and saved != spec:
         raise SystemExit(f'--resume with different DINOv3 settings than the run in {args.output}: saved {saved}, '
                          f'now {spec}')
     fusion.install(spec)  # before any model is built; with spec None it only enables P3 weight loading
@@ -112,6 +117,7 @@ def main():
                 lr_encoder=args.lr_encoder, weight_decay=args.weight_decay, drop_path=args.drop_path,
                 warmup_epochs=args.warmup_epochs, lr_scheduler='step', lr_scheduler_kwargs={'lr_drop': args.lr_drop},
                 num_workers=args.workers, multi_scale=False,
+                checkpoint_interval=max(2, args.checkpoint_interval or args.epochs),
                 expanded_scales=False, use_ema=True, resume=resume, wandb=args.wandb, project=args.project,
                 run=args.output.name, log_per_class_metrics=True)
 

@@ -63,13 +63,25 @@ def full_spec(spec):
 
 
 def save_spec(spec, directory):
-    Path(directory, SPEC_FILE).write_text(json.dumps(full_spec(spec), indent=1))
+    """Write the spec to <directory>/fusion.json through a temporary file, so a job killed mid-write (or a full
+    disk) never leaves a truncated file behind."""
+    path = Path(directory, SPEC_FILE)
+    tmp = path.with_name(path.name + '.tmp')
+    tmp.write_text(json.dumps(full_spec(spec), indent=1))
+    tmp.replace(path)
 
 
 def load_spec(directory):
-    """The spec saved next to a run's checkpoints, or None for a plain RF-DETR run."""
+    """The spec saved next to a run's checkpoints, or None for a plain RF-DETR run. A damaged file is an error, not
+    None: loading a DINOv3 checkpoint without its branch would silently drop those weights."""
     path = Path(directory, SPEC_FILE)
-    return json.loads(path.read_text()) if path.exists() else None
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        raise SystemExit(f'{path} is empty or damaged (a job killed while writing it, or a full disk?). For a run '
+                         f'that has not trained yet, delete it; otherwise rewrite it from that run\'s flags.') from None
 
 
 class FusedBackbone(Backbone):

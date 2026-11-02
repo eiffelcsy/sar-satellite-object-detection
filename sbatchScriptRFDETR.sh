@@ -122,12 +122,12 @@ DATA="$ROOT/train"
 #     forward (R7) and its backward (R8 / R9) add time, so R8 / R9 may need a second job: resubmit unchanged
 #     (--resume). They use R6's export (R6a), so run that first.
 #     The DINOv3 ViT-B weights come from Hugging Face (gated; the Faster R-CNN track already caches them).
-srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_ale_repeat \
-  --output runs/rfdetr_large_ale_repeat_dino --variant large --epochs 200 --lr-drop 162 --batch-size 16 --workers 4 \
-  --dino --image-cls-weight 0.1 --resume --wandb
-srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_ale_repeat \
-  --output runs/rfdetr_large_ale_repeat_dino_dora --variant large --epochs 200 --lr-drop 162 --batch-size 16 \
-  --workers 4 --dino --dino-dora-rank 16 --dino-convpass-dim 64 --image-cls-weight 0.1 --resume --wandb
 # srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_ale_repeat \
-#   --output runs/rfdetr_large_ale_repeat_dino_dora_p3 --variant large --epochs 200 --lr-drop 162 --batch-size 16 \
-#   --workers 4 --dino --dino-dora-rank 8 --dino-convpass-dim 64 --image-cls-weight 0.1 --p3 --resume --wandb
+#   --output runs/rfdetr_large_ale_repeat_dino --variant large --epochs 200 --lr-drop 162 --batch-size 16 --workers 4 \
+#   --dino --image-cls-weight 0.1 --resume --wandb
+# srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_ale_repeat \
+#   --output runs/rfdetr_large_ale_repeat_dino_dora --variant large --epochs 200 --lr-drop 162 --batch-size 16 \
+#   --workers 4 --dino --dino-dora-rank 16 --dino-convpass-dim 64 --image-cls-weight 0.1 --resume --wandb
+srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_ale_repeat \
+  --output runs/rfdetr_large_ale_repeat_dino_dora_p3 --variant large --epochs 200 --lr-drop 162 --batch-size 16 \
+  --workers 4 --dino --dino-dora-rank 8 --dino-convpass-dim 64 --image-cls-weight 0.1 --p3 --resume --wandb
