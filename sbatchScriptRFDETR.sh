@@ -104,9 +104,9 @@ DATA="$ROOT/train"
 # srun python rfdetr_track/export_dataset.py --data "$DATA" --out rfdetr_data/heldout_ale_repeat \
 #   --input amp_log_edge --repeat bridge=2 playground=2
 #     b) Train. --resume: resubmit unchanged after a time-limit kill (continues from last.ckpt).
-# srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_ale_repeat \
-#   --output runs/rfdetr_large_ale_repeat --variant large --epochs 200 --lr-drop 162 --batch-size 16 --workers 4 \
-#   --resume --wandb
+srun --gres=gpu:1 python rfdetr_track/train_rfdetr.py --dataset rfdetr_data/heldout_ale_repeat \
+  --output runs/rfdetr_large_ale_repeat --variant large --epochs 200 --lr-drop 162 --batch-size 16 --workers 4 \
+  --resume --wandb
 
 # R7-R9) Faster R-CNN-track lessons on top of R6 (rfdetr_track/fusion.py), same data and schedule, one change each:
 #     R7: + a frozen DINOv3 ViT-B/16 (the Faster R-CNN backbone, ~86M frozen) fused into the projector output by
