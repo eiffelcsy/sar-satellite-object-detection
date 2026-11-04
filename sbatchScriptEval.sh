@@ -179,16 +179,26 @@ MODEL=runs/giou_d17_full_train_j1_200ep/model.pt
 #   --predict "$ROOT/test/images.json" --predict-split test --out runs/eval_test_k19/ \
 #   --preprocess-cache preprocess_cache/test
 
+# 17) Official test predictions for the full-train j1 models, at the post-processing of their val submission
+#     (section 2). The first run computes the BM3D cache for the test images; the second reuses it. Zips:
+#     runs/eval_test/giou_<NAME>/submission_test.zip
+for NAME in d16_full_train_j1_250ep d17_full_train_j1_200ep; do
+  srun --gres=gpu:1 python train.py --config configs/ablations/$NAME.yaml --load runs/giou_$NAME/model.pt \
+    --score-thresh 0.00001 --nms-thresh 0.85 \
+    --predict "$ROOT/test/images.json" --predict-split test --out runs/eval_test/ \
+    --preprocess-cache preprocess_cache/test
+done
+
 # 16) RF-DETR (rfdetr_track/, trained by sbatchScriptRFDETR.sh R2). It needs its own environment, so switch venvs
 #     first; the Faster R-CNN sections above need .venv. Outputs go straight into --out (no <run_name>/ subdir).
 # .venv-rfdetr was built with this module's Python (it links libpython3.12.so), so load it first.
-module load Python/3.12.8-GCCcore-13.3.0
-deactivate; source .venv-rfdetr/bin/activate
+# module load Python/3.12.8-GCCcore-13.3.0
+# deactivate; source .venv-rfdetr/bin/activate
 # Which run: its best EMA checkpoint (or checkpoint_best_total.pth), the input it was trained on (export_dataset.py's
 # --input: raw or amp_log_edge), a tag for the output dirs, and the image-label modes to sweep (cls only for the runs
 # trained with an image classifier, R7-R9; their DINOv3 settings come from fusion.json next to the checkpoint).
 # RF=runs/rfdetr_small_raw/checkpoint_best_ema.pth; INPUT=raw; TAG=rfdetr_small; LABELS="top sum"
-RF=runs/rfdetr_large_ale_repeat/checkpoint_best_ema.pth; INPUT=amp_log_edge; TAG=rfdetr_large_ale_repeat; LABELS="top sum"
+# RF=runs/rfdetr_large_ale_repeat/checkpoint_best_ema.pth; INPUT=amp_log_edge; TAG=rfdetr_large_ale_repeat; LABELS="top sum"
 # RF=runs/rfdetr_large_ale_repeat_dino/checkpoint_best_ema.pth; INPUT=amp_log_edge; TAG=rfdetr_large_ale_repeat_dino; LABELS="cls top sum"
 # RF=runs/rfdetr_large_ale_repeat_dino_dora/checkpoint_best_ema.pth; INPUT=amp_log_edge; TAG=rfdetr_large_ale_repeat_dino_dora; LABELS="cls top sum"
 # RF=runs/rfdetr_large_ale_repeat_dino_dora_p3/checkpoint_best_ema.pth; INPUT=amp_log_edge; TAG=rfdetr_large_ale_repeat_dino_dora_p3; LABELS="cls top sum"
@@ -196,13 +206,13 @@ RF=runs/rfdetr_large_ale_repeat/checkpoint_best_ema.pth; INPUT=amp_log_edge; TAG
 #        pass, then every threshold x image-label mode x other-class score scale, ranked by delta-m. The image class
 #        is a prior on the boxes: other-class boxes get their scores scaled (1 = off, 0 = dropped). The best setting's
 #        metrics, predictions and zip go to --out; metrics.json holds the whole sweep under "sweep".
-HELDOUT=runs/eval_heldout_$TAG/sweep
-srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --input "$INPUT" --data "$DATA" --out "$HELDOUT" \
-  --threshold 0.001 0.0001 0.00001 --label-mode $LABELS --other-class-scale 1 0.3 0.1 0.03 0 || exit 1
+# HELDOUT=runs/eval_heldout_$TAG/sweep
+# srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --input "$INPUT" --data "$DATA" --out "$HELDOUT" \
+#   --threshold 0.001 0.0001 0.00001 --label-mode $LABELS --other-class-scale 1 0.3 0.1 0.03 0 || exit 1
 #     b) Official val (and test) predictions -> submission zips, at a)'s best setting (read from its metrics.json).
-BEST=$(python -c "import json; b = json.load(open('$HELDOUT/metrics.json'))['best']; print(f\"--threshold {b['threshold']} --label-mode {b['label_mode']} --other-class-scale {b['other_class_scale']}\")")
-echo "RF-DETR post-processing from the held-out sweep: $BEST"
-srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --input "$INPUT" $BEST \
-  --images-json "$ROOT/val/images.json" --split val --out runs/eval_val_$TAG
+# BEST=$(python -c "import json; b = json.load(open('$HELDOUT/metrics.json'))['best']; print(f\"--threshold {b['threshold']} --label-mode {b['label_mode']} --other-class-scale {b['other_class_scale']}\")")
+# echo "RF-DETR post-processing from the held-out sweep: $BEST"
+# srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --input "$INPUT" $BEST \
+#   --images-json "$ROOT/val/images.json" --split val --out runs/eval_val_$TAG
 # srun --gres=gpu:1 python rfdetr_track/predict_rfdetr.py --checkpoint "$RF" --input "$INPUT" $BEST \
 #   --images-json "$ROOT/test/images.json" --split test --out runs/eval_test_$TAG
