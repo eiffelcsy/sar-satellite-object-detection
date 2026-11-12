@@ -1,0 +1,10 @@
+# L1 (input ablation: pseudo-RGB vs the same grey image three times): j1 with the pseudo-RGB built as amplitude repeated
+# in all three channels, instead of [amplitude, SAR-BM3D despeckled base, Sobel edges of that base]. Same input adapter
+# (ImageNet norm + 1x1 conv), same P2 stem, same everything else, so the only change is what the three channels hold.
+# Pseudo-RGB was on in every run, so it was never isolated (the earlier v2_amp / v2_logamp runs sat on a different
+# recipe and are gone from W&B). Amplitude mode skips BM3D, so it is also the fast input to compute. No new parameters.
+# Compare with j1_roi_fused: held-out mAP 46.34, AP75 49.03, macro-F1 96.28 (final epoch, default post-processing). ~7 h.
+base: j1_roi_fused.yaml
+name: giou_l1_input_amplitude
+preprocess:
+  mode: amplitude

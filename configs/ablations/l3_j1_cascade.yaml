@@ -1,0 +1,17 @@
+# L3: j1 with a Cascade R-CNN head as published, on the mosaic-free recipe. The earlier cascade runs (a6, c1b,
+# dinov3_dora_cascade) ran under mosaic, used IoU 0.4/0.5/0.6 and scored boxes with the last stage alone. Here:
+# IoU 0.5/0.6/0.7, stage loss weights 1/0.5/0.25, and the stages' class scores averaged at inference
+# (score_ensemble). Three per-stage 384-wide heads (14.95 M) replace j1's one 1024-wide head (13.95 M):
+# 39.87 M trainable. Compare with j1 (AP75 and per-class AP).
+base: j1_roi_fused.yaml
+name: giou_l3_j1_cascade
+model:
+  head: cascade
+  head_params:
+    num_stages: 3
+    share_head: false
+    hidden_dim: 384
+    fg_iou_thresholds: [0.5, 0.6, 0.7]
+    bg_iou_threshold: 0.5
+    stage_loss_weights: [1.0, 0.5, 0.25]
+    score_ensemble: true

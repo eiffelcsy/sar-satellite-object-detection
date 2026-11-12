@@ -112,6 +112,8 @@ def test_base_is_the_dora_giou_recipe():
     ('k20_no_bm3d', 'k19_bridge_stack', {'pseudo_rgb_mode'}),
     ('k21_convnext_tiny', 'k19_bridge_stack', {'backbone_name', 'backbone_kwargs', 'detail_stem', 'head_params',
                                                'unfrozen_lr'}),
+    ('l2_j1_no_rope_aug', 'j1_roi_fused', {'backbone_kwargs'}),
+    ('l3_j1_cascade', 'j1_roi_fused', {'head', 'head_params'}),
 ])
 def test_each_ablation_changes_only_its_factor(name, parent, changed):
     parent = parent if isinstance(parent, Path) else CONFIGS / 'ablations' / f'{parent}.yaml'

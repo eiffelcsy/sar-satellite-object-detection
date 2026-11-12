@@ -315,7 +315,7 @@ class CascadeRoIHeads(_SoftNMSPostprocess, RoIHeads):
     def __init__(self, box_roi_pool, box_heads, box_predictors, fg_iou_thresholds=(0.5, 0.6, 0.7),
                  bg_iou_threshold=0.5, batch_size_per_image=512, positive_fraction=0.25, bbox_reg_weights=None,
                  score_thresh=0.05, nms_thresh=0.5, detections_per_img=100, stage_loss_weights=None,
-                 giou_weight=0.0, rescore='off', rescore_power=1.0):
+                 giou_weight=0.0, rescore='off', rescore_power=1.0, score_ensemble=False):
         # Matcher requires low <= high, so the background threshold must not exceed the smallest fg threshold.
         bg_iou_threshold = min(bg_iou_threshold, min(fg_iou_thresholds))
         # The base RoIHeads supplies the box coder, the RoI pool and post-processing shared by all stages.
@@ -331,6 +331,9 @@ class CascadeRoIHeads(_SoftNMSPostprocess, RoIHeads):
         self.stage_loss_weights = list(stage_loss_weights) if stage_loss_weights else [1.0] * len(box_predictors)
         self.giou_weight = giou_weight
         self.rescore, self.rescore_power = rescore, rescore_power
+        # Cascade R-CNN's inference rule: a box's class scores are the mean of every stage's (each on that stage's
+        # own input box); False scores with the last stage alone.
+        self.score_ensemble = score_ensemble
 
     def _refined_boxes(self, box_regression, class_logits, boxes, image_shapes):
         """Decode one box per proposal (highest-scoring foreground class) for the next cascade stage.
@@ -376,6 +379,7 @@ class CascadeRoIHeads(_SoftNMSPostprocess, RoIHeads):
                 proposals, targets, self.cascade_matchers[0], self.cascade_samplers[0])
         losses = {}
         detections = []
+        stage_scores = []
         for stage, predictor in enumerate(self.box_predictors):
             head = self.box_heads[min(stage, len(self.box_heads) - 1)]  # shared head unless per-stage provided
             if stage > 0 and self.training:
@@ -384,6 +388,8 @@ class CascadeRoIHeads(_SoftNMSPostprocess, RoIHeads):
             # At inference the refined boxes from the previous stage carry over as this stage's proposals.
             pooled = self.box_roi_pool(features, boxes, image_shapes)
             class_logits, box_regression = predictor(head(pooled))
+            if not self.training and self.score_ensemble:
+                stage_scores.append(class_logits.float().softmax(-1))
             if self.training:
                 loss_classifier, loss_box_reg = roi_loss(class_logits, box_regression, labels,
                                                          regression_targets, boxes, matched_gt, self.box_coder,
@@ -397,6 +403,8 @@ class CascadeRoIHeads(_SoftNMSPostprocess, RoIHeads):
                 # high-recall candidates for small objects. Only the final stage thresholds and suppresses.
                 boxes = self._refined_boxes(box_regression, class_logits, boxes, image_shapes)
             else:
+                if self.score_ensemble:  # as logits, so re-scoring and the post-processing run unchanged
+                    class_logits = torch.stack(stage_scores).mean(0).clamp(min=1e-12).log()
                 all_boxes, all_scores, all_labels = self.postprocess_detections(
                     _rescored(self, class_logits, boxes, class_prior), box_regression, boxes, image_shapes)
                 detections = [{'boxes': b, 'labels': l, 'scores': s}

@@ -1,0 +1,9 @@
+# L2: j1 with DINOv3's training-mode RoPE augmentation off. The Hugging Face checkpoint sets pos_embed_rescale 2.0:
+# in training mode every forward multiplies the patch coordinates by a random factor in [1/2, 2], in eval mode
+# never, so the heads train on tokens that differ from the ones they are scored on (6-19% relative L2 on two train
+# images). Compare with j1 at the same epoch: 0.304 mAP at epoch 16, 0.359 at 24, 0.429 at 48, 0.463 at 96.
+base: j1_roi_fused.yaml
+name: giou_l2_j1_no_rope_aug
+backbone:
+  params:
+    rope_augment: false

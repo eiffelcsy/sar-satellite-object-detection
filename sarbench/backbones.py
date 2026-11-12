@@ -42,16 +42,29 @@ class DINOv3(nn.Module):
     64 x 64 tokens, so half of the boxes are no longer smaller than one token. The patch embedding is PI-resized
     (`resize_patch_kernel`) and RoPE takes its grid from the input and the patch size, so nothing else changes;
     the cost is 4x the tokens (16x the attention).
+
+    `rope_augment` (default True, the checkpoint's behaviour): in training mode the Hugging Face model multiplies the
+    RoPE patch coordinates by a random factor in [1/2, 2] per forward (`config.pos_embed_rescale: 2.0`, DINOv3's
+    pretraining augmentation), and never in eval mode, so the tokens the heads train on differ from the ones they
+    are evaluated on. False switches the coordinate augmentations off.
     """
 
     def __init__(self, pretrained: bool = True, model_name: str = 'facebook/dinov3-vitb16-pretrain-lvd1689m',
-                 grad_checkpointing: bool = False, patch_size: int | None = None, **kwargs):
+                 grad_checkpointing: bool = False, patch_size: int | None = None, rope_augment: bool = True,
+                 **kwargs):
         super().__init__()
         from transformers import DINOv3ViTConfig, DINOv3ViTModel  # lazy: keeps `import sarbench` light
         if pretrained:
             self.dinov3 = DINOv3ViTModel.from_pretrained(model_name, **kwargs)
         else:
             self.dinov3 = DINOv3ViTModel(DINOv3ViTConfig.from_pretrained(model_name, **kwargs))
+        if not rope_augment:  # same RoPE coordinates in train and eval mode
+            for key in ('pos_embed_rescale', 'pos_embed_shift', 'pos_embed_jitter'):
+                setattr(self.dinov3.config, key, None)
+            for module in self.dinov3.modules():  # a sub-module may hold its own copy of the config
+                if getattr(module, 'config', None) is not None and hasattr(module.config, 'pos_embed_rescale'):
+                    module.config.pos_embed_rescale = module.config.pos_embed_shift = None
+                    module.config.pos_embed_jitter = None
         if grad_checkpointing:  # recompute blocks in backward: much lower activation memory, ~30 % slower
             self.dinov3.gradient_checkpointing_enable()
             if hasattr(self.dinov3, 'enable_input_require_grads'):  # frozen embeddings still need a grad path

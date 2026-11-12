@@ -12,8 +12,10 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
                                    # params.model_name defaults to facebook/dinov3-convnext-tiny-pretrain-lvd1689m,
                                    # the peft section is ignored, its weights train at train.unfrozen_lr)
       pretrained: true
-      params: {model_name: facebook/dinov3-vitb16-pretrain-lvd1689m, patch_size: 8, grad_checkpointing: true}
+      params: {model_name: facebook/dinov3-vitb16-pretrain-lvd1689m, patch_size: 8, grad_checkpointing: true,
+               rope_augment: true}
                                    # patch_size 8: PI-resized patch embedding, 64 x 64 tokens at 512 px
+                                   # rope_augment false: no random RoPE coordinate rescale in training mode
     peft:
       method: dora                 # the only adapter
       params: {rank: 32, alpha: 32}
@@ -38,6 +40,7 @@ Schema (every section is optional; the defaults are the `dinov3_dora_giou` recip
       head: cascade                # standard (default) | cascade RoI head
       head_params: {num_stages: 3, share_head: false, hidden_dim: 256, fg_iou_thresholds: [0.4, 0.5, 0.6]}
                                    # both heads: box_head mlp (default) | conv (+ num_convs, conv_dim, reduce)
+                                   # cascade: score_ensemble true averages the stages' class scores at inference
       detail_stem_params: {channels: 64, extra_convs: 0, aligned: false}
                                    # P2 conv stem width / extra stride-4 3x3 convs / cells centred like the ViT's
       rpn_fg_iou_thresh: 0.7       # RPN anchor positive / negative IoU thresholds

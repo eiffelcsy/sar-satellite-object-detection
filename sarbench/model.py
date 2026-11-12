@@ -407,7 +407,8 @@ class MultiTaskModel(nn.Module):
                          detections_per_img, iou_aware=False, iou_alpha=0.5, batch_size_per_image=512,
                          positive_fraction=0.25):
         """`standard`: one Faster R-CNN RoI head. `cascade`: Cascade R-CNN with `head_params` num_stages (3),
-        share_head (true), fg_iou_thresholds (0.5/0.6/...), bg_iou_threshold (0.5) and stage_loss_weights (1.0).
+        share_head (true), fg_iou_thresholds (0.5/0.6/...), bg_iou_threshold (0.5), stage_loss_weights (1.0) and
+        score_ensemble (false; true averages the stages' class scores at inference, as Cascade R-CNN does).
 
         Both take `head_params` box_head: `mlp` (torchvision's two fc layers of width hidden_dim, default 1024) or
         `conv` (ConvFCBoxHead: num_convs 3x3 convs, a 1x1 down to `reduce` channels, one fc of width hidden_dim).
@@ -446,7 +447,7 @@ class MultiTaskModel(nn.Module):
                 bg_iou_threshold=params.get('bg_iou_threshold', 0.5), batch_size_per_image=batch_size_per_image,
                 positive_fraction=positive_fraction, bbox_reg_weights=None,
                 stage_loss_weights=params.get('stage_loss_weights'),
-                giou_weight=giou_weight, **post)
+                score_ensemble=params.get('score_ensemble', False), giou_weight=giou_weight, **post)
         raise ValueError(f"unknown head '{head}'; available: standard, cascade")
 
     def _backbone_tokens(self, images):

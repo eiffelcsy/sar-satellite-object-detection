@@ -175,6 +175,8 @@ mosaic/copy-paste, 48 epochs. 111.27 M parameters in total, 25.61 M trainable.
 | `k18_repeat_hard_centred_aligned` | k17 + anchors on cell centres (k15) + RoIAlign aligned=True (k11) | k17 | 123.93 | 38.86 |
 | `k19_bridge_stack` | k17 + size-aware RPN positives (k14) + context RoI pooling (each RoI also pooled at 2x); no copy-paste on wind turbines either | k17 | 124.06 | 38.99 |
 | `k20_no_bm3d` | pseudo-RGB without SAR-BM3D (amplitude, log-amplitude, Sobel edges) | k19 | 124.06 | 38.99 |
+| `l2_j1_no_rope_aug` | DINOv3's training-mode RoPE coordinate rescale (x0.5-2 per forward) switched off | j1 | 123.93 | 38.86 |
+| `l3_j1_cascade` | Cascade R-CNN as published: 3 x 384-wide heads, IoU 0.5/0.6/0.7, stage scores averaged at inference | j1 | 124.94 | 39.87 |
 | `k21_convnext_tiny` | DINOv3 ConvNeXt-Tiny trained entirely + FPN (no DoRA ViT, no P2 stem), box MLP 512 | k19 | 38.00 | 38.00 |
 
 The `b*` runs answer "how should the remaining trainable budget be spent": all build on `a1` and fill ~38-39.5 M
