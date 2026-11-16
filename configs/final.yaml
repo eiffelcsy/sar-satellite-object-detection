@@ -1,0 +1,56 @@
+# The final model (run d16, "giou_d16_full_train_j1_250ep" on W&B): every setting of training and inference.
+#
+#   train:   python train.py --data /path/to/cs701-sar-course-data/train
+#   predict: python predict.py --weights model.pt --images-json /path/to/cs701-sar-course-data/test/images.json
+#
+# Fixed in code (sarbench/model.py): pseudo-RGB input (amplitude, SAR-BM3D, Sobel), input adapter (ImageNet norm +
+# identity-init 1x1 conv + unfrozen patch embedding), DINOv3 ViT-B/16 frozen with DoRA + Convpass in every block,
+# ViTDet simple feature pyramid + P2 conv stem, Faster R-CNN with fused (max over P2-P5) RoIAlign and a GIoU term.
+# 123,932,325 parameters in total, 38,862,501 trainable (limits: 130 M / 40 M).
+name: d16_final
+
+backbone:
+  model_name: facebook/dinov3-vitb16-pretrain-lvd1689m   # gated on Hugging Face (training only, see README)
+
+adapters:
+  dora_rank: 32
+  dora_alpha: 32
+  dora_targets: [attn, mlp]  # q/k/v/o_proj and up/down_proj of all 12 blocks
+  convpass_dim: 256          # Convpass bottleneck width, one adapter after every block
+
+model:
+  stem_channels: 128         # P2 conv stem: 3x3 s2 -> 128, 3x3 s2 -> 256, 1x1 -> 256, then...
+  stem_extra_convs: 1        # ...one more 3x3 conv at stride 4
+  giou_weight: 1.0           # GIoU term added to the RoI box loss
+  score_thresh: 1.0e-5       # inference post-processing, as used for the Codabench submissions
+  nms_thresh: 0.85
+  detections_per_img: 100
+
+preprocess:
+  clip_percentile: 0.5       # brightest 0.5 % of pixels clipped before scaling each channel to [0, 1]
+  cache: preprocess_cache    # SAR-BM3D results cached here (first epoch fills it; ~1.5 s per image without it)
+
+data:
+  val_fraction: 0.0          # 0: train on all 9,392 train images (the held-out ablations used 0.1)
+  split_seed: 0              # which images are held out when val_fraction > 0
+  copy_paste: 0.5            # probability of pasting up to 3 objects from another image of the same class
+  copy_paste_margin: 1       # px of context pasted around each object
+
+loss:                        # weights of the summed loss terms (others: 1.0)
+  classification: 0.1
+  loss_box_reg: 2.0
+  loss_rpn_box_reg: 1.5
+
+train:
+  epochs: 250
+  batch_size: 16
+  lr: 2.0e-4                 # new modules outside the backbone: neck, P2 stem, RPN, RoI head, input adapter
+  backbone_lr: 3.0e-4        # DoRA and Convpass
+  cls_lr: 1.0e-4             # image classifier
+  unfrozen_lr: 2.0e-5        # DINOv3 patch embedding
+  weight_decay: 0.05         # AdamW, every group
+  warmup_epochs: 1           # linear warmup, then cosine decay to 0
+  eval_every: 4              # held-out validation interval (only when val_fraction > 0)
+  checkpoint_every: 1        # write last.pt every N epochs, for --resume
+  workers: 4
+  seed: 0

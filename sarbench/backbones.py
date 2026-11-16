@@ -1,88 +1,32 @@
-"""The DINOv3 backbones, built for 512 px input.
+"""The DINOv3 ViT-B/16 backbone (Hugging Face transformers): images [B, 3, 512, 512] -> patch tokens [B, 1024, 768].
 
-`DINOv3` (the ViT, adapted with DoRA): images [B, 3, 512, 512] -> patch tokens [B, 1024, embed_dim] (or
-[B, 4096, embed_dim] with `patch_size: 8`). `DINOv3ConvNeXt` (trained entirely): images -> four stage maps at strides
-4 / 8 / 16 / 32 plus a pooled image vector.
-
-The ViT exposes `embed_dim`, `patch_size`, `num_prefix_tokens`, a `blocks` list, `adapter_targets()` (the projections that
-DoRA may wrap, with their block index) and a forward that returns the final patch tokens (prefix tokens dropped).
+It exposes `embed_dim`, `patch_size`, `in_chans`, `num_prefix_tokens`, a `blocks` list and `adapter_targets()` (the
+projections DoRA wraps), and its forward drops the CLS and 4 register tokens.
 """
-import torch
-import torch.nn.functional as F
+from pathlib import Path
+
 from torch import nn
 
-
-def resize_patch_kernel(weight, size):
-    """FlexiViT's PI-resize (Beyer et al., 2023) of a patch-embedding kernel [D, C, p, p] to [D, C, size, size].
-
-    The new kernel on a size x size patch gives the token the old kernel gives on that patch bilinearly resized to
-    p x p: <B x, w> = <x, B^T w>, with B the resize matrix. Going from 16 to 8 px, every 8 x 8 patch is embedded
-    exactly as its 2x bilinear upsampling would be (about the image upsampled 2x, up to the patch borders), so the
-    frozen ViT sees tokens like the ones it was pretrained on (for
-    upsampling to a larger patch the pseudo-inverse of B^T would be needed instead; not used here).
-    """
-    old = weight.shape[-1]
-    if size > old:
-        raise ValueError(f'patch_size {size} > the pretrained {old}: only smaller patches are supported')
-    basis = torch.eye(size * size, dtype=torch.float64).view(-1, 1, size, size)
-    resize = F.interpolate(basis, size=(old, old), mode='bilinear', align_corners=False).view(size * size, -1)
-    resized = weight.double().flatten(2) @ resize.T  # [D, C, old*old] @ [old*old, size*size]
-    return resized.view(*weight.shape[:2], size, size).to(weight.dtype)
+# The checkpoint's architecture (its config.json), so inference can build the model without the gated download:
+# every weight then comes from the trained model.pt.
+CONFIG_JSON = Path(__file__).with_name('dinov3_vitb16_config.json')
 
 
 class DINOv3(nn.Module):
-    """DINOv3 ViT (Meta) through HuggingFace transformers. A single gray channel is repeated to the RGB
-    channel count of the pretrained model.
+    """DINOv3 ViT through transformers. `pretrained` loads the (gated) checkpoint `model_name`; otherwise the same
+    architecture is built from `CONFIG_JSON` with random weights, to be overwritten by a saved state_dict."""
 
-    `model_name` selects the checkpoint (default facebook/dinov3-vitb16-pretrain-lvd1689m, 86 M parameters).
-    The checkpoints are gated on Hugging Face: accept the licence on the model page and `huggingface-cli login`
-    once before the first run.
-
-    `patch_size` (default: the checkpoint's 16) below 16 re-tokenizes the same 512 px input on a finer grid: 8 gives
-    64 x 64 tokens, so half of the boxes are no longer smaller than one token. The patch embedding is PI-resized
-    (`resize_patch_kernel`) and RoPE takes its grid from the input and the patch size, so nothing else changes;
-    the cost is 4x the tokens (16x the attention).
-
-    `rope_augment` (default True, the checkpoint's behaviour): in training mode the Hugging Face model multiplies the
-    RoPE patch coordinates by a random factor in [1/2, 2] per forward (`config.pos_embed_rescale: 2.0`, DINOv3's
-    pretraining augmentation), and never in eval mode, so the tokens the heads train on differ from the ones they
-    are evaluated on. False switches the coordinate augmentations off.
-    """
-
-    def __init__(self, pretrained: bool = True, model_name: str = 'facebook/dinov3-vitb16-pretrain-lvd1689m',
-                 grad_checkpointing: bool = False, patch_size: int | None = None, rope_augment: bool = True,
-                 **kwargs):
+    def __init__(self, model_name='facebook/dinov3-vitb16-pretrain-lvd1689m', pretrained=True):
         super().__init__()
         from transformers import DINOv3ViTConfig, DINOv3ViTModel  # lazy: keeps `import sarbench` light
         if pretrained:
-            self.dinov3 = DINOv3ViTModel.from_pretrained(model_name, **kwargs)
+            self.dinov3 = DINOv3ViTModel.from_pretrained(model_name)
         else:
-            self.dinov3 = DINOv3ViTModel(DINOv3ViTConfig.from_pretrained(model_name, **kwargs))
-        if not rope_augment:  # same RoPE coordinates in train and eval mode
-            for key in ('pos_embed_rescale', 'pos_embed_shift', 'pos_embed_jitter'):
-                setattr(self.dinov3.config, key, None)
-            for module in self.dinov3.modules():  # a sub-module may hold its own copy of the config
-                if getattr(module, 'config', None) is not None and hasattr(module.config, 'pos_embed_rescale'):
-                    module.config.pos_embed_rescale = module.config.pos_embed_shift = None
-                    module.config.pos_embed_jitter = None
-        if grad_checkpointing:  # recompute blocks in backward: much lower activation memory, ~30 % slower
-            self.dinov3.gradient_checkpointing_enable()
-            if hasattr(self.dinov3, 'enable_input_require_grads'):  # frozen embeddings still need a grad path
-                self.dinov3.enable_input_require_grads()
-        if patch_size is not None and patch_size != self.dinov3.config.patch_size:
-            embed = self.dinov3.embeddings.patch_embeddings
-            resized = nn.Conv2d(embed.in_channels, embed.out_channels, patch_size, stride=patch_size)
-            with torch.no_grad():
-                resized.weight.copy_(resize_patch_kernel(embed.weight, patch_size))
-                resized.bias.copy_(embed.bias)
-            resized.requires_grad_(embed.weight.requires_grad)
-            self.dinov3.embeddings.patch_embeddings = resized
-            self.dinov3.config.patch_size = patch_size  # the RoPE grid is input size // config.patch_size
-        self.model_name = model_name
+            self.dinov3 = DINOv3ViTModel(DINOv3ViTConfig.from_json_file(CONFIG_JSON))
         self.patch_size = self.dinov3.config.patch_size
         self.embed_dim = self.dinov3.config.hidden_size
         self.in_chans = self.dinov3.config.num_channels
-        self.num_prefix_tokens = 1 + getattr(self.dinov3.config, 'num_register_tokens', 0)
+        self.num_prefix_tokens = 1 + self.dinov3.config.num_register_tokens
         encoder = getattr(self.dinov3, 'model', self.dinov3)  # transformers >= 5 nests the encoder under .model
         self._layers = encoder.layer
 
@@ -91,8 +35,8 @@ class DINOv3(nn.Module):
         return self._layers
 
     def adapter_targets(self, groups=('attn', 'mlp')):
-        """(block index, parent module, attribute) of every projection DoRA may wrap. `groups`: 'attn' =
-        q_proj/k_proj/v_proj/o_proj, 'mlp' = up_proj/down_proj (gate_proj too when the MLP is gated)."""
+        """(block index, parent module, attribute) of every projection DoRA wraps: 'attn' = q/k/v/o_proj,
+        'mlp' = up/down_proj."""
         targets = []
         for index, layer in enumerate(self.blocks):
             if 'attn' in groups:
@@ -103,55 +47,11 @@ class DINOv3(nn.Module):
         return targets
 
     def unfreeze_patch_embed(self):
-        """Re-enable gradients on the patch embedding (adapt_backbone freezes everything; this is called after)."""
+        """Re-enable gradients on the patch embedding (adapt_backbone froze everything)."""
         self.dinov3.get_input_embeddings().requires_grad_(True)
 
-    def forward(self, x, with_prefix=False):
-        """Patch tokens [B, N, embed_dim]; with `with_prefix`, all tokens [B, prefix + N, embed_dim] (CLS first,
-        then the registers)."""
-        if x.shape[1] != self.in_chans:  # gray -> the pretrained RGB channel count
-            x = x.repeat(1, self.in_chans, 1, 1)
-        tokens = self.dinov3(x).last_hidden_state  # [B, prefix + N, embed_dim], final norm applied
-        return tokens if with_prefix else tokens[:, self.num_prefix_tokens:]
-
-
-class DINOv3ConvNeXt(nn.Module):
-    """DINOv3's ConvNeXt (distilled from the 7B ViT; Meta) through HuggingFace transformers, trained entirely.
-
-    Unlike the ViT, whose single stride-16 map the neck has to upsample for small objects, it has native stride-4 / 8
-    / 16 / 32 stage maps, for an FPN. Tiny (`facebook/dinov3-convnext-tiny-pretrain-lvd1689m`, 27.8 M) fits the 40 M
-    trainable budget with every weight trained, so the whole network adapts to SAR instead of DoRA's low-rank update.
-    The checkpoints are gated like the ViT's. `hierarchical` tells MultiTaskModel to build an FPN neck.
-    `config` (a dict of DINOv3ConvNextConfig fields) builds a randomly initialised model without downloading (tests).
-    """
-
-    hierarchical = True
-
-    def __init__(self, pretrained: bool = True, model_name: str = 'facebook/dinov3-convnext-tiny-pretrain-lvd1689m',
-                 grad_checkpointing: bool = False, config: dict | None = None, **kwargs):
-        super().__init__()
-        from transformers import DINOv3ConvNextConfig, DINOv3ConvNextModel  # lazy: keeps `import sarbench` light
-        if config is not None:
-            self.convnext = DINOv3ConvNextModel(DINOv3ConvNextConfig(**config))
-        elif pretrained:
-            self.convnext = DINOv3ConvNextModel.from_pretrained(model_name, **kwargs)
-        else:
-            self.convnext = DINOv3ConvNextModel(DINOv3ConvNextConfig.from_pretrained(model_name, **kwargs))
-        if grad_checkpointing:
-            self.convnext.gradient_checkpointing_enable()
-        self.model_name = model_name
-        self.channels = list(self.convnext.config.hidden_sizes)
-        self.embed_dim = self.channels[-1]
-        self.in_chans = self.convnext.config.num_channels
-        self.patch_size = 4  # stride of the finest map
-
     def forward(self, x):
-        """([four stage maps [B, C_i, H / s, W / s] for s = 4, 8, 16, 32], pooled image vector [B, embed_dim])."""
+        """Patch tokens [B, N, embed_dim] (final norm applied, prefix tokens dropped)."""
         if x.shape[1] != self.in_chans:  # gray -> the pretrained RGB channel count
             x = x.repeat(1, self.in_chans, 1, 1)
-        out = self.convnext(x, output_hidden_states=True)
-        # hidden_states holds the stage outputs (and, depending on the transformers version, the input): take the
-        # last map of each stage width, finest first.
-        maps = [next(h for h in reversed(out.hidden_states) if h.ndim == 4 and h.shape[1] == c)
-                for c in self.channels]
-        return maps, out.pooler_output  # pooled: the layer-normed global average (DINOv3's "CLS" for ConvNeXt)
+        return self.dinov3(x).last_hidden_state[:, self.num_prefix_tokens:]

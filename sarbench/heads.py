@@ -1,412 +1,60 @@
-"""RoI heads with an optional GIoU box-regression term: torchvision's Faster R-CNN head (`DetRoIHeads`) and
-Cascade R-CNN (`CascadeRoIHeads`), plus a conv box head (`ConvFCBoxHead`) usable by either. Both RoI heads return
-the same `(per-image detections, loss dict)` interface as torchvision, so the rest of the pipeline is unchanged.
-
-Both heads also take the image classifier's probabilities at inference (`class_prior`) and re-score their boxes
-with them (`rescore`, see `apply_class_prior`), and match proposals to GT with a configurable `box_similarity`
-(IoU, NWD or the larger of the two, see `box_similarity`). The standard head can also predict each box's IoU with its
-ground truth and rank detections by class score x predicted IoU (`iou_aware`, see `apply_box_quality`).
-Both can replace per-class NMS with Gaussian Soft-NMS at inference (`soft_nms_sigma` > 0, see `soft_nms`).
-"""
-import functools
-
+"""The RoI head: torchvision's Faster R-CNN head with a GIoU term added to its box-regression loss."""
 import torch
 import torch.nn.functional as F
-from torch import nn
-from torchvision.models.detection._utils import BalancedPositiveNegativeSampler, Matcher
-from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchvision.models.detection.roi_heads import RoIHeads
-from torchvision.ops import box_iou, clip_boxes_to_image, remove_small_boxes
-
-from .losses import fastrcnn_loss as roi_loss
-
-RESCORE_MODES = ('off', 'soft', 'hard', 'merge')
-BOX_SIMILARITIES = ('iou', 'nwd', 'max')
+from torchvision.ops import generalized_box_iou
 
 
-def normalized_wasserstein(boxes1, boxes2, constant=16.0):
-    """NWD (Wang et al., 2021, tiny-object detection): exp(-W2 / C) between XYXY boxes, [N, M] in (0, 1].
+def fastrcnn_loss(class_logits, box_regression, labels, regression_targets, proposals, matched_gt, box_coder,
+                  giou_weight=1.0):
+    """torchvision's Fast R-CNN loss (cross-entropy + smooth-L1) plus `giou_weight` x the GIoU loss of each positive's
+    decoded box (its GT class) against the GT box it was matched to, normalized like the smooth-L1 term."""
+    labels = torch.cat(labels, dim=0)
+    regression_targets = torch.cat(regression_targets, dim=0)
+    classification_loss = F.cross_entropy(class_logits, labels)
 
-    Each box is the 2-D Gaussian N((cx, cy), diag(w^2 / 4, h^2 / 4)), whose 2-Wasserstein distance is the Euclidean
-    distance between (cx, cy, w / 2, h / 2). Unlike IoU, it decays smoothly with a few px of offset, so a 6-15 px box
-    shifted by 2 px still matches its anchor. `constant` (C) is about the typical box size in px (median 15.9 here).
-    """
-    def gaussian(boxes):
-        return torch.stack([(boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2,
-                            (boxes[:, 2] - boxes[:, 0]) / 2, (boxes[:, 3] - boxes[:, 1]) / 2], dim=1)
-    return torch.exp(-torch.cdist(gaussian(boxes1.float()), gaussian(boxes2.float())) / constant)
+    num_classes = class_logits.shape[1]
+    positive = torch.where(labels > 0)[0]
+    box_regression = box_regression.reshape(box_regression.size(0), num_classes, 4)
+    box_loss = F.smooth_l1_loss(box_regression[positive, labels[positive]], regression_targets[positive],
+                                beta=1 / 9, reduction='sum') / labels.numel()
 
-
-def _iou_or_nwd(boxes1, boxes2, constant):
-    return torch.maximum(box_iou(boxes1, boxes2), normalized_wasserstein(boxes1, boxes2, constant))
-
-
-def box_similarity(name='iou', nwd_constant=16.0):
-    """The [GT, box] similarity that labels anchors (RPN) and proposals (RoI head) against the IoU thresholds:
-    `iou` (torchvision's), `nwd` (`normalized_wasserstein`) or `max` (the larger of the two: NWD's leniency for tiny
-    boxes, where it exceeds IoU, while large boxes keep their IoU labels)."""
-    if name == 'iou':
-        return box_iou
-    if name == 'nwd':
-        return functools.partial(normalized_wasserstein, constant=nwd_constant)
-    if name == 'max':
-        return functools.partial(_iou_or_nwd, constant=nwd_constant)
-    raise ValueError(f"unknown box_similarity '{name}'; available: {', '.join(BOX_SIMILARITIES)}")
-
-
-def size_adaptive_threshold(gt_boxes, fg_thresh=0.7, floor=0.25, base=0.20, slope=0.15, ref=12.0):
-    """CFINet's (Yuan et al., ICCV 2023) size-dependent positive IoU bar per GT box: clamp(base + slope *
-    ln(sqrt(w h) / ref), floor, fg_thresh). A 9 px box gets 0.25, a 32 px one ~0.35, a 100 px one ~0.52; none is
-    stricter than the usual `fg_thresh`."""
-    size = ((gt_boxes[:, 2] - gt_boxes[:, 0]) * (gt_boxes[:, 3] - gt_boxes[:, 1])).clamp(min=1e-6).sqrt()
-    return (base + slope * torch.log(size / ref)).clamp(min=floor, max=fg_thresh)
-
-
-def size_adaptive_similarity(similarity, fg_thresh=0.7, **rule):
-    """`similarity` with each GT row scaled by fg_thresh / its `size_adaptive_threshold`, so the Matcher's fixed
-    fg_thresh acts as the per-GT bar: an anchor at IoU 0.25 with a 9 px box becomes a positive. The background bar
-    scales with it (bg x threshold / fg_thresh, ~0.11 for a 9 px box), anchors in between are ignored, and each GT's
-    best anchors are unchanged (a row's argmax is unaffected by scaling)."""
-    def scaled(gt_boxes, boxes):
-        return similarity(gt_boxes, boxes) * (fg_thresh / size_adaptive_threshold(gt_boxes, fg_thresh, **rule))[:, None]
-    return scaled
-
-
-def apply_class_prior(class_logits, prior, mode='soft', power=1.0):
-    """Re-score the RoI head's class scores with the image classifier's probabilities (inference only).
-
-    Every image has one class and all its boxes share it, so a box of another class is a false positive for that
-    class. `class_logits` [N, 1 + C] (background first), `prior` [N, C] (the image's probabilities, one row per
-    proposal). `mode`:
-
-        soft    p(c | box) * p(c | image) ** power  (power 0 changes nothing; large powers approach hard)
-        hard    only the image's predicted class keeps its score; every other class is zeroed
-        merge   the box's whole foreground mass, 1 - p(background | box), goes to the image's predicted class
-
-    Returns logits whose softmax is the re-scored distribution (the background takes the remainder), so torchvision's
-    post-processing (score threshold, per-class NMS, top-k) runs on the new scores unchanged.
-    """
-    scores = class_logits.float().softmax(-1)
-    foreground = scores[:, 1:]
-    if mode == 'soft':
-        foreground = foreground * prior.float().pow(power)
-    elif mode in ('hard', 'merge'):
-        predicted = F.one_hot(prior.argmax(1), prior.shape[1]).to(foreground.dtype)
-        foreground = predicted * (foreground.sum(1, keepdim=True) if mode == 'merge' else foreground)
-    elif mode != 'off':
-        raise ValueError(f"unknown rescore mode '{mode}'; available: {', '.join(RESCORE_MODES)}")
-    return _as_logits(foreground)
-
-
-def apply_box_quality(class_logits, quality, alpha=0.5):
-    """Rank boxes by how well they are localized: p(c | box) * IoU_c ** alpha (inference only).
-
-    `class_logits` [N, 1 + C], `quality` [N, C] the predicted IoU of each class's decoded box with its GT (in [0, 1]).
-    The class score alone says nothing about localization, so a tight box can rank below a loose one; AP75 and above
-    pay for that. alpha 0 changes nothing (the same model ranked by class score alone). Returns logits, as
-    `apply_class_prior` does, so the two compose and torchvision's post-processing is unchanged.
-    """
-    foreground = class_logits.float().softmax(-1)[:, 1:] * quality.float().clamp(min=0).pow(alpha)
-    return _as_logits(foreground)
-
-
-def _as_logits(foreground):
-    """Logits whose softmax is `foreground` [N, C] with the background taking the remainder (re-scored foreground
-    mass never exceeds the original, so the remainder is >= 0)."""
-    background = (1 - foreground.sum(1, keepdim=True)).clamp(min=0)
-    return torch.cat([background, foreground], dim=1).clamp(min=1e-12).log()
-
-
-def paired_iou(boxes1, boxes2):
-    """IoU of each row of `boxes1` [N, 4] with the same row of `boxes2` (XYXY): [N]."""
-    top_left = torch.maximum(boxes1[:, :2], boxes2[:, :2])
-    bottom_right = torch.minimum(boxes1[:, 2:], boxes2[:, 2:])
-    inter = (bottom_right - top_left).clamp(min=0).prod(1)
-    area = lambda b: (b[:, 2:] - b[:, :2]).clamp(min=0).prod(1)
-    return inter / (area(boxes1) + area(boxes2) - inter).clamp(min=1e-6)
-
-
-def _rescored(heads, class_logits, proposals, class_prior):
-    """`class_logits` re-scored with `class_prior` [B, C] when the heads' `rescore` is on (else unchanged)."""
-    if class_prior is None or heads.rescore == 'off':
-        return class_logits
-    rows = torch.cat([p.expand(len(b), -1) for p, b in zip(class_prior, proposals)])
-    return apply_class_prior(class_logits, rows, heads.rescore, heads.rescore_power)
-
-
-def soft_nms(boxes, scores, labels, sigma=0.5, min_score=0.001, max_keep=100):
-    """Per-class Gaussian Soft-NMS (Bodla et al., ICCV 2017): returns (kept indices, decayed scores), best first.
-
-    Instead of deleting every box above an IoU with a higher-scoring one, each pick decays the others' scores by
-    exp(-IoU^2 / sigma); boxes falling below `min_score` are dropped. A slightly offset second box survives with a
-    lower score instead of vanishing, which is what COCO AP at high IoU thresholds rewards.
-    """
-    keep, kept_scores = [], []
-    if boxes.numel() == 0:
-        return boxes.new_zeros(0, dtype=torch.long), scores.new_zeros(0)
-    shifted = boxes + (labels.to(boxes) * (boxes.max() + 1))[:, None]  # no overlap across classes
-    scores = scores.clone()
-    alive = torch.arange(len(scores), device=boxes.device)
-    while alive.numel() and len(keep) < max_keep:
-        top = int(scores[alive].argmax())
-        best = alive[top]
-        keep.append(best)
-        kept_scores.append(scores[best])
-        alive = torch.cat([alive[:top], alive[top + 1:]])
-        if not alive.numel():
-            break
-        overlap = box_iou(shifted[best][None], shifted[alive])[0]
-        scores[alive] = scores[alive] * torch.exp(-overlap ** 2 / sigma)
-        alive = alive[scores[alive] > min_score]
-    return torch.stack(keep), torch.stack(kept_scores)
-
-
-class CentredAnchorGenerator(AnchorGenerator):
-    """torchvision's anchors shifted by half a stride, so each anchor is centred on its feature cell's centre,
-    (j + 0.5) x stride, instead of torchvision's j x stride (2 px off on P2, which is the size of a near miss on a
-    9 px box). The RPN head reading cell j then predicts offsets from the box that cell actually sees."""
-
-    def grid_anchors(self, grid_sizes, strides):
-        anchors = super().grid_anchors(grid_sizes, strides)
-        return [a + torch.stack([s[1], s[0], s[1], s[0]]).to(a) / 2 for a, s in zip(anchors, strides)]
-
-
-class _SoftNMSPostprocess:
-    """torchvision's `postprocess_detections`, with Gaussian Soft-NMS in place of per-class NMS when
-    `soft_nms_sigma` > 0 (inference only; 0 keeps torchvision's path exactly)."""
-
-    soft_nms_sigma = 0.0
-
-    def postprocess_detections(self, class_logits, box_regression, proposals, image_shapes):
-        if self.soft_nms_sigma <= 0:
-            return super().postprocess_detections(class_logits, box_regression, proposals, image_shapes)
-        num_classes = class_logits.shape[-1]
+    if giou_weight > 0:
         counts = [len(p) for p in proposals]
-        pred_boxes = self.box_coder.decode(box_regression, proposals).split(counts, 0)
-        pred_scores = F.softmax(class_logits, -1).split(counts, 0)
-        all_boxes, all_scores, all_labels = [], [], []
-        for boxes, scores, image_shape in zip(pred_boxes, pred_scores, image_shapes):
-            boxes = clip_boxes_to_image(boxes, image_shape)
-            labels = torch.arange(num_classes, device=boxes.device).view(1, -1).expand_as(scores)
-            boxes, scores, labels = boxes[:, 1:].reshape(-1, 4), scores[:, 1:].reshape(-1), labels[:, 1:].reshape(-1)
-            inds = torch.where(scores > self.score_thresh)[0]
-            boxes, scores, labels = boxes[inds], scores[inds], labels[inds]
-            keep = remove_small_boxes(boxes, min_size=1e-2)
-            boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
-            keep, scores = soft_nms(boxes, scores, labels, self.soft_nms_sigma, self.score_thresh,
-                                    self.detections_per_img)
-            all_boxes.append(boxes[keep])
-            all_scores.append(scores)
-            all_labels.append(labels[keep])
-        return all_boxes, all_scores, all_labels
+        decoded = box_coder.decode(box_regression.flatten(1), proposals).split(counts, dim=0)
+        terms = []
+        for predicted, gt, label in zip(decoded, matched_gt, labels.split(counts)):
+            keep = label > 0
+            if not keep.any():
+                continue
+            predicted = predicted.view(-1, num_classes, 4)[keep]
+            predicted = predicted[torch.arange(predicted.shape[0], device=predicted.device), label[keep]]
+            terms.append((1 - torch.diag(generalized_box_iou(predicted, gt[keep]))).sum())
+        if terms:
+            box_loss = box_loss + giou_weight * (sum(terms) / labels.numel())
+    return classification_loss, box_loss
 
 
-class ConvFCBoxHead(nn.Module):
-    """RoI box head of `num_convs` 3x3 convs (GroupNorm, ReLU) on the pooled 256 x 7 x 7 features, a 1x1 conv down to
-    `reduce` channels, then one fully connected layer of width `fc_dim` (the "4conv1fc" head, made cheaper).
+class DetRoIHeads(RoIHeads):
+    """torchvision's RoI head (box branch only) with the GIoU box term (`giou_weight`). Returns torchvision's
+    (per-image detections, loss dict)."""
 
-    The 3x3 convs keep the RoI's spatial layout for localization, and the 1x1 reduction makes the fully connected
-    layer `reduce`/256 of torchvision's first fc: 5.6 M parameters instead of 13.9 M at the defaults.
-    """
-
-    def __init__(self, in_channels=256, resolution=7, num_convs=4, conv_dim=256, reduce=64, fc_dim=1024):
-        super().__init__()
-        layers, channels = [], in_channels
-        for _ in range(num_convs):
-            layers += [nn.Conv2d(channels, conv_dim, 3, padding=1, bias=False), nn.GroupNorm(32, conv_dim),
-                       nn.ReLU(inplace=True)]
-            channels = conv_dim
-        layers += [nn.Conv2d(channels, reduce, 1), nn.ReLU(inplace=True)]
-        self.convs = nn.Sequential(*layers)
-        self.fc = nn.Linear(reduce * resolution * resolution, fc_dim)
-
-    def forward(self, x):
-        return torch.relu(self.fc(self.convs(x).flatten(1)))
-
-
-class DetRoIHeads(_SoftNMSPostprocess, RoIHeads):
-    """torchvision's RoI head with an additional GIoU box-regression term (`giou_weight`, 0 disables it), image-class
-    re-scoring at inference (`rescore`, `rescore_power`) and proposal matching by `self.box_similarity`.
-
-    `iou_dim` (the box head's output width; None disables it) adds an IoU branch: one linear layer predicting, per
-    class, the IoU of that class's decoded box with its GT (IoU-Net, Jiang et al., 2018). It trains on the sampled
-    positives (`loss_iou`: binary cross-entropy against the detached IoU of the box as currently regressed), and at
-    inference detections are ranked by class score x predicted IoU ** `iou_alpha` (`apply_box_quality`).
-    `giou_alpha` != 1 turns the GIoU term into alpha-GIoU (`losses.alpha_giou_loss`).
-    """
-
-    giou_alpha = 1.0
-
-    def __init__(self, *args, giou_weight=0.0, rescore='off', rescore_power=1.0, iou_dim=None, iou_alpha=0.5,
-                 **kwargs):
+    def __init__(self, *args, giou_weight=1.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.giou_weight = giou_weight
-        self.rescore, self.rescore_power = rescore, rescore_power
-        num_classes = self.box_predictor.cls_score.out_features - 1
-        self.iou_predictor = nn.Linear(iou_dim, num_classes) if iou_dim else None
-        self.iou_alpha = iou_alpha
 
-    def iou_loss(self, iou_logits, box_regression, proposals, labels, matched_gt):
-        """BCE of the predicted IoU of each positive's GT-class box against that box's actual IoU with its GT."""
-        labels = torch.cat(labels)
-        positive = torch.where(labels > 0)[0]
-        if not len(positive):
-            return iou_logits.sum() * 0
-        decoded = self.box_coder.decode(box_regression.detach(), proposals)  # [N, 1 + C, 4]
-        label = labels[positive]
-        predicted = decoded[positive, label]
-        target = paired_iou(predicted, torch.cat(matched_gt)[positive].to(predicted.dtype))
-        return F.binary_cross_entropy_with_logits(iou_logits[positive, label - 1], target)
-
-    def assign_targets_to_proposals(self, proposals, gt_boxes, gt_labels):
-        """torchvision's, with `self.box_similarity` in place of its hard-coded box_iou."""
-        matched_idxs, labels = [], []
-        for proposals_in_image, gt_boxes_in_image, gt_labels_in_image in zip(proposals, gt_boxes, gt_labels):
-            if gt_boxes_in_image.numel() == 0:  # background image
-                matched = torch.zeros((len(proposals_in_image),), dtype=torch.int64, device=proposals_in_image.device)
-                labels_in_image = torch.zeros_like(matched)
-            else:
-                raw = self.proposal_matcher(self.box_similarity(gt_boxes_in_image, proposals_in_image))
-                matched = raw.clamp(min=0)
-                labels_in_image = gt_labels_in_image[matched].to(torch.int64)
-                labels_in_image[raw == self.proposal_matcher.BELOW_LOW_THRESHOLD] = 0  # background
-                labels_in_image[raw == self.proposal_matcher.BETWEEN_THRESHOLDS] = -1  # ignored by the sampler
-            matched_idxs.append(matched)
-            labels.append(labels_in_image)
-        return matched_idxs, labels
-
-    def forward(self, features, proposals, image_shapes, targets=None, class_prior=None):
+    def forward(self, features, proposals, image_shapes, targets=None):
         matched_gt = None
         if self.training:
             proposals, matched_idxs, labels, regression_targets = self.select_training_samples(proposals, targets)
-            if self.giou_weight > 0 or self.iou_predictor is not None:  # an image may have no boxes left after
-                # augmentation: no matched GT then
-                matched_gt = [t['boxes'][mi.clamp(min=0)].to(proposals[0].dtype) if len(t['boxes'])
-                              else proposals[0].new_zeros((0, 4)) for t, mi in zip(targets, matched_idxs)]
+            # the GT box matched to each sampled proposal (an image may have no boxes left after augmentation)
+            matched_gt = [t['boxes'][mi.clamp(min=0)].to(proposals[0].dtype) if len(t['boxes'])
+                          else proposals[0].new_zeros((0, 4)) for t, mi in zip(targets, matched_idxs)]
         box_features = self.box_head(self.box_roi_pool(features, proposals, image_shapes))
         class_logits, box_regression = self.box_predictor(box_features)
-        iou_logits = self.iou_predictor(box_features) if self.iou_predictor is not None else None
-        detections, losses = [], {}
         if self.training:
-            loss_classifier, loss_box_reg = roi_loss(class_logits, box_regression, labels, regression_targets,
-                                                     proposals, matched_gt, self.box_coder,
-                                                     giou_weight=self.giou_weight, giou_alpha=self.giou_alpha)
-            losses = {'loss_classifier': loss_classifier, 'loss_box_reg': loss_box_reg}
-            if iou_logits is not None:
-                losses['loss_iou'] = self.iou_loss(iou_logits, box_regression, proposals, labels, matched_gt)
-        else:
-            if iou_logits is not None:  # localization quality first, then the image-class prior on top
-                class_logits = apply_box_quality(class_logits, iou_logits.float().sigmoid(), self.iou_alpha)
-            all_boxes, all_scores, all_labels = self.postprocess_detections(
-                _rescored(self, class_logits, proposals, class_prior), box_regression, proposals, image_shapes)
-            detections = [{'boxes': b, 'labels': l, 'scores': s}
-                          for b, s, l in zip(all_boxes, all_scores, all_labels)]
-        return detections, losses
-
-
-class CascadeRoIHeads(_SoftNMSPostprocess, RoIHeads):
-    """Cascade R-CNN (Cai & Vasconcelos, 2018): S RoI stages with increasing IoU thresholds, each decoding
-    boxes that are re-pooled and refined by the next stage. Reuses torchvision's box coder and post-processing;
-    the per-stage losses are summed into `loss_classifier` / `loss_box_reg` so the `loss:` weights still apply.
-    """
-
-    giou_alpha = 1.0
-
-    def __init__(self, box_roi_pool, box_heads, box_predictors, fg_iou_thresholds=(0.5, 0.6, 0.7),
-                 bg_iou_threshold=0.5, batch_size_per_image=512, positive_fraction=0.25, bbox_reg_weights=None,
-                 score_thresh=0.05, nms_thresh=0.5, detections_per_img=100, stage_loss_weights=None,
-                 giou_weight=0.0, rescore='off', rescore_power=1.0, score_ensemble=False):
-        # Matcher requires low <= high, so the background threshold must not exceed the smallest fg threshold.
-        bg_iou_threshold = min(bg_iou_threshold, min(fg_iou_thresholds))
-        # The base RoIHeads supplies the box coder, the RoI pool and post-processing shared by all stages.
-        super().__init__(box_roi_pool, box_heads[0], box_predictors[0], fg_iou_thresholds[0], bg_iou_threshold,
-                         batch_size_per_image, positive_fraction, bbox_reg_weights, score_thresh, nms_thresh,
-                         detections_per_img)
-        self.box_heads = nn.ModuleList(box_heads)
-        self.box_predictors = nn.ModuleList(box_predictors)
-        # Matcher / BalancedPositiveNegativeSampler are plain (parameter-free) helpers, not nn.Modules.
-        self.cascade_matchers = [Matcher(t, bg_iou_threshold) for t in fg_iou_thresholds]
-        self.cascade_samplers = [
-            BalancedPositiveNegativeSampler(batch_size_per_image, positive_fraction) for _ in fg_iou_thresholds]
-        self.stage_loss_weights = list(stage_loss_weights) if stage_loss_weights else [1.0] * len(box_predictors)
-        self.giou_weight = giou_weight
-        self.rescore, self.rescore_power = rescore, rescore_power
-        # Cascade R-CNN's inference rule: a box's class scores are the mean of every stage's (each on that stage's
-        # own input box); False scores with the last stage alone.
-        self.score_ensemble = score_ensemble
-
-    def _refined_boxes(self, box_regression, class_logits, boxes, image_shapes):
-        """Decode one box per proposal (highest-scoring foreground class) for the next cascade stage.
-
-        `BoxCoder.decode` returns a single `[N, num_classes, 4]` tensor, so the per-proposal, per-image
-        reduction has to be done explicitly (zipping it with `image_shapes` would treat rows as images).
-        """
-        decoded = self.box_coder.decode(box_regression, boxes)  # [N, num_classes, 4]
-        class_idx = class_logits[:, 1:].argmax(dim=-1) + 1  # best foreground class per proposal
-        rows = torch.arange(decoded.shape[0], device=decoded.device)
-        decoded = decoded[rows, class_idx]  # [N, 4]
-        counts = [len(b) for b in boxes]
-        return [clip_boxes_to_image(b, s) for b, s in zip(decoded.split(counts, dim=0), image_shapes)]
-
-    def _sample(self, proposals, targets, matcher, sampler):
-        """Match proposals to targets and sample positives/negatives for one cascade stage (as RoIHeads does)."""
-        gt_boxes = [t['boxes'] for t in targets]
-        gt_labels = [t['labels'] for t in targets]
-        proposals_with_gt = [torch.cat((p, g.to(p.dtype))) for p, g in zip(proposals, gt_boxes)]
-        # Matcher expects an M(gt) x N(predicted) IoU matrix; it returns -1 (below) / -2 (between) / >=0.
-        matched = [matcher(self.box_similarity(g.to(p.dtype), p)) for p, g in zip(proposals_with_gt, gt_boxes)]
-        clamped = [m.clamp(min=0) for m in matched]
-        labels = []
-        for m, clamped_idxs, gt_label in zip(matched, clamped, gt_labels):
-            label = gt_label[clamped_idxs].to(torch.int64)
-            label[m == -1] = 0  # background (below the low threshold)
-            label[m == -2] = -1  # between thresholds: ignored by the sampler
-            labels.append(label)
-        pos_idx, neg_idx = sampler(labels)
-        inds = [torch.where(p | n)[0] for p, n in zip(pos_idx, neg_idx)]
-        sampled_boxes = [p[i] for p, i in zip(proposals_with_gt, inds)]
-        sampled_labels = [l[i] for l, i in zip(labels, inds)]
-        sampled_clamped = [c[i] for c, i in zip(clamped, inds)]
-        # BoxCoder.encode takes a list of per-image tensors (negative targets are ignored by fastrcnn_loss).
-        matched_gt = [g[cm] if len(g) else g.new_zeros((0, 4)) for g, cm in zip(gt_boxes, sampled_clamped)]
-        regression_targets = self.box_coder.encode(matched_gt, sampled_boxes)
-        return sampled_boxes, sampled_labels, regression_targets, matched_gt
-
-    def forward(self, features, proposals, image_shapes, targets=None, class_prior=None):
-        boxes, labels, regression_targets, matched_gt = proposals, None, None, None
-        if self.training:
-            boxes, labels, regression_targets, matched_gt = self._sample(
-                proposals, targets, self.cascade_matchers[0], self.cascade_samplers[0])
-        losses = {}
-        detections = []
-        stage_scores = []
-        for stage, predictor in enumerate(self.box_predictors):
-            head = self.box_heads[min(stage, len(self.box_heads) - 1)]  # shared head unless per-stage provided
-            if stage > 0 and self.training:
-                boxes, labels, regression_targets, matched_gt = self._sample(
-                    boxes, targets, self.cascade_matchers[stage], self.cascade_samplers[stage])
-            # At inference the refined boxes from the previous stage carry over as this stage's proposals.
-            pooled = self.box_roi_pool(features, boxes, image_shapes)
-            class_logits, box_regression = predictor(head(pooled))
-            if not self.training and self.score_ensemble:
-                stage_scores.append(class_logits.float().softmax(-1))
-            if self.training:
-                loss_classifier, loss_box_reg = roi_loss(class_logits, box_regression, labels,
-                                                         regression_targets, boxes, matched_gt, self.box_coder,
-                                                         giou_weight=self.giou_weight, giou_alpha=self.giou_alpha)
-                weight = self.stage_loss_weights[stage]
-                losses['loss_classifier'] = losses.get('loss_classifier', 0.) + weight * loss_classifier
-                losses['loss_box_reg'] = losses.get('loss_box_reg', 0.) + weight * loss_box_reg
-                boxes = self._refined_boxes(box_regression.detach(), class_logits, boxes, image_shapes)
-            elif stage < len(self.box_predictors) - 1:
-                # Keep every refined proposal between stages (no score threshold / NMS): the later stages need
-                # high-recall candidates for small objects. Only the final stage thresholds and suppresses.
-                boxes = self._refined_boxes(box_regression, class_logits, boxes, image_shapes)
-            else:
-                if self.score_ensemble:  # as logits, so re-scoring and the post-processing run unchanged
-                    class_logits = torch.stack(stage_scores).mean(0).clamp(min=1e-12).log()
-                all_boxes, all_scores, all_labels = self.postprocess_detections(
-                    _rescored(self, class_logits, boxes, class_prior), box_regression, boxes, image_shapes)
-                detections = [{'boxes': b, 'labels': l, 'scores': s}
-                              for b, s, l in zip(all_boxes, all_scores, all_labels)]
-        return detections, losses
+            loss_classifier, loss_box_reg = fastrcnn_loss(class_logits, box_regression, labels, regression_targets,
+                                                          proposals, matched_gt, self.box_coder, self.giou_weight)
+            return [], {'loss_classifier': loss_classifier, 'loss_box_reg': loss_box_reg}
+        boxes, scores, classes = self.postprocess_detections(class_logits, box_regression, proposals, image_shapes)
+        return [{'boxes': b, 'labels': c, 'scores': s} for b, s, c in zip(boxes, scores, classes)], {}

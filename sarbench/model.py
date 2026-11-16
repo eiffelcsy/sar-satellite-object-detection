@@ -1,15 +1,9 @@
-"""The multi-task model: one shared backbone (the DINOv3 ViT with a ViTDet neck, or the DINOv3 ConvNeXt with an FPN)
-feeds a classification head and a Faster R-CNN detector.
+"""The multi-task model: one DINOv3 backbone feeds an image classifier and a Faster R-CNN detector.
 
-Configurable pieces (`model.*` in the YAML): `detail_stem` (real stride-4 detail for P2), `fusion_layers`
-(learnable fusion of several ViT blocks before the neck), `input_adapter` (ImageNet norm + learnable 1x1 conv +
-unfrozen patch embedding), `wst_stem` (wavelet scattering detail for P2), `vit_adapter` (ViT-Adapter's spatial prior
-with injectors / extractors, added to P2-P5), `giou_weight` (GIoU box term), `head` (`standard` | `cascade` RoI head),
-`box_similarity` (IoU, NWD or their max for anchor / proposal labels), `rescore` (re-score the boxes with the
-image classifier at inference), `iou_aware` (an IoU branch; rank boxes by class score x predicted IoU),
-`heatmap_aux` (a training-only center-heatmap loss on P2), `cls_detach` (no classification gradient into the
-backbone), `cls_input` (mean patch token, or DINOv3's CLS token with it) and `roi_pooling` / `roi_canonical_scale`
-(which pyramid levels each RoI is pooled from).
+    pseudo-RGB [B, 3, 512, 512] -> input adapter -> DINOv3 ViT-B/16 (frozen) + DoRA + Convpass -> tokens [B, 1024, 768]
+      classification: mean token -> LayerNorm -> Linear(768, 9)
+      detection:      tokens as a 32 x 32 map -> simple feature pyramid P2-P6 (+ P2 conv stem on the pixels)
+                      -> RPN -> fused RoIAlign (max over P2-P5) -> 2-fc box head -> boxes, GIoU term in the loss
 """
 from collections import OrderedDict
 
@@ -20,52 +14,34 @@ from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor, TwoMLPHead
 from torchvision.models.detection.image_list import ImageList
 from torchvision.models.detection.rpn import RegionProposalNetwork, RPNHead
-from torchvision.ops import FeaturePyramidNetwork, MultiScaleRoIAlign, roi_align
-from torchvision.ops.feature_pyramid_network import LastLevelMaxPool
-from torchvision.ops.poolers import _filter_input, _setup_scales
+from torchvision.ops import roi_align
 
 from .adapters import adapt_backbone
-from .backbones import DINOv3, DINOv3ConvNeXt
-from .heads import (RESCORE_MODES, CascadeRoIHeads, CentredAnchorGenerator, ConvFCBoxHead, DetRoIHeads,
-                    box_similarity as make_similarity, size_adaptive_similarity)
-from .vit_adapter import ViTAdapter
+from .backbones import DINOv3
+from .heads import DetRoIHeads
 
 # Competition limits (Codabench terms): every parameter counts towards the total, frozen ones included.
 MAX_TOTAL_PARAMETERS = 130_000_000
 MAX_TRAINABLE_PARAMETERS = 40_000_000
+NUM_CLASSES = 9
 
 
 class SimpleFeaturePyramid(nn.Module):
-    """ViTDet neck (Li et al., 2022): the single ViT map -> 256-channel maps at strides 4, 8, 16, 32, 64.
+    """ViTDet neck (Li et al., 2022): the stride-16 ViT map -> 256-channel maps at strides 4, 8, 16, 32, 64."""
 
-    `patch_size` is the ViT map's stride: 16 (the default) or 8 (`backbone.params.patch_size: 8`).
-    """
-
-    def __init__(self, dim=768, channels=256, patch_size=16):
+    def __init__(self, dim=768, channels=256):
         super().__init__()
-        if patch_size == 16:
-            self.rescale = nn.ModuleList([
-                nn.Sequential(nn.ConvTranspose2d(dim, dim // 2, 2, stride=2), nn.GroupNorm(32, dim // 2), nn.GELU(),
-                              nn.ConvTranspose2d(dim // 2, dim // 4, 2, stride=2)),  # stride 4
-                nn.ConvTranspose2d(dim, dim // 2, 2, stride=2),  # stride 8
-                nn.Identity(),  # stride 16
-                nn.MaxPool2d(2),  # stride 32
-            ])
-            widths = (dim // 4, dim // 2, dim, dim)
-        elif patch_size == 8:
-            self.rescale = nn.ModuleList([
-                nn.ConvTranspose2d(dim, dim // 2, 2, stride=2),  # stride 4
-                nn.Identity(),  # stride 8
-                nn.MaxPool2d(2),  # stride 16
-                nn.MaxPool2d(4),  # stride 32
-            ])
-            widths = (dim // 2, dim, dim, dim)
-        else:
-            raise ValueError(f'SimpleFeaturePyramid supports ViT strides 16 and 8, got {patch_size}')
+        self.rescale = nn.ModuleList([
+            nn.Sequential(nn.ConvTranspose2d(dim, dim // 2, 2, stride=2), nn.GroupNorm(32, dim // 2), nn.GELU(),
+                          nn.ConvTranspose2d(dim // 2, dim // 4, 2, stride=2)),  # stride 4
+            nn.ConvTranspose2d(dim, dim // 2, 2, stride=2),  # stride 8
+            nn.Identity(),  # stride 16
+            nn.MaxPool2d(2),  # stride 32
+        ])
         self.project = nn.ModuleList(
             nn.Sequential(nn.Conv2d(c, channels, 1, bias=False), nn.GroupNorm(32, channels),
                           nn.Conv2d(channels, channels, 3, padding=1, bias=False), nn.GroupNorm(32, channels))
-            for c in widths)
+            for c in (dim // 4, dim // 2, dim, dim))
 
     def forward(self, x):
         levels = [project(rescale(x)) for rescale, project in zip(self.rescale, self.project)]
@@ -73,40 +49,22 @@ class SimpleFeaturePyramid(nn.Module):
         return OrderedDict(zip(['0', '1', '2', '3', 'pool'], levels))
 
 
-class FPNNeck(nn.Module):
-    """FPN (Lin et al., 2017) over a hierarchical backbone's stride-4 / 8 / 16 / 32 maps -> 256-channel P2-P5 plus
-    a stride-64 max-pooled level, named like SimpleFeaturePyramid's outputs ('0'-'3', 'pool')."""
-
-    def __init__(self, in_channels, channels=256):
-        super().__init__()
-        self.fpn = FeaturePyramidNetwork(list(in_channels), channels, extra_blocks=LastLevelMaxPool())
-
-    def forward(self, maps):
-        return self.fpn(OrderedDict((str(i), m) for i, m in enumerate(maps)))
-
-
 class ConvStem(nn.Module):
-    """A small conv stem on the raw input image: real stride-4 detail for the (otherwise upsampled) P2 level.
+    """A small conv stem on the input pixels whose stride-4 output is added to P2.
 
-    The single-scale ViT only sees 16 px patches, so the neck's stride-4 level is upsampled and has no genuine
-    high-frequency content. The stem reads the 512 px input directly and produces stride-4 features that are
-    added to P2, which is what tiny SAR objects need. `channels` sets its width (the second conv has twice as
-    many); `extra_convs` adds that many 3x3 convs at stride 4 (on `out_channels`) for a deeper stride-4 path.
-
-    `aligned`: the two stride-2 convs are 4x4 (pad 1) then 2x2 (pad 0) instead of 3x3 (pad 1) twice, so output cell j
-    is centred on image coordinate 4j + 2, where the ViT path's P2 cell j is (two 2x2 stride-2 deconvs). The 3x3 pair
-    centres it at 4j + 0.5, 1.5 px up and left of the ViT response it is added to. ~0.16 M fewer parameters.
+    The ViT sees only 16 px patches, so the neck's P2 is upsampled and has no real stride-4 detail; half of the boxes
+    are smaller than one patch. Two stride-2 3x3 convs (`channels`, then twice as many), a 1x1 to `out_channels`,
+    then `extra_convs` more 3x3 convs at stride 4.
     """
 
-    def __init__(self, in_chans=3, channels=64, out_channels=256, extra_convs=0, aligned=False):
+    def __init__(self, in_chans=3, channels=128, out_channels=256, extra_convs=1):
         super().__init__()
-        (k1, p1), (k2, p2) = ((4, 1), (2, 0)) if aligned else ((3, 1), (3, 1))
         layers = [
-            nn.Conv2d(in_chans, channels, k1, stride=2, padding=p1, bias=False), nn.GroupNorm(8, channels), nn.GELU(),
-            nn.Conv2d(channels, channels * 2, k2, stride=2, padding=p2, bias=False),
+            nn.Conv2d(in_chans, channels, 3, stride=2, padding=1, bias=False), nn.GroupNorm(8, channels), nn.GELU(),
+            nn.Conv2d(channels, channels * 2, 3, stride=2, padding=1, bias=False),
             nn.GroupNorm(8, channels * 2), nn.GELU(),
             nn.Conv2d(channels * 2, out_channels, 1, bias=False), nn.GroupNorm(32, out_channels)]
-        for _ in range(extra_convs):  # appended, so checkpoints without extra convs keep their layer indices
+        for _ in range(extra_convs):
             layers += [nn.GELU(), nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
                        nn.GroupNorm(32, out_channels)]
         self.stem = nn.Sequential(*layers)
@@ -116,11 +74,8 @@ class ConvStem(nn.Module):
 
 
 class InputAdapter(nn.Module):
-    """ImageNet normalization followed by a learnable 1x1 conv, initialized as a no-op.
-
-    DINOv3 was pretrained on ImageNet-normalized RGB; the conv lets the first layer remap the SAR pseudo-RGB
-    channels into what the frozen patch embedding expects (the "train on the filtered input" idea).
-    """
+    """ImageNet normalization, then a learnable 1x1 conv initialized to the identity: lets the first layer remap the
+    SAR pseudo-RGB channels into what the (unfrozen) DINOv3 patch embedding expects."""
 
     imagenet_mean = (0.485, 0.456, 0.406)
     imagenet_std = (0.229, 0.224, 0.225)
@@ -130,7 +85,7 @@ class InputAdapter(nn.Module):
         self.register_buffer('mean', torch.tensor(self.imagenet_mean[:in_chans]).view(1, in_chans, 1, 1))
         self.register_buffer('std', torch.tensor(self.imagenet_std[:in_chans]).view(1, in_chans, 1, 1))
         self.proj = nn.Conv2d(in_chans, in_chans, 1)
-        with torch.no_grad():  # identity: starts as a no-op
+        with torch.no_grad():
             self.proj.weight.copy_(torch.eye(in_chans).view(in_chans, in_chans, 1, 1))
             self.proj.bias.zero_()
 
@@ -138,411 +93,84 @@ class InputAdapter(nn.Module):
         return self.proj((x - self.mean) / self.std)
 
 
-class WSTStem(nn.Module):
-    """Wavelet scattering (J=2, L=8) -> 81 channels at stride 4, projected and added to the P2 level.
-
-    Computed on the augmented pixels, it gives the tiny-object level noise-robust, multi-scale detail.
-    """
-
-    def __init__(self, out_channels=256, J=2, L=8, image_size=512):
-        super().__init__()
-        # Import the 2D frontend directly: kymatio 0.3's top-level import pulls in scattering3d, which breaks
-        # on scipy >= 1.15 (removed sph_harm).
-        from kymatio.scattering2d.frontend.torch_frontend import ScatteringTorch2D
-        self.scattering = ScatteringTorch2D(J=J, L=L, shape=(image_size, image_size))
-        n_coeffs = 1 + J * L + J * (J - 1) // 2 * L * L  # 81 for J=2, L=8
-        self.head = nn.Sequential(
-            nn.Conv2d(n_coeffs, out_channels, 1, bias=False), nn.GELU(),
-            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False), nn.GroupNorm(32, out_channels))
-
-    def forward(self, x):
-        with torch.autocast(x.device.type, enabled=False):  # FFT scattering in fp32
-            scattering = self.scattering(x[:, :1].float().contiguous())
-        return self.head(scattering[:, 0].to(dtype=self.head[0].weight.dtype))
-
-
-class LayerFusion(nn.Module):
-    """Learnable softmax-weighted sum of the tokens from several ViT blocks (`model.fusion_layers`).
-
-    Earlier blocks carry lower-level, higher-resolution detail that the final block has abstracted away; fusing
-    them before the neck gives the FPN richer features for small objects. Initialized as (almost) the last
-    block, so it starts from the standard single-layer behaviour.
-    """
-
-    def __init__(self, num_layers):
-        super().__init__()
-        self.weights = nn.Parameter(torch.zeros(num_layers))
-        with torch.no_grad():
-            self.weights[-1] = 3.0
-
-    def forward(self, tokens):
-        weights = self.weights.softmax(0).view(-1, 1, 1)
-        return sum(weight * token for weight, token in zip(weights, tokens))
-
-
 class FusedRoIAlign(nn.Module):
-    """Pool every RoI from all pyramid levels and fuse them element-wise (PANet's adaptive feature pooling, Liu et
-    al., 2018), instead of torchvision's one level per RoI.
+    """Pool every RoI from all of P2-P5 and fuse them by element-wise max (PANet's adaptive feature pooling).
 
-    With torchvision's mapping (canonical 224 px at P4) every box under 112 px, nearly all of this dataset, is pooled
-    from P2 alone: the twice-upsampled ViT map plus the stem, never P4, the ViT's own stride-16 tokens. Fusing gives
-    each RoI P2's detail and P3-P5's semantics. `fuse`: `max` (PANet's choice) or `mean`. No parameters.
-    `aligned`: RoIAlign's half-pixel convention (see AlignedMultiScaleRoIAlign).
+    torchvision's mapping (canonical 224 px at P4) sends every box under 112 px, 94.9 % of this dataset's boxes, to
+    P2 alone, so they never read P4, the ViT's own stride-16 map. Fusing gives each RoI P2's detail and P3-P5's
+    semantics, with no parameters.
     """
 
-    def __init__(self, featmap_names, output_size=7, sampling_ratio=2, fuse='max', aligned=False):
+    def __init__(self, featmap_names=('0', '1', '2', '3'), output_size=7, sampling_ratio=2):
         super().__init__()
-        if fuse not in ('max', 'mean'):
-            raise ValueError(f"unknown roi_pooling fuse '{fuse}'; available: max, mean")
-        self.featmap_names, self.output_size, self.sampling_ratio, self.fuse, self.aligned = \
-            list(featmap_names), output_size, sampling_ratio, fuse, aligned
+        self.featmap_names, self.output_size, self.sampling_ratio = list(featmap_names), output_size, sampling_ratio
 
     def forward(self, features, boxes, image_shapes):
         rois = torch.cat([torch.cat([b.new_full((len(b), 1), i), b], dim=1) for i, b in enumerate(boxes)])
         pooled = [roi_align(features[name], rois, self.output_size, spatial_scale=features[name].shape[-1] /
-                            image_shapes[0][1], sampling_ratio=self.sampling_ratio, aligned=self.aligned)
+                            image_shapes[0][1], sampling_ratio=self.sampling_ratio, aligned=False)
                   for name in self.featmap_names]
-        pooled = torch.stack(pooled)
-        return pooled.amax(0) if self.fuse == 'max' else pooled.mean(0)
-
-
-class AlignedMultiScaleRoIAlign(MultiScaleRoIAlign):
-    """torchvision's one-level-per-RoI pooler with RoIAlign's `aligned=True` (Detectron2's ROIAlignV2), which
-    torchvision's pooler hard-codes to False.
-
-    aligned=False reads feature cell j at image coordinate j * stride, though its centre is (j + 0.5) * stride: half
-    a cell off on every level (2 px on P2, 16 px on P5), and every RoI is widened to at least one cell (on P5, any box
-    under 32 px is pooled as a 32 px one). aligned=True subtracts the half cell and keeps RoIs at their size.
-    """
-
-    def forward(self, x, boxes, image_shapes):
-        features = _filter_input(x, self.featmap_names)
-        if self.scales is None or self.map_levels is None:
-            self.scales, self.map_levels = _setup_scales(features, image_shapes, self.canonical_scale,
-                                                         self.canonical_level)
-        rois = torch.cat([torch.cat([b.new_full((len(b), 1), i), b], dim=1) for i, b in enumerate(boxes)])
-        levels = self.map_levels(boxes)
-        result = features[0].new_zeros((len(rois), features[0].shape[1], *self.output_size))
-        for level, (feature, scale) in enumerate(zip(features, self.scales)):
-            idx = torch.where(levels == level)[0]
-            result[idx] = roi_align(feature, rois[idx], self.output_size, spatial_scale=scale,
-                                    sampling_ratio=self.sampling_ratio, aligned=True).to(result.dtype)
-        return result
-
-
-class ContextRoIAlign(nn.Module):
-    """Pool each RoI twice, as itself and as the same box enlarged `scale` times around its centre (clipped to the
-    image), and fuse the two with a 1x1 conv (2C -> C channels) so the box head keeps its input size.
-
-    Inside a ~10 px box a bridge is a bright line like a road; what makes it a bridge (water on both sides, land at
-    both ends) lies outside the box, where the plain pooler never looks. The conv starts as the identity on the RoI's
-    own channels and zero on the context ones, so training begins exactly at the wrapped pooler.
-    2C x C + C parameters (~0.13 M at C = 256).
-    """
-
-    def __init__(self, pooler, scale=3.0, channels=256):
-        super().__init__()
-        self.pooler, self.scale = pooler, scale
-        self.fuse = nn.Conv2d(2 * channels, channels, 1)
-        with torch.no_grad():
-            self.fuse.weight.zero_()
-            self.fuse.weight[:, :channels, 0, 0] = torch.eye(channels)
-            self.fuse.bias.zero_()
-
-    def enlarge(self, boxes, image_shapes):
-        enlarged = []
-        for b, (height, width) in zip(boxes, image_shapes):
-            centre, half = (b[:, :2] + b[:, 2:]) / 2, (b[:, 2:] - b[:, :2]) * self.scale / 2
-            limit = b.new_tensor([width, height])
-            enlarged.append(torch.cat([(centre - half).clamp(min=0), torch.minimum(centre + half, limit)], dim=1))
-        return enlarged
-
-    def forward(self, features, boxes, image_shapes):
-        own = self.pooler(features, boxes, image_shapes)
-        context = self.pooler(features, self.enlarge(boxes, image_shapes), image_shapes)
-        return self.fuse(torch.cat([own, context], dim=1))
-
-
-class CenterHeatmapHead(nn.Module):
-    """Training-only auxiliary supervision of the stride-4 level (CenterNet, Zhou et al., 2019).
-
-    Tiny objects get few positive anchors, so P2 and the stem receive little direct small-object signal. This head
-    predicts one heatmap per class on P2 and is trained with CenterNet's penalty-reduced focal loss against a
-    Gaussian peak at every GT centre (sigma = max(`min_sigma`, sqrt(w h) / (6 stride)) in P2 cells), so every object
-    supervises P2 at its own location. It is never used at inference; it adds ~0.15 M trainable parameters.
-    """
-
-    def __init__(self, channels=256, hidden=64, num_classes=9, stride=4, min_sigma=0.8):
-        super().__init__()
-        self.stride, self.min_sigma = stride, min_sigma
-        self.head = nn.Sequential(nn.Conv2d(channels, hidden, 3, padding=1), nn.GELU(),
-                                  nn.Conv2d(hidden, num_classes, 1))
-        nn.init.constant_(self.head[-1].bias, -2.19)  # CenterNet's prior: sigmoid = 0.1 everywhere at init
-
-    def targets(self, targets, num_classes, height, width, device):
-        """[B, num_classes, height, width] Gaussian heatmaps, exactly 1 at each GT's centre cell."""
-        ys = torch.arange(height, device=device, dtype=torch.float32).view(1, -1, 1)
-        xs = torch.arange(width, device=device, dtype=torch.float32).view(1, 1, -1)
-        heatmaps = torch.zeros(len(targets), num_classes, height, width, device=device)
-        for heatmap, target in zip(heatmaps, targets):
-            boxes, labels = target['boxes'].float() / self.stride, target['labels']
-            if not len(boxes):
-                continue
-            centers = ((boxes[:, :2] + boxes[:, 2:]) / 2).floor()  # the cell holding each centre
-            centers[:, 0].clamp_(0, width - 1), centers[:, 1].clamp_(0, height - 1)
-            sizes = (boxes[:, 2:] - boxes[:, :2]).clamp(min=0)
-            sigma = (sizes.prod(1).sqrt() / 6).clamp(min=self.min_sigma).view(-1, 1, 1)
-            peaks = torch.exp(-((xs - centers[:, :1, None]) ** 2 + (ys - centers[:, 1:, None]) ** 2)
-                              / (2 * sigma ** 2))  # [K, H, W], 1 at each centre cell
-            for label in labels.unique():
-                heatmap[label - 1] = peaks[labels == label].amax(0)
-        return heatmaps
-
-    def loss(self, feature, targets):
-        logits = self.head(feature)
-        heatmaps = self.targets(targets, logits.shape[1], *logits.shape[-2:], logits.device)
-        predicted = logits.sigmoid().clamp(1e-4, 1 - 1e-4)
-        positive = heatmaps.eq(1).float()
-        positive_loss = (predicted.log() * (1 - predicted) ** 2 * positive).sum()
-        negative_loss = ((1 - predicted).log() * predicted ** 2 * (1 - heatmaps) ** 4 * (1 - positive)).sum()
-        return -(positive_loss + negative_loss) / positive.sum().clamp(min=1)
+        return torch.stack(pooled).amax(0)
 
 
 class MultiTaskModel(nn.Module):
-    """backbone tokens -> classification logits (mean token -> LayerNorm -> Linear) and Faster R-CNN detections."""
+    """Backbone tokens -> classification logits and Faster R-CNN detections (see the module docstring)."""
 
-    def __init__(self, backbone, num_classes=9, detail_stem=False, fusion_layers=None, giou_weight=0.0,
-                 roi_sampling_ratio=2, roi_output_size=7, input_adapter=False, wst_stem=False, wst_params=None,
-                 head='standard', head_params=None, detail_stem_params=None, rpn_fg_iou_thresh=0.7,
-                 rpn_bg_iou_thresh=0.3, score_thresh=0.05, nms_thresh=0.5, detections_per_img=100,
-                 vit_adapter=None, box_similarity='iou', nwd_constant=16.0, rescore='off', rescore_power=1.0,
-                 iou_aware=False, iou_alpha=0.5, heatmap_aux=False, cls_detach=False, cls_input='mean',
-                 roi_pooling='level', roi_canonical_scale=224, roi_batch_size_per_image=512,
-                 roi_positive_fraction=0.25, giou_alpha=1.0, soft_nms_sigma=0.0, roi_aligned=False,
-                 rpn_size_adaptive=None, rpn_centred_anchors=False, roi_context_scale=0.0):
+    def __init__(self, backbone, num_classes=NUM_CLASSES, stem_channels=128, stem_extra_convs=1, giou_weight=1.0,
+                 score_thresh=1e-5, nms_thresh=0.85, detections_per_img=100):
         super().__init__()
-        if rescore not in RESCORE_MODES:
-            raise ValueError(f"unknown rescore mode '{rescore}'; available: {', '.join(RESCORE_MODES)}")
-        if iou_aware and head != 'standard':
-            raise ValueError('iou_aware is implemented for the standard RoI head only')
+        # The construction order fixes the random initialization: keep it.
         self.backbone = backbone
-        self.patch_size = getattr(backbone, 'patch_size', 16)
-        # cls_input: `mean` (the mean patch token) or `cls_mean` ([CLS, mean patch token], DINOv3's linear-probe input:
-        # its CLS token is trained for image-level semantics and was dropped before).
-        if cls_input not in ('mean', 'cls_mean'):
-            raise ValueError(f"unknown cls_input '{cls_input}'; available: mean, cls_mean")
-        if cls_input == 'cls_mean' and fusion_layers:
-            raise ValueError('cls_input cls_mean reads the final CLS token; it does not combine with fusion_layers')
-        # A hierarchical backbone (DINOv3ConvNeXt) gives stage maps and a pooled vector: FPN neck, no ViT options.
-        self.hierarchical = getattr(backbone, 'hierarchical', False)
-        if self.hierarchical and (fusion_layers or vit_adapter or cls_input != 'mean'):
-            raise ValueError('fusion_layers, vit_adapter and cls_input cls_mean need the ViT backbone')
-        self.cls_input = cls_input
-        cls_dim = backbone.embed_dim * (2 if cls_input == 'cls_mean' else 1)
-        self.cls_head = nn.Sequential(nn.LayerNorm(cls_dim), nn.Linear(cls_dim, num_classes))
-        # cls_detach: the classifier reads the pooled tokens without back-propagating into the backbone, so DoRA,
-        # Convpass and the input adapter train for detection only (mAP is worth ~3.7x macro-F1 per point in delta-m).
-        self.cls_detach = cls_detach
-        self.neck = (FPNNeck(backbone.channels) if self.hierarchical
-                     else SimpleFeaturePyramid(backbone.embed_dim, patch_size=self.patch_size))
-        self.detail_stem = ConvStem(backbone.in_chans, **(detail_stem_params or {})) if detail_stem else None
-        self.input_adapter = InputAdapter(backbone.in_chans) if input_adapter else None
-        self.wst_stem = WSTStem(**(wst_params or {})) if wst_stem else None
-        if input_adapter and hasattr(backbone, 'unfreeze_patch_embed'):  # adapt_backbone froze it; re-enable it
-            backbone.unfreeze_patch_embed()
-        self.heatmap_head = CenterHeatmapHead(num_classes=num_classes) if heatmap_aux else None
-        self.vit_adapter = None
-        if vit_adapter:  # wraps the interaction blocks, after DoRA / Convpass (adapt_backbone) wrapped them
-            self.vit_adapter = ViTAdapter(backbone.embed_dim, getattr(backbone, 'num_prefix_tokens', 0),
-                                          self.patch_size, in_chans=backbone.in_chans, **vit_adapter)
-            self.vit_adapter.attach(backbone)
-        # Multi-layer fusion: normalize negative indices, register hooks in execution order.
-        self.fusion_layers = self.fusion = None
-        if fusion_layers:
-            blocks = len(backbone.blocks)
-            self.fusion_layers = sorted(i % blocks for i in fusion_layers)
-            self.fusion = LayerFusion(len(self.fusion_layers))
-        # Small objects (median ~16 px at 512 px, 99 % below ~240 px): two anchor scales per octave, from 8 px at
-        # stride 4 up to 181 px at stride 64, times 3 aspect ratios = 6 anchors per location. An anchor is an RPN
-        # positive at IoU >= rpn_fg_iou_thresh (a few px of offset push a 6-15 px box below 0.7; every GT still keeps
-        # its best anchor) and a negative below rpn_bg_iou_thresh.
-        # rpn_centred_anchors: anchors centred on their cell, (j + 0.5) x stride, not torchvision's j x stride.
-        generator = CentredAnchorGenerator if rpn_centred_anchors else AnchorGenerator
-        anchors = generator(((8, 11), (16, 23), (32, 45), (64, 91), (128, 181)), ((0.5, 1.0, 2.0),) * 5)
+        self.patch_size = backbone.patch_size
+        self.cls_head = nn.Sequential(nn.LayerNorm(backbone.embed_dim), nn.Linear(backbone.embed_dim, num_classes))
+        self.neck = SimpleFeaturePyramid(backbone.embed_dim)
+        self.detail_stem = ConvStem(backbone.in_chans, stem_channels, extra_convs=stem_extra_convs)
+        self.input_adapter = InputAdapter(backbone.in_chans)
+        backbone.unfreeze_patch_embed()
+        # Small objects (median 15.9 px at 512 px): two anchor sizes per octave, 8 px at stride 4 up to 181 px at
+        # stride 64, times 3 aspect ratios = 6 anchors per location.
+        anchors = AnchorGenerator(((8, 11), (16, 23), (32, 45), (64, 91), (128, 181)), ((0.5, 1.0, 2.0),) * 5)
         self.rpn = RegionProposalNetwork(
-            anchors, RPNHead(256, 6), fg_iou_thresh=rpn_fg_iou_thresh, bg_iou_thresh=rpn_bg_iou_thresh,
-            batch_size_per_image=256,
+            anchors, RPNHead(256, 6), fg_iou_thresh=0.7, bg_iou_thresh=0.3, batch_size_per_image=256,
             positive_fraction=0.5, pre_nms_top_n=dict(training=2000, testing=2000),
             post_nms_top_n=dict(training=2000, testing=2000), nms_thresh=0.7)
-        # roi_pooling `level`: torchvision's one level per RoI, k = floor(4 + log2(sqrt(area) / roi_canonical_scale));
-        # `max` / `mean`: every level, fused (FusedRoIAlign).
-        # roi_aligned: RoIAlign's half-pixel-correct sampling (aligned=True) on either pooler; False is torchvision's.
-        if roi_pooling == 'level':
-            level_pool = AlignedMultiScaleRoIAlign if roi_aligned else MultiScaleRoIAlign
-            roi_pool = level_pool(['0', '1', '2', '3'], output_size=roi_output_size,
-                                  sampling_ratio=roi_sampling_ratio, canonical_scale=roi_canonical_scale)
-        else:
-            roi_pool = FusedRoIAlign(['0', '1', '2', '3'], roi_output_size, roi_sampling_ratio, fuse=roi_pooling,
-                                     aligned=roi_aligned)
-        # roi_context_scale > 0: also pool each RoI enlarged that many times and fuse it in (ContextRoIAlign).
-        if roi_context_scale:
-            roi_pool = ContextRoIAlign(roi_pool, roi_context_scale)
-        self.roi_heads = self._build_roi_heads(roi_pool, roi_output_size, num_classes, head, head_params or {},
-                                               giou_weight, score_thresh, nms_thresh, detections_per_img,
-                                               iou_aware, iou_alpha, roi_batch_size_per_image,
-                                               roi_positive_fraction)
-        self.roi_heads.rescore, self.roi_heads.rescore_power = rescore, rescore_power
-        # giou_alpha: alpha-GIoU box term (1 = GIoU); soft_nms_sigma: Gaussian Soft-NMS at inference (0 = NMS).
-        self.roi_heads.giou_alpha, self.roi_heads.soft_nms_sigma = giou_alpha, soft_nms_sigma
-        # Anchor (RPN) and proposal (RoI head) labels: IoU, NWD or their max against the same thresholds.
-        self.rpn.box_similarity = self.roi_heads.box_similarity = make_similarity(box_similarity, nwd_constant)
-        # rpn_size_adaptive (CFINet's rule, e.g. {floor: 0.25, base: 0.2, slope: 0.15, ref: 12}): a lower RPN positive
-        # bar for small GT boxes (0.25 at 9 px), rpn_fg_iou_thresh for large ones. The RoI head is unchanged.
-        if rpn_size_adaptive:
-            self.rpn.box_similarity = size_adaptive_similarity(self.rpn.box_similarity, rpn_fg_iou_thresh,
-                                                               **rpn_size_adaptive)
-
-    @staticmethod
-    def _build_roi_heads(roi_pool, resolution, num_classes, head, params, giou_weight, score_thresh, nms_thresh,
-                         detections_per_img, iou_aware=False, iou_alpha=0.5, batch_size_per_image=512,
-                         positive_fraction=0.25):
-        """`standard`: one Faster R-CNN RoI head. `cascade`: Cascade R-CNN with `head_params` num_stages (3),
-        share_head (true), fg_iou_thresholds (0.5/0.6/...), bg_iou_threshold (0.5), stage_loss_weights (1.0) and
-        score_ensemble (false; true averages the stages' class scores at inference, as Cascade R-CNN does).
-
-        Both take `head_params` box_head: `mlp` (torchvision's two fc layers of width hidden_dim, default 1024) or
-        `conv` (ConvFCBoxHead: num_convs 3x3 convs, a 1x1 down to `reduce` channels, one fc of width hidden_dim).
-        score_thresh / nms_thresh / detections_per_img are the inference post-processing (no effect on training).
-        `iou_aware` adds the standard head's IoU branch; `iou_alpha` is its inference ranking exponent.
-        batch_size_per_image / positive_fraction: proposals sampled per image for the RoI losses and the most of
-        them that may be positives (torchvision's 512 / 0.25).
-        """
-        hidden = params.get('hidden_dim', 1024)
-        post = dict(score_thresh=score_thresh, nms_thresh=nms_thresh, detections_per_img=detections_per_img)
-
-        def box_head():
-            if params.get('box_head', 'mlp') == 'mlp':
-                return TwoMLPHead(256 * resolution ** 2, hidden)
-            if params['box_head'] == 'conv':
-                keys = ('num_convs', 'conv_dim', 'reduce')
-                return ConvFCBoxHead(256, resolution, fc_dim=hidden, **{k: params[k] for k in keys if k in params})
-            raise ValueError(f"unknown box_head '{params['box_head']}'; available: mlp, conv")
-
-        if head == 'standard':
-            return DetRoIHeads(
-                roi_pool, box_head(), FastRCNNPredictor(hidden, num_classes + 1),
-                fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=batch_size_per_image,
-                positive_fraction=positive_fraction,
-                bbox_reg_weights=None, giou_weight=giou_weight, iou_dim=hidden if iou_aware else None,
-                iou_alpha=iou_alpha, **post)
-        if head == 'cascade':
-            stages = params.get('num_stages', 3)
-            # A per-stage head at hidden 1024 costs ~14 M each; hidden 256 per stage costs less than one 1024 head.
-            box_heads = [box_head() for _ in range(1 if params.get('share_head', True) else stages)]
-            predictors = [FastRCNNPredictor(hidden, num_classes + 1) for _ in range(stages)]
-            thresholds = tuple(params.get('fg_iou_thresholds', ())) \
-                or tuple(round(0.5 + 0.1 * i, 2) for i in range(stages))
-            return CascadeRoIHeads(
-                roi_pool, box_heads, predictors, fg_iou_thresholds=thresholds,
-                bg_iou_threshold=params.get('bg_iou_threshold', 0.5), batch_size_per_image=batch_size_per_image,
-                positive_fraction=positive_fraction, bbox_reg_weights=None,
-                stage_loss_weights=params.get('stage_loss_weights'),
-                score_ensemble=params.get('score_ensemble', False), giou_weight=giou_weight, **post)
-        raise ValueError(f"unknown head '{head}'; available: standard, cascade")
-
-    def _backbone_tokens(self, images):
-        """Run the backbone; with fusion, return the learnable weighted sum of the selected blocks' tokens."""
-        if self.fusion is None:
-            return self.backbone(images)
-        captured = []
-        handles = [self.backbone.blocks[i].register_forward_hook(
-            lambda module, args, output: captured.append(output[0] if isinstance(output, tuple) else output))
-            for i in self.fusion_layers]
-        try:
-            self.backbone(images)
-        finally:
-            for handle in handles:
-                handle.remove()
-        prefix = getattr(self.backbone, 'num_prefix_tokens', 0)
-        return self.fusion([tokens[:, prefix:] for tokens in captured])
+        self.roi_heads = DetRoIHeads(
+            FusedRoIAlign(), TwoMLPHead(256 * 7 ** 2, 1024), FastRCNNPredictor(1024, num_classes + 1),
+            fg_iou_thresh=0.5, bg_iou_thresh=0.5, batch_size_per_image=512, positive_fraction=0.25,
+            bbox_reg_weights=None, score_thresh=score_thresh, nms_thresh=nms_thresh,
+            detections_per_img=detections_per_img, giou_weight=giou_weight)
 
     def forward(self, images, targets=None):
-        """images [B, C, H, W], targets: per-image {'boxes' XYXY, 'labels' 1..9} (training only) ->
+        """images [B, 3, H, W], targets: per-image {'boxes' XYXY, 'labels' 1..9} (training only) ->
         (logits [B, num_classes], per-image detections (eval mode), the detection losses (training mode))."""
-        backbone_images = self.input_adapter(images) if self.input_adapter is not None else images
-        if self.vit_adapter is not None:  # the spatial prior runs first: its injectors act inside the backbone
-            self.vit_adapter.prepare(images)
-        if self.hierarchical:  # stage maps -> FPN; the classifier reads the pooled vector
-            maps, pooled = self.backbone(backbone_images)
-        elif self.cls_input == 'cls_mean':
-            prefix = self.backbone.num_prefix_tokens
-            all_tokens = self.backbone(backbone_images, with_prefix=True)
-            tokens = all_tokens[:, prefix:]
-            pooled = torch.cat([all_tokens[:, 0], tokens.mean(dim=1)], dim=1)
-        else:
-            tokens = self._backbone_tokens(backbone_images)
-            pooled = tokens.mean(dim=1)
-        logits = self.cls_head(pooled.detach() if self.cls_detach else pooled)
-        if self.hierarchical:
-            features = self.neck(maps)
-        else:
-            h, w = images.shape[-2] // self.patch_size, images.shape[-1] // self.patch_size  # one token per patch
-            features = self.neck(tokens.transpose(1, 2).unflatten(2, (h, w)))  # tokens as a [B, 768, h, w] map
-        if self.vit_adapter is not None:  # the SPM features (strides 4-32) added to P2-P5
-            for name, extra in zip(('0', '1', '2', '3'), self.vit_adapter.outputs()):
-                features[name] = features[name] + extra.to(features[name].dtype)
-        if self.detail_stem is not None:  # add genuine stride-4 detail (from the pixels) to the upsampled P2
-            features['0'] = features['0'] + self.detail_stem(images.to(features['0'].dtype))
-        if self.wst_stem is not None:  # scattering detail (81 coeffs at stride 4) added to P2
-            features['0'] = features['0'] + self.wst_stem(images).to(features['0'].dtype)
-        # Precision rule: the box coder casts anchors to the dtype of the regression output, so in bf16 every
-        # coordinate near 512 would snap to a 2 px grid. RPN and RoIHeads therefore run in fp32.
+        tokens = self.backbone(self.input_adapter(images))
+        logits = self.cls_head(tokens.mean(dim=1))
+        h, w = images.shape[-2] // self.patch_size, images.shape[-1] // self.patch_size
+        features = self.neck(tokens.transpose(1, 2).unflatten(2, (h, w)))  # tokens as a [B, 768, h, w] map
+        features['0'] = features['0'] + self.detail_stem(images.to(features['0'].dtype))
+        # The box coder casts anchors to the dtype of the regression output, so in bf16 every coordinate near 512
+        # would snap to a 2 px grid: the RPN and RoI head run in fp32.
         with torch.autocast(images.device.type, enabled=False):
             features = {name: f.float() for name, f in features.items()}
             image_list = ImageList(images, [tuple(images.shape[-2:])] * len(images))
             proposals, rpn_losses = self.rpn(image_list, features, targets)
-            if self.training and self.heatmap_head is not None:  # training-only P2 supervision
-                rpn_losses['loss_heatmap'] = self.heatmap_head.loss(features['0'], targets)
-            # At inference the image classifier's probabilities re-score the boxes (roi_heads.rescore, off by default).
-            detections, roi_losses = self.roi_heads(features, proposals, image_list.image_sizes, targets,
-                                                    class_prior=None if self.training else logits.float().softmax(-1))
+            detections, roi_losses = self.roi_heads(features, proposals, image_list.image_sizes, targets)
         return logits, detections, {**rpn_losses, **roi_losses}
 
 
-def build_model(args):
-    """DINOv3 + DoRA (+ the per-block capacity options) + heads, on the CPU. Returns (model, ids of pretrained
-    backbone parameters), so the optimizer can give unfrozen pretrained weights their own learning rate."""
-    if getattr(args, 'backbone_name', 'dinov3') == 'dinov3_convnext':  # trained entirely: no DoRA, no freezing
-        backbone = DINOv3ConvNeXt(pretrained=args.pretrained, **args.backbone_kwargs)
-        pretrained_ids = {id(p) for p in backbone.parameters()}  # train.unfrozen_lr
-    else:
-        backbone = DINOv3(pretrained=args.pretrained, **args.backbone_kwargs)
-        pretrained_ids = {id(p) for p in backbone.parameters()}
-        conv = args.conv_adapters or {}
-        adapt_backbone(backbone, targets=args.peft_targets, rank=args.peft_kwargs.get('rank', 32),
-                       alpha=args.peft_kwargs.get('alpha', 32), rank_overrides=args.rank_overrides,
-                       full_blocks=args.full_blocks, conv_layers=conv.get('layers', ()),
-                       conv_dim=conv.get('dim', 128), conv_kernel=conv.get('kernel', 'dense'),
-                       conv_placement=conv.get('placement', 'sequential'))
-    model = MultiTaskModel(backbone, detail_stem=args.detail_stem, fusion_layers=args.fusion_layers,
-                           giou_weight=args.giou_weight, roi_sampling_ratio=args.roi_sampling_ratio,
-                           roi_output_size=args.roi_output_size, input_adapter=args.input_adapter,
-                           wst_stem=args.wst_stem, wst_params=args.wst_params, head=args.head,
-                           head_params=args.head_params, detail_stem_params=args.detail_stem_params,
-                           rpn_fg_iou_thresh=args.rpn_fg_iou_thresh, rpn_bg_iou_thresh=args.rpn_bg_iou_thresh,
-                           score_thresh=args.score_thresh, nms_thresh=args.nms_thresh,
-                           detections_per_img=args.detections_per_img, vit_adapter=args.vit_adapter,
-                           box_similarity=args.box_similarity, nwd_constant=args.nwd_constant,
-                           rescore=args.rescore, rescore_power=args.rescore_power, iou_aware=args.iou_aware,
-                           iou_alpha=args.iou_alpha, heatmap_aux=args.heatmap_aux, cls_detach=args.cls_detach,
-                           cls_input=args.cls_input, roi_pooling=args.roi_pooling,
-                           roi_canonical_scale=args.roi_canonical_scale,
-                           roi_batch_size_per_image=args.roi_batch_size_per_image,
-                           roi_positive_fraction=args.roi_positive_fraction, giou_alpha=args.giou_alpha,
-                           soft_nms_sigma=args.soft_nms_sigma, roi_aligned=args.roi_aligned,
-                           rpn_size_adaptive=args.rpn_size_adaptive, rpn_centred_anchors=args.rpn_centred_anchors,
-                           roi_context_scale=args.roi_context_scale)
-    return model, pretrained_ids
+def build_model(config, pretrained=True):
+    """The final model from a loaded config, on the CPU. `pretrained` loads the DINOv3 checkpoint (training); False
+    builds the same architecture with random weights, to be replaced by a saved model.pt (inference). Returns
+    (model, ids of the pretrained backbone parameters), so the optimizer can give the unfrozen ones their own rate."""
+    adapters, model = config['adapters'], config['model']
+    backbone = DINOv3(config['backbone']['model_name'], pretrained=pretrained)
+    pretrained_ids = {id(p) for p in backbone.parameters()}
+    adapt_backbone(backbone, targets=adapters['dora_targets'], rank=adapters['dora_rank'],
+                   alpha=adapters['dora_alpha'], convpass_dim=adapters['convpass_dim'])
+    return MultiTaskModel(backbone, stem_channels=model['stem_channels'], stem_extra_convs=model['stem_extra_convs'],
+                          giou_weight=model['giou_weight'], score_thresh=model['score_thresh'],
+                          nms_thresh=model['nms_thresh'],
+                          detections_per_img=model['detections_per_img']), pretrained_ids
 
 
 def parameter_counts(model, pretrained_ids):
@@ -551,7 +179,8 @@ def parameter_counts(model, pretrained_ids):
     return {
         'total': sum(p.numel() for p in model.parameters()),
         'trainable': sum(p.numel() for p in model.parameters() if p.requires_grad),
-        'heads': sum(p.numel() for n, p in model.named_parameters() if p.requires_grad and not n.startswith('backbone.')),
+        'heads': sum(p.numel() for n, p in model.named_parameters()
+                     if p.requires_grad and not n.startswith('backbone.')),
         'backbone_new': sum(p.numel() for p in backbone if id(p) not in pretrained_ids),
         'backbone_unfrozen': sum(p.numel() for p in backbone if id(p) in pretrained_ids),
     }

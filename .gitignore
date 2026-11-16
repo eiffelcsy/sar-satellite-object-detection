@@ -1,9 +1,14 @@
+# data, outputs and caches
+data/
 runs/
 preprocess_cache/
+*.pt
+submission_*.zip
+# environments
+.venv/
 __pycache__/
 .pytest_cache/
-.venv/
+wandb/
+# cluster job logs, OS files
 *.out
-data/
-rfdetr_data/
-.venv-rfdetr/
+.DS_Store

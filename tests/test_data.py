@@ -1,58 +1,63 @@
-"""sarbench/data.py on the real dataset: split contents, the box geometry round trip, and flips."""
-from pathlib import Path
-
-import pytest
 import torch
-from torch.utils.data import DataLoader
-from torchvision import tv_tensors
 
-from sarbench.data import MEAN, STD, SARMultiTask, collate, to_original_xywh
-from sarbench.metrics import detection_metrics
-
-ROOT = Path(__file__).resolve().parents[2] / 'dataset' / 'SARFact-Course-20K'
+from sarbench.data import SARImages, SARMultiTask, copy_paste, drop_degenerate_boxes, holdout, to_original_xywh
 
 
-def batches(split):
-    return DataLoader(SARMultiTask(ROOT, split), batch_size=64, collate_fn=collate)
+def test_holdout_is_disjoint_complete_and_fixed_by_its_seed():
+    rows = list(range(100))
+    train, val = holdout(rows, 'train', 0.1, 0), holdout(rows, 'val', 0.1, 0)
+    assert len(val) == 10 and sorted(train + val) == rows
+    assert holdout(rows, 'val', 0.1, 0) == val != holdout(rows, 'val', 0.1, 1)
+    assert holdout(rows, 'train', 0.0, 0) == rows
 
 
-@pytest.mark.parametrize('split, size', [('train', 9392), ('val', 1426), ('test', 2065)])
-def test_subset_a(split, size):
-    loader = batches(split)
-    assert len(loader.dataset) == size
-    for images, labels, targets in loader:
-        assert images.shape[1:] == (1, 512, 512) and images.dtype == torch.float32
-        for label, target in zip(labels.tolist(), targets):
-            assert len(target['labels']) >= 1
-            assert (target['labels'] == label + 1).all()
-            assert target['boxes'].min() >= 0 and target['boxes'].max() <= 512
-
-
-@pytest.mark.parametrize('split', ['val', 'test'])
-def test_ground_truth_round_trip_scores_map_1(split):
-    predictions, image_ids = [], []
-    for _, _, targets in batches(split):
-        for t in targets:
-            image_ids.append(t['image_id'])
-            boxes = to_original_xywh(t['boxes'], t['orig_size']).tolist()
-            predictions += [{'image_id': t['image_id'], 'category_id': c, 'bbox': b, 'score': 1.0}
-                            for b, c in zip(boxes, t['labels'].tolist())]
-    metrics = detection_metrics(ROOT / 'detection' / f'instances_{split}.json', predictions, image_ids)
-    assert round(metrics['mAP'], 3) == 1.0
-    assert [round(ap, 3) for ap in metrics['per_class_AP'].values()] == [1.0] * 9
-
-
-def test_flips_move_boxes_with_pixels():
-    transform = SARMultiTask(ROOT, 'train', train=True).transform
-    image = torch.zeros(1, 200, 300, dtype=torch.uint8)  # non-square, so the resize also stretches it
-    image[:, 50:90, 30:120] = 255  # a bright rectangle filling exactly this box:
-    box = tv_tensors.BoundingBoxes([[30., 50., 120., 90.]], format='XYXY', canvas_size=(200, 300))
-    flips = set()
-    for seed in range(8):
+def test_boxes_follow_the_resize_and_flips(course_data, preprocess):
+    dataset = SARMultiTask(course_data, 'train', preprocess, train=True)
+    for seed in range(4):
         torch.manual_seed(seed)
-        out, out_box = transform(image, box)
-        ys, xs = torch.nonzero(out[0] * STD + MEAN > 0.5, as_tuple=True)
-        bright = torch.stack([xs.min(), ys.min(), xs.max() + 1, ys.max() + 1])  # pixel i spans [i, i + 1)
-        assert torch.allclose(bright.float(), out_box[0], atol=1)
-        flips.add((out_box[0, 0].item() > 256, out_box[0, 1].item() > 256))  # (horizontal, vertical)
-    assert len(flips) == 4  # the seeds cover every combination of the two flips
+        image, label, target = dataset[0]  # 256 x 384, stretched to 512 x 512
+        assert image.shape == (3, 512, 512) and target['labels'].tolist() == [label + 1] * 2
+        for x1, y1, x2, y2 in target['boxes'].round().long().tolist():
+            assert image[0, y1 + 1:y2 - 1, x1 + 1:x2 - 1].min() > 0.9  # the bright rectangle moved with its box
+
+
+def test_boxes_map_back_to_original_pixels(course_data, preprocess):
+    _, _, target = SARMultiTask(course_data, 'train', preprocess)[0]
+    original = [a['bbox'] for a in SARMultiTask(course_data, 'train', preprocess).annotations[target['image_id']]]
+    assert torch.allclose(to_original_xywh(target['boxes'], target['orig_size']), torch.tensor(original).float(),
+                          atol=1e-3)
+
+
+def test_copy_paste_adds_objects_with_their_margin_and_never_overlaps():
+    torch.manual_seed(0)
+    image, donor = torch.zeros(3, 64, 64), torch.zeros(3, 64, 64)
+    donor[:, 10:20, 10:20] = 1.0
+    donor[:, 9, 9] = 0.5  # inside the 1 px margin
+    boxes = torch.tensor([[0., 0., 8., 8.]])
+    out, out_boxes, labels = copy_paste(image, boxes, torch.tensor([1]), donor, torch.tensor([[10., 10., 20., 20.]]),
+                                        torch.tensor([1]), margin=1)
+    assert len(out_boxes) == 2 and labels.tolist() == [1, 1]
+    x1, y1, x2, y2 = out_boxes[1].long().tolist()
+    assert out[0, y1:y2, x1:x2].min() == 1.0 and out[0, y1 - 1, x1 - 1] == 0.5
+
+
+def test_copy_paste_draws_donors_of_the_same_class(course_data, preprocess):
+    dataset = SARMultiTask(course_data, 'train', preprocess, train=True, copy_paste=1.0)
+    torch.manual_seed(0)
+    for i in range(len(dataset)):
+        _, label, target = dataset[i]
+        assert (target['labels'] == label + 1).all()
+
+
+def test_drop_degenerate_boxes():
+    boxes = torch.tensor([[0., 0., 5., 5.], [3., 3., 3., 9.]])
+    kept, labels = drop_degenerate_boxes(boxes, torch.tensor([1, 2]))
+    assert kept.tolist() == [[0., 0., 5., 5.]] and labels.tolist() == [1]
+
+
+def test_unlabelled_split_and_preprocess_cache(course_data, preprocess, tmp_path):
+    dataset = SARImages(course_data / 'val' / 'images.json', preprocess, cache_dir=tmp_path / 'cache')
+    image, image_id, orig_size, file_name = dataset[1]
+    assert image.shape == (3, 512, 512) and (image_id, orig_size, file_name) == (2, (300, 400), 'images/00002.png')
+    assert len(list((tmp_path / 'cache').glob('*__fake.npy'))) == 1
+    assert torch.equal(dataset[1][0], image)  # second read: from the cache
